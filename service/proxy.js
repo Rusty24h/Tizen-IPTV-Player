@@ -20,6 +20,125 @@ var lastActiveMac = '';
 var memoryBackupJson = '';
 var activeVideoUpReq = null;
 var MAG_UA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
+var streamTelemetryMap = {};
+var latestStreamTelemetryKey = '';
+
+function getStreamKey(u) {
+    return String(u || '').split('?')[0];
+}
+
+function recordStreamTelemetry(key, u, data) {
+    var now = Date.now();
+    var entry = streamTelemetryMap[key];
+    if (!entry) {
+        entry = {
+            url: u,
+            startTs: now,
+            httpStatus: 0,
+            ttfbMs: null,
+            totalBytes: 0,
+            kbps: 0,
+            samples: [],
+            errorText: '',
+            videoCodec: '',
+            audioCodec: '',
+            active: true
+        };
+        streamTelemetryMap[key] = entry;
+    }
+    latestStreamTelemetryKey = key;
+    if (data) {
+        if (data.code) {
+            entry.httpStatus = data.code;
+        }
+        if (data.ttfb && !entry.ttfbMs) {
+            entry.ttfbMs = data.ttfb;
+        }
+        if (data.err) {
+            entry.errorText = data.err.message || String(data.err);
+        }
+        if (data.chunkLen) {
+            entry.totalBytes += data.chunkLen;
+            entry.samples.push({ ts: now, bytes: data.chunkLen });
+            var cutoff = now - 2500;
+            while (entry.samples.length > 0 && entry.samples[0].ts < cutoff) {
+                entry.samples.shift();
+            }
+            var sumBytes = 0;
+            for (var s = 0; s < entry.samples.length; s++) {
+                sumBytes += entry.samples[s].bytes;
+            }
+            entry.kbps = Math.round((sumBytes * 8) / 2.5);
+        }
+    }
+}
+
+function computeStreamDiagnosticVerdict(entry) {
+    if (!entry) {
+        return {
+            status: 'unknown',
+            label: 'NO ACTIVE STREAM',
+            reason: 'No stream has been opened yet.',
+            recommendation: 'Select a Live TV channel, movie, or episode to start diagnostics.'
+        };
+    }
+    var now = Date.now();
+    var elapsedMs = Math.max(0, now - entry.startTs);
+    var cutoff = now - 2500;
+    while (entry.samples.length > 0 && entry.samples[0].ts < cutoff) {
+        entry.samples.shift();
+    }
+    if (entry.samples.length === 0) {
+        entry.kbps = 0;
+    }
+
+    var code = Number(entry.httpStatus || 0);
+    if (code >= 400 || entry.errorText) {
+        var codeReason = 'Upstream server returned HTTP ' + code;
+        if (code === 401 || code === 403) {
+            codeReason += ' (Unauthorized / Token Expired / IP Locked)';
+        } else if (code === 404) {
+            codeReason += ' (Channel Offline / Stream Not Found on Provider)';
+        } else if (code === 458 || code === 429) {
+            codeReason += ' (Provider Connection Limit Reached — max_connections)';
+        } else if (code >= 500) {
+            codeReason += ' (Provider Upstream Server Error / Offline Event Feed)';
+        } else if (entry.errorText) {
+            codeReason = 'Upstream connection error: ' + entry.errorText;
+        }
+        return {
+            status: 'provider_error',
+            label: 'PROVIDER OFFLINE / ERROR',
+            reason: codeReason,
+            recommendation: 'This error comes directly from your IPTV provider server, not the player.'
+        };
+    }
+
+    if (entry.totalBytes === 0 && elapsedMs >= 3000) {
+        return {
+            status: 'provider_error',
+            label: 'PROVIDER IDLE (0 KB/s)',
+            reason: 'Connected to provider (' + (code ? 'HTTP ' + code : 'waiting') + '), but 0 bytes received after ' + (elapsedMs / 1000).toFixed(1) + 's. Event/VIP channel is likely off-air.',
+            recommendation: 'Channel has no active broadcast feed on the provider right now.'
+        };
+    }
+
+    if (elapsedMs >= 3500 && entry.kbps > 0 && entry.kbps < 350) {
+        return {
+            status: 'provider_slow',
+            label: 'PROVIDER CONGESTION (' + Math.round(entry.kbps / 8) + ' KB/s)',
+            reason: 'Upstream provider is sending data at only ' + Math.round(entry.kbps / 8) + ' KB/s (' + entry.kbps + ' kbps), which is too slow for smooth HD/4K playback.',
+            recommendation: 'Buffering is caused by slow upstream throughput from the IPTV provider server.'
+        };
+    }
+
+    return {
+        status: 'healthy',
+        label: 'STREAM HEALTHY',
+        reason: 'Receiving ' + Math.round(entry.kbps / 8) + ' KB/s (' + (entry.kbps / 1000).toFixed(1) + ' Mbps)' + (entry.ttfbMs ? ' • TTFB ' + entry.ttfbMs + 'ms' : '') + '.',
+        recommendation: 'Upstream provider connection and player pipeline are operating normally.'
+    };
+}
 
 if (http.globalAgent) {
     http.globalAgent.maxSockets = 64;
@@ -377,6 +496,9 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
         clientRes.end();
         return;
     }
+    var streamKey = getStreamKey(streamUrl);
+    var reqStartTs = Date.now();
+    recordStreamTelemetry(streamKey, streamUrl, { code: 0 });
     var target = url.parse(streamUrl);
     if (!target.hostname) {
         clientRes.writeHead(400);
@@ -416,6 +538,8 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
         headers: headers,
         rejectUnauthorized: false
     }, function(upRes) {
+        var ttfb = Date.now() - reqStartTs;
+        recordStreamTelemetry(streamKey, streamUrl, { code: upRes.statusCode, ttfb: ttfb });
         if (!isSegmentOrSubRequest) {
             activeVideoUpReq = upReq;
         }
@@ -433,7 +557,9 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
         if (isM3u8 && (upRes.statusCode === 200 || upRes.statusCode === 206)) {
             var m3u8Chunks = [];
             upRes.on('data', function(chunk) {
-                m3u8Chunks.push(Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk));
+                var cBuf = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
+                recordStreamTelemetry(streamKey, streamUrl, { chunkLen: cBuf.length });
+                m3u8Chunks.push(cBuf);
             });
             upRes.on('end', function() {
                 var rawBuf = Buffer.concat(m3u8Chunks);
@@ -476,9 +602,13 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
         }
 
         clientRes.writeHead(upRes.statusCode || 200, resHeaders);
+        upRes.on('data', function(chunk) {
+            recordStreamTelemetry(streamKey, streamUrl, { chunkLen: chunk.length });
+        });
         upRes.pipe(clientRes);
     });
-    upReq.on('error', function() {
+    upReq.on('error', function(e) {
+        recordStreamTelemetry(streamKey, streamUrl, { err: e });
         if (!clientRes.headersSent) {
             clientRes.writeHead(502);
         }
@@ -494,7 +624,7 @@ function startProxyServer(port) {
     if (server) {
         return server;
     }
-    var listenPort = port || PROXY_PORT;
+    var listenPort = (typeof port === 'number') ? port : PROXY_PORT;
     server = http.createServer(function(req, res) {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', '*');
@@ -618,6 +748,111 @@ function startProxyServer(port) {
             return;
         }
 
+        if (parsedUrl.pathname === '/stream-diag') {
+            var hasQueryUrl = Boolean(parsedUrl.query && parsedUrl.query.url);
+            var diagKey = hasQueryUrl ? getStreamKey(parsedUrl.query.url) : latestStreamTelemetryKey;
+            var tEntry = diagKey ? (streamTelemetryMap[diagKey] || null) : null;
+            var diagVerdict = computeStreamDiagnosticVerdict(tEntry);
+            var payload = {
+                url: tEntry ? tEntry.url : ((parsedUrl.query && parsedUrl.query.url) || ''),
+                httpStatus: tEntry ? tEntry.httpStatus : 0,
+                ttfbMs: tEntry ? tEntry.ttfbMs : null,
+                elapsedMs: tEntry ? Math.max(0, Date.now() - tEntry.startTs) : 0,
+                totalBytes: tEntry ? tEntry.totalBytes : 0,
+                kbps: tEntry ? tEntry.kbps : 0,
+                kBps: tEntry ? Math.round(tEntry.kbps / 8) : 0,
+                videoCodec: tEntry ? tEntry.videoCodec : '',
+                audioCodec: tEntry ? tEntry.audioCodec : '',
+                isTranscoding: false,
+                vTranscode: false,
+                hasFfmpeg: false,
+                active: tEntry ? tEntry.active : false,
+                verdict: diagVerdict
+            };
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify(payload));
+            return;
+        }
+
+        if ((parsedUrl.pathname === '/xtream' || parsedUrl.pathname === '/m3u') && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
+            var rawTargetUrl = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
+            var isM3uRoute = (parsedUrl.pathname === '/m3u');
+            (function fetchRemoteWithRedirects(targetUrlStr, redirectsLeft) {
+                if (redirectsLeft <= 0) {
+                    res.writeHead(502, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Too many redirects' }));
+                    return;
+                }
+                var parsedTarget = url.parse(targetUrlStr);
+                if (!parsedTarget.hostname) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid target URL' }));
+                    return;
+                }
+                var isHttpsTarget = parsedTarget.protocol === 'https:';
+                var hClient = isHttpsTarget ? https : http;
+                var rReq = hClient.request({
+                    hostname: parsedTarget.hostname,
+                    port: parsedTarget.port || (isHttpsTarget ? 443 : 80),
+                    path: parsedTarget.path,
+                    method: 'GET',
+                    headers: {
+                        'User-Agent': MAG_UA,
+                        'Accept': '*/*',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'Host': parsedTarget.host
+                    },
+                    agent: isHttpsTarget ? httpsAgent : httpAgent,
+                    timeout: 20000,
+                    rejectUnauthorized: false
+                }, function(rRes) {
+                    if ([301, 302, 303, 307, 308].indexOf(rRes.statusCode) !== -1 && rRes.headers.location) {
+                        rRes.resume();
+                        fetchRemoteWithRedirects(url.resolve(targetUrlStr, rRes.headers.location), redirectsLeft - 1);
+                        return;
+                    }
+                    var stream = rRes;
+                    var enc = String(rRes.headers['content-encoding'] || '').toLowerCase();
+                    if (enc === 'gzip') {
+                        stream = rRes.pipe(zlib.createGunzip());
+                    } else if (enc === 'deflate') {
+                        stream = rRes.pipe(zlib.createInflate());
+                    }
+                    var rChunks = [];
+                    var totalLen = 0;
+                    stream.on('data', function(c) {
+                        totalLen += c.length;
+                        if (totalLen <= 67108864) {
+                            rChunks.push(c);
+                        }
+                    });
+                    stream.on('end', function() {
+                        var bodyBuf = Buffer.concat(rChunks);
+                        res.writeHead(rRes.statusCode || 200, {
+                            'Content-Type': isM3uRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
+                            'Cache-Control': 'no-store'
+                        });
+                        res.end(bodyBuf);
+                    });
+                    stream.on('error', function(zErr) {
+                        res.writeHead(502, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: zErr.message }));
+                    });
+                });
+                rReq.on('error', function(eReq) {
+                    res.writeHead(502, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: eReq.message }));
+                });
+                rReq.on('timeout', function() {
+                    rReq.abort();
+                    res.writeHead(504, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Upstream timeout' }));
+                });
+                rReq.end();
+            })(rawTargetUrl, 5);
+            return;
+        }
+
         var rawPortal = req.headers['x-stalker-portal'];
         var rawMac = req.headers['x-stalker-mac'];
         var rawToken = req.headers['x-stalker-token'];
@@ -688,6 +923,9 @@ function stopProxyServer(cb) {
     }
     var s = server;
     server = null;
+    if (typeof s.closeAllConnections === 'function') {
+        s.closeAllConnections();
+    }
     s.close(function() {
         if (cb) {
             cb();
