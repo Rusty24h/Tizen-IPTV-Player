@@ -22,7 +22,7 @@
     var catIdx = 0;
     var itemIdx = 0;
     var infoActionIdx = 0;
-    var activeCol = 'modes';
+    var activeCol = 'cats';
     var liveGenres = [];
     var allChannels = [];
     var vodCats = [];
@@ -38,10 +38,15 @@
     var vodLoading = false;
     var vodHasMore = true;
     var liveGenrePaged = false;
+    var liveCatalogLoading = false;
+    var loadedCatSignature = '';
+    var catHoverTimer = null;
     var seriesStack = [];
     var isPlayingVod = false;
     var isPlayingCatchup = false;
     var isPaused = false;
+    var isPlaybackHealthy = false;
+    var hasActivePlaybackError = false;
     var currentPlayingItem = null;
     var previousLiveChannel = null;
     var retryCount = 0;
@@ -71,6 +76,7 @@
     var exitConfirmPending = false;
     var exitConfirmTimeout = null;
     var hasAutoResumedOnBoot = false;
+    var userInteractedSinceBoot = false;
     var shortEpgCache = {};
     var shortEpgKeys = [];
     var fullEpgCache = {};
@@ -221,8 +227,27 @@
     var settingsModal = document.getElementById('settings-modal');
     var selProfileEl = document.getElementById('sel-profile');
     var inpProfileNameEl = document.getElementById('inp-profile-name');
+    var selProviderTypeEl = document.getElementById('sel-provider-type');
+    var providerFieldsStalkerEl = document.getElementById('provider-fields-stalker');
+    var providerFieldsXtreamEl = document.getElementById('provider-fields-xtream');
+    var providerFieldsM3uEl = document.getElementById('provider-fields-m3u');
     var inpPortalEl = document.getElementById('inp-portal');
     var inpMacEl = document.getElementById('inp-mac');
+    var inpXtreamUrlEl = document.getElementById('inp-xtream-url');
+    var inpXtreamUserEl = document.getElementById('inp-xtream-user');
+    var inpXtreamPassEl = document.getElementById('inp-xtream-pass');
+    var inpM3uUrlEl = document.getElementById('inp-m3u-url');
+    var btnM3uFileEl = document.getElementById('btn-m3u-file');
+    var m3uFileStatusEl = document.getElementById('m3u-file-status');
+    var inpM3uFileHiddenEl = document.getElementById('inp-m3u-file-hidden');
+    if (!inpM3uFileHiddenEl) {
+        inpM3uFileHiddenEl = document.createElement('input');
+        inpM3uFileHiddenEl.id = 'inp-m3u-file-hidden';
+        inpM3uFileHiddenEl.type = 'file';
+        inpM3uFileHiddenEl.accept = '.m3u,.m3u8,audio/x-mpegurl,application/vnd.apple.mpegurl,text/plain';
+        inpM3uFileHiddenEl.style.display = 'none';
+        document.body.appendChild(inpM3uFileHiddenEl);
+    }
     var selThemeEl = document.getElementById('sel-theme');
     var inpPinEl = document.getElementById('inp-pin');
     var btnSaveEl = document.getElementById('btn-save');
@@ -232,6 +257,7 @@
     var btnCancelEl = document.getElementById('btn-cancel');
     var btnBackupExportEl = document.getElementById('btn-backup-export');
     var btnBackupImportEl = document.getElementById('btn-backup-import');
+    var m3uRawMemoryCache = {};
 
     if (!subtitleBoxEl) {
         subtitleBoxEl = document.createElement('div');
@@ -268,20 +294,86 @@
         btnCancelEl.parentNode.parentNode.appendChild(backupRow);
     }
 
-    var settingsGrid = [
-        [selProfileEl, inpProfileNameEl].filter(Boolean),
-        [inpPortalEl].filter(Boolean),
-        [inpMacEl].filter(Boolean),
-        [selThemeEl, inpPinEl].filter(Boolean),
-        [btnSaveEl, btnProfileNewEl, btnProfileDelEl, btnCancelEl].filter(Boolean),
-        [btnBackupExportEl, btnBackupImportEl, btnRestartEl].filter(Boolean)
-    ].filter(function(r) { return r.length > 0; });
+    var tabProvStalkerEl = document.getElementById('tab-prov-stalker');
+    var tabProvXtreamEl = document.getElementById('tab-prov-xtream');
+    var tabProvM3uEl = document.getElementById('tab-prov-m3u');
+    var settingsActiveTypePillEl = document.getElementById('settings-active-type-pill');
+    var btnXtreamPassToggleEl = document.getElementById('btn-xtream-pass-toggle');
+    var btnM3uClearEl = document.getElementById('btn-m3u-clear');
 
+    var settingsGrid = [];
     var settingsEls = [
-        selProfileEl, inpProfileNameEl, inpPortalEl, inpMacEl,
+        selProfileEl, inpProfileNameEl, selProviderTypeEl,
+        tabProvStalkerEl, tabProvXtreamEl, tabProvM3uEl,
+        inpPortalEl, inpMacEl,
+        inpXtreamUrlEl, inpXtreamUserEl, inpXtreamPassEl,
+        inpM3uUrlEl, btnM3uFileEl, btnM3uClearEl,
         selThemeEl, inpPinEl, btnSaveEl, btnProfileNewEl, btnProfileDelEl,
         btnRestartEl, btnCancelEl, btnBackupExportEl, btnBackupImportEl
     ].filter(Boolean);
+
+    function syncProviderTypeVisuals(pType) {
+        if (selProviderTypeEl) {
+            selProviderTypeEl.value = pType;
+        }
+        if (tabProvStalkerEl) {
+            tabProvStalkerEl.classList.toggle('active', pType === 'stalker');
+        }
+        if (tabProvXtreamEl) {
+            tabProvXtreamEl.classList.toggle('active', pType === 'xtream');
+        }
+        if (tabProvM3uEl) {
+            tabProvM3uEl.classList.toggle('active', pType === 'm3u');
+        }
+        if (settingsActiveTypePillEl) {
+            settingsActiveTypePillEl.textContent = (pType === 'xtream') ? 'Xtream Codes API' : ((pType === 'm3u') ? 'M3U Playlist' : 'Stalker MAC');
+        }
+    }
+
+    function rebuildSettingsGrid(providerType) {
+        var pType = (providerType === 'xtream' || providerType === 'm3u') ? providerType : 'stalker';
+        syncProviderTypeVisuals(pType);
+        if (providerFieldsStalkerEl) {
+            providerFieldsStalkerEl.style.display = (pType === 'stalker') ? 'block' : 'none';
+        }
+        if (providerFieldsXtreamEl) {
+            providerFieldsXtreamEl.style.display = (pType === 'xtream') ? 'block' : 'none';
+        }
+        if (providerFieldsM3uEl) {
+            providerFieldsM3uEl.style.display = (pType === 'm3u') ? 'block' : 'none';
+        }
+        var provRow = [];
+        if (tabProvStalkerEl && tabProvXtreamEl && tabProvM3uEl) {
+            provRow = [tabProvStalkerEl, tabProvXtreamEl, tabProvM3uEl];
+        } else if (selProviderTypeEl) {
+            provRow = [selProviderTypeEl];
+        }
+        var rows = [
+            [selProfileEl, inpProfileNameEl].filter(Boolean),
+            provRow
+        ];
+        if (pType === 'xtream') {
+            rows.push([inpXtreamUrlEl].filter(Boolean));
+            rows.push([inpXtreamUserEl, inpXtreamPassEl].filter(Boolean));
+        } else if (pType === 'm3u') {
+            rows.push([inpM3uUrlEl].filter(Boolean));
+            rows.push([btnM3uFileEl, btnM3uClearEl].filter(Boolean));
+        } else {
+            rows.push([inpPortalEl].filter(Boolean));
+            rows.push([inpMacEl].filter(Boolean));
+        }
+        rows.push([selThemeEl, inpPinEl].filter(Boolean));
+        rows.push([btnSaveEl, btnProfileNewEl, btnProfileDelEl, btnCancelEl].filter(Boolean));
+        rows.push([btnBackupExportEl, btnBackupImportEl, btnRestartEl].filter(Boolean));
+        settingsGrid = rows.filter(function(r) { return r.length > 0; });
+        if (settingsRow >= settingsGrid.length) {
+            settingsRow = Math.max(0, settingsGrid.length - 1);
+        }
+        if (settingsGrid[settingsRow] && settingsCol >= settingsGrid[settingsRow].length) {
+            settingsCol = Math.max(0, settingsGrid[settingsRow].length - 1);
+        }
+    }
+    rebuildSettingsGrid('stalker');
 
     var pinModalEl = document.getElementById('pin-modal');
     var inpPinVerifyEl = document.getElementById('inp-pin-verify');
@@ -508,8 +600,24 @@
         var legacyPortal = localStorage.getItem('cfg_portal') || '';
         var legacyMac = localStorage.getItem('cfg_mac') || '00:1A:79:00:00:01';
         if (!Array.isArray(saved) || saved.length === 0) {
-            saved = [{ id: 'prof_default', name: 'Main Portal', portal: legacyPortal, mac: legacyMac }];
+            saved = [{
+                id: 'prof_default',
+                name: 'Main Portal',
+                type: 'stalker',
+                portal: legacyPortal,
+                mac: legacyMac,
+                xtreamUrl: '',
+                xtreamUser: '',
+                xtreamPass: '',
+                m3uUrl: '',
+                m3uName: ''
+            }];
             safeSetStorage('cfg_profiles', JSON.stringify(saved));
+        }
+        for (var p = 0; p < saved.length; p++) {
+            if (!saved[p].type) {
+                saved[p].type = 'stalker';
+            }
         }
         profiles = saved;
         var activeId = localStorage.getItem('cfg_active_profile');
@@ -532,12 +640,19 @@
             return;
         }
         activeProfileId = prof.id;
+        var pType = (prof.type === 'xtream' || prof.type === 'm3u') ? prof.type : 'stalker';
         safeSetStorage('cfg_active_profile', prof.id);
+        safeSetStorage('cfg_provider_type', pType);
         safeSetStorage('cfg_portal', prof.portal || '');
         safeSetStorage('cfg_mac', prof.mac || '');
+        safeSetStorage('cfg_xtream_url', prof.xtreamUrl || '');
+        safeSetStorage('cfg_xtream_user', prof.xtreamUser || '');
+        safeSetStorage('cfg_xtream_pass', prof.xtreamPass || '');
+        safeSetStorage('cfg_m3u_url', prof.m3uUrl || '');
         if (profileBadgeEl) {
-            profileBadgeEl.textContent = '⚡ ' + (prof.name || 'Default');
-            profileBadgeEl.title = 'Click to open Portal & Profile Settings';
+            var typeTag = pType === 'xtream' ? ' [XC]' : ((pType === 'm3u') ? ' [M3U]' : '');
+            profileBadgeEl.textContent = '⚡ ' + (prof.name || 'Default') + typeTag;
+            profileBadgeEl.title = 'Click to open Portal & Playlist Profile Settings';
         }
     }
     function getActiveProfile() {
@@ -546,7 +661,28 @@
                 return profiles[i];
             }
         }
-        return profiles[0] || { id: 'prof_default', name: 'Main Portal', portal: '', mac: '' };
+        return profiles[0] || { id: 'prof_default', name: 'Main Portal', type: 'stalker', portal: '', mac: '' };
+    }
+    function isProfileConfigured(prof) {
+        if (!prof) {
+            return false;
+        }
+        var pType = (prof.type === 'xtream' || prof.type === 'm3u') ? prof.type : 'stalker';
+        if (pType === 'xtream') {
+            var xUrl = String(prof.xtreamUrl || '').trim();
+            var xUser = String(prof.xtreamUser || '').trim();
+            var xPass = String(prof.xtreamPass || '').trim();
+            return Boolean(xUrl && xUrl !== 'http://' && xUrl !== 'https://' && xUser && xPass);
+        }
+        if (pType === 'm3u') {
+            var mUrl = String(prof.m3uUrl || '').trim();
+            var hasValidRemoteM3u = Boolean(mUrl && /^https?:\/\/.+/i.test(mUrl));
+            var hasLocal = Boolean(m3uRawMemoryCache[prof.id] || localStorage.getItem('m3u_raw_' + prof.id) || prof.m3uFileName);
+            return Boolean(hasValidRemoteM3u || hasLocal);
+        }
+        var sPortal = String(prof.portal || '').trim();
+        var sMac = String(prof.mac || '').trim();
+        return Boolean(sPortal && sPortal !== 'http://' && sPortal !== 'https://' && sMac);
     }
 
     function getDeviceTimezone() {
@@ -583,6 +719,10 @@
         return { sn: sn, device_id: devId, device_id2: devId2, signature: sig };
     }
     function getPortalBaseUrl() {
+        var activeProf = getActiveProfile();
+        if (activeProf && activeProf.type === 'xtream') {
+            return normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
+        }
         var portal = (localStorage.getItem('cfg_portal') || '').trim().replace(/\/+$/, '');
         if (!portal) {
             return '';
@@ -591,6 +731,336 @@
             portal = 'http://' + portal;
         }
         return portal.replace(/\/(portal|load)\.php.*$/i, '').replace(/\/c$/i, '');
+    }
+
+    function normalizeXtreamServerUrl(rawUrl) {
+        var clean = String(rawUrl || '').trim().replace(/\/+$/, '');
+        if (!clean) {
+            return '';
+        }
+        if (clean.indexOf('http://') !== 0 && clean.indexOf('https://') !== 0) {
+            clean = 'http://' + clean;
+        }
+        return clean.replace(/\/player_api\.php.*$/i, '').replace(/\/get\.php.*$/i, '').replace(/\/+$/, '');
+    }
+
+    function buildXtreamDirectStreamUrl(baseUrl, username, password, kind, streamId, ext) {
+        var base = normalizeXtreamServerUrl(baseUrl);
+        var user = encodeURIComponent(String(username || '').trim());
+        var pass = encodeURIComponent(String(password || '').trim());
+        var id = String(streamId || '').trim();
+        var cleanExt = String(ext || (kind === 'live' ? 'ts' : 'mp4')).trim().replace(/^\.+/, '');
+        if (kind === 'live') {
+            return base + '/live/' + user + '/' + pass + '/' + id + '.' + (cleanExt || 'ts');
+        }
+        if (kind === 'movie') {
+            return base + '/movie/' + user + '/' + pass + '/' + id + '.' + (cleanExt || 'mp4');
+        }
+        return base + '/series/' + user + '/' + pass + '/' + id + '.' + (cleanExt || 'mp4');
+    }
+
+    function decodeXtreamBase64Text(input) {
+        var str = String(input || '').trim();
+        if (!str || str.indexOf(' ') !== -1 || str.length < 4 || (str.length % 4) !== 0) {
+            return str;
+        }
+        if (!/^[A-Za-z0-9+\/]+={0,2}$/.test(str)) {
+            return str;
+        }
+        try {
+            var raw = window.atob(str);
+            var hexPct = '';
+            for (var i = 0; i < raw.length; i++) {
+                var hex = raw.charCodeAt(i).toString(16);
+                hexPct += '%' + (hex.length < 2 ? '0' : '') + hex;
+            }
+            var out = '';
+            try {
+                out = decodeURIComponent(hexPct);
+            } catch (eUtf) {
+                out = raw;
+            }
+            if (/[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(out)) {
+                return str;
+            }
+            return out;
+        } catch (ex) {
+            return str;
+        }
+    }
+
+    function parseM3uAttributesMap(attrLine) {
+        var attrs = {};
+        var regex = /([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
+        var match;
+        while ((match = regex.exec(attrLine)) !== null) {
+            var key = match[1].toLowerCase();
+            var val = match[2] !== undefined ? match[2] : (match[3] !== undefined ? match[3] : (match[4] || ''));
+            attrs[key] = val.trim();
+        }
+        return attrs;
+    }
+
+    function parseM3uPlaylistCatalog(rawText) {
+        var lines = String(rawText || '').split(/\r?\n/);
+        var liveGenresList = [];
+        var liveGenresSeen = {};
+        var vodCatsList = [];
+        var vodCatsSeen = {};
+        var seriesCatsList = [];
+        var seriesCatsSeen = {};
+        var liveChannels = [];
+        var vodItems = [];
+        var seriesGroupsMap = {};
+        var seriesGroupsKeys = [];
+        var pendingInf = null;
+        var currentExtGrp = '';
+
+        var seriesRe1 = /^(.*?)\s*[-–:|]?\s*\bS(\d{1,2})\s*E(\d{1,3})\b\s*[-–:|]?\s*(.*)$/i;
+        var seriesRe2 = /^(.*?)\s*[-–:|]?\s*\bSeason\s*(\d{1,2})\s*Episode\s*(\d{1,3})\b\s*[-–:|]?\s*(.*)$/i;
+        var seriesRe3 = /^(.*?)\s*[-–:|]?\s*\b(\d{1,2})x(\d{2,3})\b\s*[-–:|]?\s*(.*)$/i;
+        var adultRe = /adult|xxx|18\+|18\||for adults|erotic|porn/i;
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            if (!line) {
+                continue;
+            }
+            if (line.indexOf('#EXTINF:') === 0) {
+                var inQuotes = false;
+                var commaIdx = -1;
+                for (var c = 8; c < line.length; c++) {
+                    var ch = line.charAt(c);
+                    if (ch === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (ch === ',' && !inQuotes) {
+                        commaIdx = c;
+                        break;
+                    }
+                }
+                var attrPart = commaIdx !== -1 ? line.slice(8, commaIdx) : line.slice(8);
+                var rawTitle = commaIdx !== -1 ? line.slice(commaIdx + 1).trim() : '';
+                var attrs = parseM3uAttributesMap(attrPart);
+                var title = rawTitle || attrs['tvg-name'] || 'Untitled Stream';
+                var grpTitle = attrs['group-title'] || currentExtGrp || 'General';
+                pendingInf = { title: title, attrs: attrs, groupTitle: grpTitle };
+                continue;
+            }
+            if (line.indexOf('#EXTGRP:') === 0) {
+                currentExtGrp = line.slice(8).trim();
+                if (pendingInf && (!pendingInf.groupTitle || pendingInf.groupTitle === 'General') && currentExtGrp) {
+                    pendingInf.groupTitle = currentExtGrp;
+                }
+                continue;
+            }
+            if (line.charAt(0) === '#') {
+                continue;
+            }
+            if (!/^(https?|rtmp|rtsp|mms):\/\//i.test(line)) {
+                continue;
+            }
+            var streamUrl = line;
+            var info = pendingInf || {
+                title: 'Channel ' + (liveChannels.length + 1),
+                attrs: {},
+                groupTitle: currentExtGrp || 'General'
+            };
+            pendingInf = null;
+
+            var groupTitle = String(info.groupTitle || 'General').trim() || 'General';
+            var logo = info.attrs['tvg-logo'] || info.attrs.logo || '';
+            var tvgId = info.attrs['tvg-id'] || '';
+            var catchupDays = Number(info.attrs['catchup-days'] || info.attrs['tvg-rec'] || 0);
+            var catchupSource = info.attrs['catchup-source'] || '';
+            var hasCatchup = Boolean(info.attrs.catchup || catchupDays > 0 || catchupSource);
+            var isCensored = adultRe.test(groupTitle) || adultRe.test(info.title);
+
+            var epMatch = info.title.match(seriesRe1) || info.title.match(seriesRe2) || info.title.match(seriesRe3);
+            var isSeriesPath = /\/series\//i.test(streamUrl) || /\b(?:series|tv\s*shows?)\b/i.test(groupTitle);
+
+            if (epMatch && epMatch[1] && epMatch[1].trim().length > 0) {
+                var seriesTitle = epMatch[1].trim();
+                var seasonNum = parseInt(epMatch[2], 10) || 1;
+                var epNum = parseInt(epMatch[3], 10) || 1;
+                var epSubTitle = String(epMatch[4] || '').trim();
+                var sCatId = 'm3u_scat_' + groupTitle.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                if (!seriesCatsSeen[sCatId]) {
+                    seriesCatsSeen[sCatId] = true;
+                    seriesCatsList.push({ id: sCatId, title: groupTitle, censored: adultRe.test(groupTitle) });
+                }
+                var seriesKey = sCatId + '__' + seriesTitle.toLowerCase();
+                if (!seriesGroupsMap[seriesKey]) {
+                    var seriesId = 'm3u_ser_' + (seriesGroupsKeys.length + 1);
+                    var seriesItem = {
+                        id: seriesId,
+                        name: seriesTitle,
+                        cmd: streamUrl,
+                        directUrl: true,
+                        genreId: sCatId,
+                        poster: logo,
+                        logo: logo,
+                        desc: groupTitle,
+                        censored: isCensored ? 1 : 0,
+                        isVod: true,
+                        isSeries: true,
+                        streamType: 'series',
+                        seasons: []
+                    };
+                    seriesGroupsMap[seriesKey] = { seriesItem: seriesItem, seasonsMap: {} };
+                    seriesGroupsKeys.push(seriesKey);
+                }
+                var grp = seriesGroupsMap[seriesKey];
+                var sKey = String(seasonNum);
+                if (!grp.seasonsMap[sKey]) {
+                    var seasonObj = {
+                        id: sKey,
+                        name: 'Season ' + seasonNum,
+                        cmd: streamUrl,
+                        desc: seriesTitle + ' — Season ' + seasonNum,
+                        poster: logo || grp.seriesItem.poster || '',
+                        episodes: [],
+                        parentSeries: grp.seriesItem,
+                        isSeason: true,
+                        isVod: true,
+                        isSeries: true,
+                        streamType: 'series'
+                    };
+                    grp.seasonsMap[sKey] = seasonObj;
+                    grp.seriesItem.seasons.push(seasonObj);
+                }
+                grp.seasonsMap[sKey].episodes.push({
+                    id: grp.seriesItem.id + '_s' + seasonNum + '_e' + epNum + '_' + (grp.seasonsMap[sKey].episodes.length + 1),
+                    name: epSubTitle ? ('E' + epNum + ' - ' + epSubTitle) : ('Episode ' + epNum),
+                    cmd: streamUrl,
+                    directUrl: true,
+                    useTmpLink: 0,
+                    genreId: sCatId,
+                    poster: logo || grp.seriesItem.poster || '',
+                    logo: logo || grp.seriesItem.poster || '',
+                    desc: seriesTitle + ' • Season ' + seasonNum + ', Episode ' + epNum,
+                    seriesNum: epNum,
+                    censored: isCensored ? 1 : 0,
+                    isEpisode: true,
+                    isVod: true,
+                    isSeries: true,
+                    streamType: 'series'
+                });
+                continue;
+            }
+
+            var isMoviePath = /\/movie\//i.test(streamUrl) || /\b(?:vod|movies?|cinema|films?)\b/i.test(groupTitle);
+            var isVideoFile = /\.(mp4|mkv|avi|mov|wmv|m4v|flv)($|\?)/i.test(streamUrl);
+
+            if (isMoviePath || (isVideoFile && !isSeriesPath)) {
+                var vCatId = 'm3u_vcat_' + groupTitle.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                if (!vodCatsSeen[vCatId]) {
+                    vodCatsSeen[vCatId] = true;
+                    vodCatsList.push({ id: vCatId, title: groupTitle, censored: adultRe.test(groupTitle) });
+                }
+                var vodYearMatch = info.title.match(/\((\d{4})\)/);
+                vodItems.push({
+                    id: 'm3u_vod_' + (vodItems.length + 1),
+                    name: info.title,
+                    cmd: streamUrl,
+                    directUrl: true,
+                    useTmpLink: 0,
+                    genreId: vCatId,
+                    poster: logo,
+                    logo: logo,
+                    desc: groupTitle,
+                    year: vodYearMatch ? vodYearMatch[1] : '',
+                    censored: isCensored ? 1 : 0,
+                    isVod: true,
+                    isSeries: false
+                });
+                continue;
+            }
+
+            var lGenreId = 'm3u_live_' + groupTitle.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+            if (!liveGenresSeen[lGenreId]) {
+                liveGenresSeen[lGenreId] = true;
+                liveGenresList.push({
+                    id: lGenreId,
+                    title: groupTitle,
+                    censored: adultRe.test(groupTitle) ? 1 : 0
+                });
+            }
+            liveChannels.push({
+                id: 'm3u_ch_' + (liveChannels.length + 1),
+                num: liveChannels.length + 1,
+                name: info.title,
+                cmd: streamUrl,
+                directUrl: true,
+                useTmpLink: 0,
+                genreId: lGenreId,
+                logo: logo,
+                epgChannelId: tvgId,
+                archive: hasCatchup ? 1 : 0,
+                archiveDuration: catchupDays > 0 ? (catchupDays * 24) : (hasCatchup ? 72 : 0),
+                catchupSource: catchupSource,
+                censored: isCensored ? 1 : 0,
+                isVod: false,
+                isSeries: false
+            });
+        }
+
+        var seriesItems = [];
+        for (var sk = 0; sk < seriesGroupsKeys.length; sk++) {
+            var gEntry = seriesGroupsMap[seriesGroupsKeys[sk]];
+            gEntry.seriesItem.seasons.sort(function(a, b) { return Number(a.id) - Number(b.id); });
+            for (var sn = 0; sn < gEntry.seriesItem.seasons.length; sn++) {
+                gEntry.seriesItem.seasons[sn].episodes.sort(function(a, b) { return (a.seriesNum || 0) - (b.seriesNum || 0); });
+            }
+            seriesItems.push(gEntry.seriesItem);
+        }
+
+        return {
+            liveGenres: liveGenresList,
+            liveChannels: liveChannels,
+            vodCategories: [
+                { id: '*', title: 'All Movies', censored: false },
+                { id: 'cont', title: '▶ Continue Watching', censored: false },
+                { id: 'fav', title: '★ Favorites', censored: false },
+                { id: 'rec', title: '⏱ History', censored: false }
+            ].concat(vodCatsList),
+            vodItems: vodItems,
+            seriesCategories: [
+                { id: '*', title: 'All Series', censored: false },
+                { id: 'cont', title: '▶ Continue Watching', censored: false },
+                { id: 'fav', title: '★ Favorites', censored: false },
+                { id: 'rec', title: '⏱ History', censored: false }
+            ].concat(seriesCatsList),
+            seriesItems: seriesItems
+        };
+    }
+
+    function filterAndPaginateLocalList(allList, categoryId, page, searchQuery, sortBy) {
+        var list = Array.isArray(allList) ? allList : [];
+        var q = String(searchQuery || '').trim().toLowerCase();
+        var catId = String(categoryId || '*');
+        var filtered = [];
+        for (var i = 0; i < list.length; i++) {
+            var it = list[i];
+            if (!it) {
+                continue;
+            }
+            if (catId !== '*' && String(it.genreId) !== catId) {
+                continue;
+            }
+            if (q && String(it.name || '').toLowerCase().indexOf(q) === -1) {
+                continue;
+            }
+            filtered.push(it);
+        }
+        if (sortBy === 'title_asc') {
+            filtered.sort(function(a, b) { return String(a.name || '').localeCompare(String(b.name || '')); });
+        } else if (sortBy === 'title_desc') {
+            filtered.sort(function(a, b) { return String(b.name || '').localeCompare(String(a.name || '')); });
+        }
+        var p = Math.max(1, Number(page) || 1);
+        var pageSize = 50;
+        var startIdx = (p - 1) * pageSize;
+        return filtered.slice(startIdx, startIdx + pageSize);
     }
     function resolveLogoUrl(rawLogo) {
         if (!rawLogo) {
@@ -625,6 +1095,12 @@
             serviceBannerEl.classList.remove('visible');
         }
     }
+    function proxyFetch(url, opts) {
+        if (typeof window !== 'undefined' && typeof window.__tizenSimFetch === 'function') {
+            return window.__tizenSimFetch(url, opts);
+        }
+        return fetch(url, opts);
+    }
     function pingProxyCandidate(baseUrl) {
         return new Promise(function(resolve) {
             var controller = (typeof window !== 'undefined' && typeof window.AbortController !== 'undefined') ? new window.AbortController() : null;
@@ -633,8 +1109,8 @@
                     controller.abort();
                 }
                 resolve(false);
-            }, 900);
-            fetch(baseUrl + '/health', {
+            }, 450);
+            proxyFetch(baseUrl + '/health', {
                 method: 'GET',
                 headers: { 'x-stalker-ping': '1' },
                 signal: controller ? controller.signal : undefined
@@ -666,7 +1142,7 @@
                     }
                     if (attempts < limit) {
                         return new Promise(function(r) {
-                            setTimeout(r, 280);
+                            setTimeout(r, 150);
                         }).then(tryNext);
                     }
                     showServiceBanner('Warning: Local proxy service (' + SERVICE_ID + ') is not responding.');
@@ -702,7 +1178,9 @@
         var firstCmdObj = (Array.isArray(c.cmds) && c.cmds.length > 0 && c.cmds[0]) ? c.cmds[0] : null;
         var rawCmd = String(c.cmd || (firstCmdObj && (firstCmdObj.url || firstCmdObj.cmd)) || '').trim();
         var useTmp = String(c.use_http_tmp_link) === '1' ||
-            (firstCmdObj && String(firstCmdObj.use_http_tmp_link) === '1');
+            (firstCmdObj && String(firstCmdObj.use_http_tmp_link) === '1') ||
+            /^(?:ffrt\d*|ffmpeg|auto|solution)\s+/i.test(rawCmd) ||
+            rawCmd.indexOf('/ch/') !== -1;
         return {
             id: String(c.id || defaultIdx),
             num: Number(c.number) || defaultIdx,
@@ -746,6 +1224,40 @@
         }
     }
 
+    function updateAccountBadgeFromXtream(userInfo) {
+        if (!accountBadgeEl) {
+            return;
+        }
+        if (!userInfo || typeof userInfo !== 'object') {
+            accountBadgeEl.textContent = '✓ Xtream Active';
+            accountBadgeEl.classList.remove('warn');
+            return;
+        }
+        var expDate = userInfo.exp_date;
+        if (expDate && String(expDate) !== 'null' && String(expDate) !== '0') {
+            var sec = Number(expDate);
+            if (!isNaN(sec) && sec > 1000000000) {
+                var d = new Date(sec * 1000);
+                var yyyy = d.getFullYear();
+                var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+                var dd = ('0' + d.getDate()).slice(-2);
+                accountInfoText = 'Exp: ' + yyyy + '-' + mm + '-' + dd;
+                accountBadgeEl.textContent = '📅 ' + accountInfoText;
+                accountBadgeEl.classList.remove('warn');
+                return;
+            }
+        }
+        if (expDate === null || String(expDate) === '0') {
+            accountInfoText = 'Exp: Unlimited';
+            accountBadgeEl.textContent = '📅 Exp: Unlimited';
+            accountBadgeEl.classList.remove('warn');
+            return;
+        }
+        accountInfoText = String(userInfo.username || 'Xtream Active');
+        accountBadgeEl.textContent = '✓ ' + accountInfoText;
+        accountBadgeEl.classList.remove('warn');
+    }
+
     function StalkerAPI(proxyUrl) {
         this.proxyUrl = proxyUrl;
         this.token = '';
@@ -754,7 +1266,132 @@
         this.seriesModule = null;
         this.handshakePromise = null;
         this.authPromise = null;
+        this.xtreamVodStreamsCache = null;
+        this.xtreamSeriesCache = null;
+        this.m3uCatalogCache = null;
     }
+    StalkerAPI.prototype.getProviderType = function() {
+        var prof = getActiveProfile();
+        if (prof && (prof.type === 'xtream' || prof.type === 'm3u')) {
+            return prof.type;
+        }
+        return 'stalker';
+    };
+    StalkerAPI.prototype.resetProviderCaches = function() {
+        this.xtreamVodStreamsCache = null;
+        this.xtreamSeriesCache = null;
+        this.m3uCatalogCache = null;
+    };
+    StalkerAPI.prototype.xtreamRequest = function(action, extraParams) {
+        var prof = getActiveProfile();
+        var baseUrl = normalizeXtreamServerUrl(prof.xtreamUrl || localStorage.getItem('cfg_xtream_url') || '');
+        var user = String(prof.xtreamUser || localStorage.getItem('cfg_xtream_user') || '').trim();
+        var pass = String(prof.xtreamPass || localStorage.getItem('cfg_xtream_pass') || '').trim();
+        if (!baseUrl || !user || !pass) {
+            return Promise.reject(new Error('Xtream Server URL, Username, or Password not configured'));
+        }
+        var qs = ['username=' + encodeURIComponent(user), 'password=' + encodeURIComponent(pass)];
+        if (action) {
+            qs.push('action=' + encodeURIComponent(action));
+        }
+        if (extraParams && typeof extraParams === 'object') {
+            var eKeys = Object.keys(extraParams);
+            for (var i = 0; i < eKeys.length; i++) {
+                var k = eKeys[i];
+                if (extraParams[k] !== undefined && extraParams[k] !== null) {
+                    qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(extraParams[k])));
+                }
+            }
+        }
+        var targetUrl = baseUrl + '/player_api.php?' + qs.join('&');
+        var proxiedUrl = this.proxyUrl + '/xtream?url=' + encodeURIComponent(targetUrl);
+        return proxyFetch(proxiedUrl, { method: 'GET' }).then(function(res) {
+            if (!res.ok) {
+                throw new Error('HTTP ' + res.status);
+            }
+            return res.json();
+        }).catch(function(err) {
+            return proxyFetch(targetUrl, { method: 'GET' }).then(function(res2) {
+                if (!res2.ok) {
+                    throw err;
+                }
+                return res2.json();
+            });
+        }).then(function(data) {
+            showServiceBanner('');
+            if (data && data.error) {
+                throw new Error(String(data.error));
+            }
+            return data;
+        });
+    };
+    StalkerAPI.prototype.ensureM3uCatalogLoaded = function(forceRefresh) {
+        var self = this;
+        var prof = getActiveProfile();
+        if (!forceRefresh && this.m3uCatalogCache && this.m3uCatalogCache.profileId === prof.id) {
+            return Promise.resolve(this.m3uCatalogCache.catalog);
+        }
+        var m3uUrl = String(prof.m3uUrl || localStorage.getItem('cfg_m3u_url') || '').trim();
+        var memRaw = m3uRawMemoryCache[prof.id] || localStorage.getItem('m3u_raw_' + prof.id) || '';
+
+        function parseAndStore(rawText) {
+            if (!rawText || rawText.indexOf('#EXT') === -1) {
+                throw new Error('Invalid or empty M3U playlist');
+            }
+            var parsed = parseM3uPlaylistCatalog(rawText);
+            self.m3uCatalogCache = {
+                profileId: prof.id,
+                catalog: parsed
+            };
+            var totalCount = parsed.liveChannels.length + parsed.vodItems.length + parsed.seriesItems.length;
+            accountInfoText = 'M3U (' + totalCount + ' items)';
+            if (accountBadgeEl) {
+                accountBadgeEl.textContent = '📋 ' + accountInfoText;
+                accountBadgeEl.classList.remove('warn');
+            }
+            showServiceBanner('');
+            return parsed;
+        }
+
+        if (memRaw && (!m3uUrl || m3uUrl.indexOf('local://') === 0)) {
+            return Promise.resolve().then(function() {
+                return parseAndStore(memRaw);
+            });
+        }
+        if (m3uUrl.indexOf('local://') === 0) {
+            return proxyFetch(this.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent('m3u_raw_' + prof.id), {
+                method: 'GET'
+            }).then(function(r) {
+                if (!r.ok) {
+                    throw new Error('Local M3U file not found in cache — please load the .M3U file again');
+                }
+                return r.json();
+            }).then(function(d) {
+                var raw = (d && d.rawText) ? d.rawText : '';
+                m3uRawMemoryCache[prof.id] = raw;
+                return parseAndStore(raw);
+            });
+        }
+        if (!m3uUrl) {
+            return Promise.reject(new Error('M3U Playlist URL or Local File not configured'));
+        }
+        var proxiedM3u = this.proxyUrl + '/m3u?url=' + encodeURIComponent(m3uUrl);
+        return proxyFetch(proxiedM3u, { method: 'GET' }).then(function(r) {
+            if (!r.ok) {
+                throw new Error('HTTP ' + r.status);
+            }
+            return r.text();
+        }).catch(function(err) {
+            return proxyFetch(m3uUrl, { method: 'GET' }).then(function(r2) {
+                if (!r2.ok) {
+                    throw err;
+                }
+                return r2.text();
+            });
+        }).then(function(rawText) {
+            return parseAndStore(rawText);
+        });
+    };
     StalkerAPI.prototype.request = function(params, isRetry) {
         var self = this;
         var portal = (localStorage.getItem('cfg_portal') || '').trim();
@@ -803,7 +1440,7 @@
         if (controller) {
             fetchOpts.signal = controller.signal;
         }
-        return fetch(this.proxyUrl + '/' + queryString, fetchOpts).then(function(res) {
+        return proxyFetch(this.proxyUrl + '/' + queryString, fetchOpts).then(function(res) {
             clearTimeout(timeoutId);
             if (!res.ok) {
                 throw new Error('HTTP ' + res.status);
@@ -898,6 +1535,18 @@
     };
     StalkerAPI.prototype.ensureAuthenticatedSession = function() {
         var self = this;
+        if (this.getProviderType() === 'xtream') {
+            return this.xtreamRequest('', null).then(function(data) {
+                if (data && data.user_info && String(data.user_info.auth) === '0') {
+                    throw new Error('Xtream Authentication Failed');
+                }
+                updateAccountBadgeFromXtream(data ? data.user_info : null);
+                return data;
+            });
+        }
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(false);
+        }
         if (this.authPromise) {
             return this.authPromise;
         }
@@ -918,6 +1567,10 @@
             clearInterval(this.watchdogTimer);
             this.watchdogTimer = null;
         }
+        var pType = this.getProviderType();
+        if (pType === 'xtream' || pType === 'm3u') {
+            return this.ensureAuthenticatedSession();
+        }
         return this.ensureAuthenticatedSession().then(function(profile) {
             self.watchdogTimer = setInterval(function() {
                 self.request({
@@ -935,6 +1588,14 @@
     StalkerAPI.prototype.fetchLiveCatalog = function(forceRefresh) {
         var self = this;
         var activeProf = getActiveProfile();
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(forceRefresh).then(function(cat) {
+                return {
+                    genres: self.getOrderedGenres(cat.liveGenres),
+                    channels: cat.liveChannels
+                };
+            });
+        }
         var cacheKey = 'stalker_live';
         function triggerBackgroundRefresh() {
             setTimeout(function() {
@@ -978,7 +1639,7 @@
                     channels: cached.channels
                 });
             }
-            return fetch(this.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
+            return proxyFetch(this.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
                 method: 'GET'
             }).then(function(r) {
                 if (!r.ok) {
@@ -1030,7 +1691,152 @@
     StalkerAPI.prototype.refreshLiveInBackground = function(isRetryAttempt) {
         var self = this;
         var activeProf = getActiveProfile();
-        var genresPromise = this.request({ type: 'itv', action: 'get_genres' }).catch(function() {
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(true).then(function(cat) {
+                return {
+                    genres: self.getOrderedGenres(cat.liveGenres),
+                    channels: cat.liveChannels
+                };
+            });
+        }
+        if (this.getProviderType() === 'xtream') {
+            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
+            var xUser = activeProf.xtreamUser || '';
+            var xPass = activeProf.xtreamPass || '';
+            var xCatsPromise = this.xtreamRequest('get_live_categories').then(function(catsArr) {
+                var list = Array.isArray(catsArr) ? catsArr : [];
+                var earlySlim = [];
+                for (var k = 0; k < list.length; k++) {
+                    var gc = list[k];
+                    if (!gc || gc.category_id === undefined) {
+                        continue;
+                    }
+                    var gTitle = String(gc.category_name || 'Category').trim();
+                    var gAdult = /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(gTitle);
+                    earlySlim.push({
+                        id: String(gc.category_id),
+                        title: gTitle,
+                        censored: gAdult ? 1 : 0
+                    });
+                }
+                if (earlySlim.length > 0 && liveGenres.length <= 3) {
+                    liveGenres = self.getOrderedGenres(earlySlim);
+                    if ((modes[modeIdx] && modes[modeIdx].id === 'live') || (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live')) {
+                        rawCats = liveGenres;
+                        applyColumnFilters();
+                        renderCats();
+                        if (catsHeaderEl) {
+                            catsHeaderEl.textContent = 'Categories (' + Math.max(0, currentCats.length - 3) + ')';
+                        }
+                    }
+                }
+                return list;
+            }).catch(function() { return []; });
+            return Promise.all([
+                xCatsPromise,
+                this.xtreamRequest('get_live_streams').catch(function() { return []; })
+            ]).then(function(xRes) {
+                var catsArr = Array.isArray(xRes[0]) ? xRes[0] : [];
+                var streamsArr = Array.isArray(xRes[1]) ? xRes[1] : [];
+                var slimGenres = [];
+                for (var i = 0; i < catsArr.length; i++) {
+                    var gc = catsArr[i];
+                    if (!gc || gc.category_id === undefined) {
+                        continue;
+                    }
+                    var gTitle = String(gc.category_name || 'Category').trim();
+                    var gAdult = /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(gTitle);
+                    slimGenres.push({
+                        id: String(gc.category_id),
+                        title: gTitle,
+                        censored: gAdult ? 1 : 0
+                    });
+                }
+                var slimChannels = [];
+                for (var j = 0; j < streamsArr.length; j++) {
+                    var st = streamsArr[j];
+                    if (!st || st.stream_id === undefined) {
+                        continue;
+                    }
+                    var stId = String(st.stream_id);
+                    var stName = String(st.name || ('Channel ' + (j + 1)));
+                    var hasArch = Number(st.tv_archive) === 1;
+                    var archDur = (Number(st.tv_archive_duration) || (hasArch ? 3 : 0)) * 24;
+                    var isAdultCh = String(st.is_adult) === '1' || /adult|xxx|18\+|18\||erotic|porn/i.test(stName);
+                    slimChannels.push({
+                        id: 'xt_live_' + stId,
+                        xtreamStreamId: stId,
+                        num: Number(st.num) || (j + 1),
+                        name: stName,
+                        cmd: buildXtreamDirectStreamUrl(xBase, xUser, xPass, 'live', stId, 'ts'),
+                        directUrl: true,
+                        useTmpLink: 0,
+                        genreId: String(st.category_id || '*'),
+                        logo: String(st.stream_icon || ''),
+                        archive: hasArch ? 1 : 0,
+                        archiveDuration: archDur,
+                        censored: isAdultCh ? 1 : 0,
+                        isVod: false,
+                        isSeries: false
+                    });
+                }
+                if (slimGenres.length > 0 && slimChannels.length > 0) {
+                    setTimeout(function() {
+                        try {
+                            var payloadStr = JSON.stringify({
+                                profileId: activeProf.id,
+                                updatedAt: Date.now(),
+                                genres: slimGenres,
+                                channels: slimChannels
+                            });
+                            if (slimChannels.length <= 6000) {
+                                safeSetStorage('stalker_live', payloadStr);
+                            }
+                            proxyFetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: payloadStr
+                            }).catch(function() {});
+                        } catch (eCache) {}
+                    }, 1500);
+                }
+                return {
+                    genres: self.getOrderedGenres(slimGenres),
+                    channels: slimChannels
+                };
+            });
+        }
+        var genresPromise = this.request({ type: 'itv', action: 'get_genres' }).then(function(gRes) {
+            var genresRaw = Array.isArray(gRes) ? gRes : (gRes && gRes.data ? gRes.data : []);
+            var earlySlim = [];
+            for (var k = 0; k < genresRaw.length; k++) {
+                var g = genresRaw[k];
+                if (g && g.id !== undefined && String(g.id) !== '*') {
+                    var title = String(g.title || g.name || 'Category').trim();
+                    if (!title) {
+                        continue;
+                    }
+                    var isAdult = String(g.censored || '0') === '1' || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title);
+                    earlySlim.push({
+                        id: String(g.id),
+                        title: title,
+                        censored: isAdult ? 1 : 0
+                    });
+                }
+            }
+            if (earlySlim.length > 0 && liveGenres.length <= 3) {
+                liveGenres = self.getOrderedGenres(earlySlim);
+                if ((modes[modeIdx] && modes[modeIdx].id === 'live') || (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live')) {
+                    rawCats = liveGenres;
+                    applyColumnFilters();
+                    renderCats();
+                    if (catsHeaderEl) {
+                        catsHeaderEl.textContent = 'Categories (' + Math.max(0, currentCats.length - 3) + ')';
+                    }
+                }
+            }
+            return gRes;
+        }).catch(function() {
             return [];
         });
         var channelsPromise = this.request({ type: 'itv', action: 'get_all_channels' }).catch(function() {
@@ -1081,7 +1887,7 @@
                         if (slimChannels.length <= 6000) {
                             safeSetStorage('stalker_live', cachePayloadStr);
                         }
-                        fetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
+                        proxyFetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: cachePayloadStr
@@ -1096,6 +1902,9 @@
         });
     };
     StalkerAPI.prototype.fetchLiveGenrePage = function(genreId, page) {
+        if (this.getProviderType() !== 'stalker') {
+            return Promise.resolve({ items: [], hasMore: false });
+        }
         var p = page || 1;
         return this.request({
             type: 'itv',
@@ -1133,6 +1942,35 @@
 
     StalkerAPI.prototype.fetchVodCategories = function(isRetryAttempt) {
         var self = this;
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(false).then(function(cat) {
+                return cat.vodCategories;
+            });
+        }
+        if (this.getProviderType() === 'xtream') {
+            return this.xtreamRequest('get_vod_categories').then(function(list) {
+                var arr = Array.isArray(list) ? list : [];
+                var out = [
+                    { id: '*', title: 'All Movies', censored: false },
+                    { id: 'cont', title: '▶ Continue Watching', censored: false },
+                    { id: 'fav', title: '★ Favorites', censored: false },
+                    { id: 'rec', title: '⏱ History', censored: false }
+                ];
+                for (var i = 0; i < arr.length; i++) {
+                    var c = arr[i];
+                    if (!c || c.category_id === undefined) {
+                        continue;
+                    }
+                    var title = String(c.category_name || 'Movies').trim();
+                    if (!title) {
+                        continue;
+                    }
+                    var isAdult = /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title);
+                    out.push({ id: String(c.category_id), title: title, censored: isAdult });
+                }
+                return out;
+            });
+        }
         return this.request({ type: 'vod', action: 'get_categories' }).then(function(res) {
             var list = Array.isArray(res) ? res : (res && Array.isArray(res.data) ? res.data : []);
             var out = [
@@ -1169,6 +2007,53 @@
         });
     };
     StalkerAPI.prototype.fetchVodPage = function(categoryId, page, searchQuery, sortBy) {
+        var self = this;
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(false).then(function(cat) {
+                return filterAndPaginateLocalList(cat.vodItems, categoryId, page, searchQuery, sortBy);
+            });
+        }
+        if (this.getProviderType() === 'xtream') {
+            var activeProf = getActiveProfile();
+            if (this.xtreamVodStreamsCache && this.xtreamVodStreamsCache.profileId === activeProf.id) {
+                return Promise.resolve(filterAndPaginateLocalList(this.xtreamVodStreamsCache.items, categoryId, page, searchQuery, sortBy));
+            }
+            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
+            var xUser = activeProf.xtreamUser || '';
+            var xPass = activeProf.xtreamPass || '';
+            return this.xtreamRequest('get_vod_streams').then(function(rows) {
+                var arr = Array.isArray(rows) ? rows : [];
+                var items = [];
+                for (var i = 0; i < arr.length; i++) {
+                    var m = arr[i];
+                    if (!m || m.stream_id === undefined) {
+                        continue;
+                    }
+                    var stId = String(m.stream_id);
+                    var ext = String(m.container_extension || 'mp4').trim();
+                    var mName = String(m.name || 'Movie');
+                    var yearMatch = mName.match(/\((\d{4})\)/);
+                    items.push({
+                        id: 'xt_vod_' + stId,
+                        xtreamStreamId: stId,
+                        name: mName,
+                        cmd: buildXtreamDirectStreamUrl(xBase, xUser, xPass, 'movie', stId, ext),
+                        directUrl: true,
+                        useTmpLink: 0,
+                        desc: String(m.plot || m.description || ''),
+                        year: String(m.year || (yearMatch ? yearMatch[1] : '')),
+                        rating: String(m.rating || m.rating_5based || ''),
+                        poster: String(m.stream_icon || m.cover || ''),
+                        genreId: String(m.category_id || '*'),
+                        censored: String(m.is_adult) === '1' ? 1 : 0,
+                        isVod: true,
+                        isSeries: false
+                    });
+                }
+                self.xtreamVodStreamsCache = { profileId: activeProf.id, items: items };
+                return filterAndPaginateLocalList(items, categoryId, page, searchQuery, sortBy);
+            });
+        }
         var params = {
             type: 'vod',
             action: 'get_ordered_list',
@@ -1206,6 +2091,38 @@
     };
     StalkerAPI.prototype.fetchSeriesCategories = function(isRetryAttempt) {
         var self = this;
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(false).then(function(cat) {
+                return cat.seriesCategories;
+            });
+        }
+        if (this.getProviderType() === 'xtream') {
+            return this.xtreamRequest('get_series_categories').then(function(list) {
+                var arr = Array.isArray(list) ? list : [];
+                var out = [
+                    { id: '*', title: 'All Series', censored: false },
+                    { id: 'cont', title: '▶ Continue Watching', censored: false },
+                    { id: 'fav', title: '★ Favorites', censored: false },
+                    { id: 'rec', title: '⏱ History', censored: false }
+                ];
+                for (var i = 0; i < arr.length; i++) {
+                    var c = arr[i];
+                    if (!c || c.category_id === undefined) {
+                        continue;
+                    }
+                    var title = String(c.category_name || 'Series').trim();
+                    if (!title) {
+                        continue;
+                    }
+                    out.push({
+                        id: String(c.category_id),
+                        title: title,
+                        censored: /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title)
+                    });
+                }
+                return out;
+            });
+        }
         return this.request({ type: 'series', action: 'get_categories' }).then(function(res) {
             var list = Array.isArray(res) ? res : (res && Array.isArray(res.data) ? res.data : []);
             if (list.length > 0) {
@@ -1256,6 +2173,47 @@
         });
     };
     StalkerAPI.prototype.fetchSeriesPage = function(categoryId, page, searchQuery, sortBy) {
+        var self = this;
+        if (this.getProviderType() === 'm3u') {
+            return this.ensureM3uCatalogLoaded(false).then(function(cat) {
+                return filterAndPaginateLocalList(cat.seriesItems, categoryId, page, searchQuery, sortBy);
+            });
+        }
+        if (this.getProviderType() === 'xtream') {
+            var activeProf = getActiveProfile();
+            if (this.xtreamSeriesCache && this.xtreamSeriesCache.profileId === activeProf.id) {
+                return Promise.resolve(filterAndPaginateLocalList(this.xtreamSeriesCache.items, categoryId, page, searchQuery, sortBy));
+            }
+            return this.xtreamRequest('get_series').then(function(rows) {
+                var arr = Array.isArray(rows) ? rows : [];
+                var items = [];
+                for (var i = 0; i < arr.length; i++) {
+                    var s = arr[i];
+                    if (!s || s.series_id === undefined) {
+                        continue;
+                    }
+                    var serId = String(s.series_id);
+                    var relYear = String(s.releaseDate || s.year || '').slice(0, 4);
+                    items.push({
+                        id: 'xt_ser_' + serId,
+                        xtreamSeriesId: serId,
+                        name: String(s.name || 'Series'),
+                        cmd: '',
+                        desc: String(s.plot || s.cast || ''),
+                        year: relYear,
+                        rating: String(s.rating || s.rating_5based || ''),
+                        poster: String(s.cover || ''),
+                        genreId: String(s.category_id || '*'),
+                        censored: 0,
+                        isVod: true,
+                        isSeries: true,
+                        streamType: 'series'
+                    });
+                }
+                self.xtreamSeriesCache = { profileId: activeProf.id, items: items };
+                return filterAndPaginateLocalList(items, categoryId, page, searchQuery, sortBy);
+            });
+        }
         var mod = this.seriesModule || 'series';
         var params = {
             type: mod,
@@ -1297,6 +2255,64 @@
         });
     };
     StalkerAPI.prototype.fetchSeriesSeasons = function(seriesItem) {
+        if (this.getProviderType() === 'm3u' || (seriesItem && Array.isArray(seriesItem.seasons))) {
+            return Promise.resolve(seriesItem.seasons || []);
+        }
+        if (this.getProviderType() === 'xtream') {
+            var activeProf = getActiveProfile();
+            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
+            var xUser = activeProf.xtreamUser || '';
+            var xPass = activeProf.xtreamPass || '';
+            var serId = seriesItem.xtreamSeriesId || String(seriesItem.id).replace(/^xt_ser_/, '');
+            return this.xtreamRequest('get_series_info', { series_id: serId }).then(function(res) {
+                var episodesObj = (res && res.episodes && typeof res.episodes === 'object') ? res.episodes : {};
+                var seasonKeys = Object.keys(episodesObj);
+                seasonKeys.sort(function(a, b) { return Number(a) - Number(b); });
+                var seasons = [];
+                for (var i = 0; i < seasonKeys.length; i++) {
+                    var sKey = seasonKeys[i];
+                    var epArr = Array.isArray(episodesObj[sKey]) ? episodesObj[sKey] : [];
+                    var builtEpisodes = [];
+                    for (var j = 0; j < epArr.length; j++) {
+                        var ep = epArr[j];
+                        if (!ep || ep.id === undefined) {
+                            continue;
+                        }
+                        var epNum = Number(ep.episode_num) || (j + 1);
+                        var ext = String(ep.container_extension || 'mp4').trim();
+                        var epTitle = ep.title ? String(ep.title).trim() : ('Episode ' + epNum);
+                        builtEpisodes.push({
+                            id: 'xt_ep_' + ep.id,
+                            name: 'E' + epNum + (epTitle.indexOf('Episode') === 0 ? '' : (' - ' + epTitle)),
+                            cmd: buildXtreamDirectStreamUrl(xBase, xUser, xPass, 'series', ep.id, ext),
+                            directUrl: true,
+                            useTmpLink: 0,
+                            desc: String((ep.info && ep.info.plot) || seriesItem.desc || ''),
+                            poster: String((ep.info && ep.info.movie_image) || seriesItem.poster || ''),
+                            seriesNum: epNum,
+                            isEpisode: true,
+                            isVod: true,
+                            isSeries: true,
+                            streamType: 'series'
+                        });
+                    }
+                    seasons.push({
+                        id: String(sKey),
+                        name: 'Season ' + sKey,
+                        cmd: '',
+                        desc: String(seriesItem.desc || ''),
+                        poster: String(seriesItem.poster || ''),
+                        episodes: builtEpisodes,
+                        parentSeries: seriesItem,
+                        isSeason: true,
+                        isVod: true,
+                        isSeries: true,
+                        streamType: 'series'
+                    });
+                }
+                return seasons;
+            });
+        }
         var mod = seriesItem.streamType || this.seriesModule || 'series';
         return this.request({
             type: mod,
@@ -1343,11 +2359,55 @@
         }
         shortEpgCache[key] = { ts: Date.now(), list: list };
     }
+    function normalizeXtreamEpgListings(rawListings) {
+        var arr = Array.isArray(rawListings) ? rawListings : [];
+        var out = [];
+        for (var i = 0; i < arr.length; i++) {
+            var e = arr[i];
+            if (!e) {
+                continue;
+            }
+            var sTs = Number(e.start_timestamp || 0);
+            var eTs = Number(e.stop_timestamp || 0);
+            if (!sTs && e.start) {
+                sTs = Math.floor(new Date(e.start).getTime() / 1000) || 0;
+            }
+            if (!eTs && e.end) {
+                eTs = Math.floor(new Date(e.end).getTime() / 1000) || 0;
+            }
+            out.push({
+                id: String(e.id || i),
+                name: decodeXtreamBase64Text(e.title || ''),
+                descr: decodeXtreamBase64Text(e.description || ''),
+                start_timestamp: sTs,
+                stop_timestamp: eTs,
+                time: e.start || '',
+                time_to: e.end || ''
+            });
+        }
+        return out;
+    }
     StalkerAPI.prototype.fetchShortEpg = function(channelId) {
         var key = String(channelId);
         var cached = shortEpgCache[key];
         if (cached && (Date.now() - cached.ts) < 300000) {
             return Promise.resolve(cached.list);
+        }
+        if (this.getProviderType() === 'm3u') {
+            storeShortEpgEntry(key, []);
+            return Promise.resolve([]);
+        }
+        if (this.getProviderType() === 'xtream') {
+            var chObj = channelByIdMap[key];
+            var stId = (chObj && chObj.xtreamStreamId) ? chObj.xtreamStreamId : key.replace(/^xt_live_/, '');
+            return this.xtreamRequest('get_short_epg', { stream_id: stId, limit: 10 }).then(function(res) {
+                var list = normalizeXtreamEpgListings(res && res.epg_listings);
+                storeShortEpgEntry(key, list);
+                return list;
+            }).catch(function() {
+                storeShortEpgEntry(key, []);
+                return [];
+            });
         }
         return this.request({
             type: 'itv',
@@ -1370,6 +2430,23 @@
     };
     StalkerAPI.prototype.fetchFullEpg = function(channelId) {
         var self = this;
+        var key = String(channelId);
+        if (this.getProviderType() === 'm3u') {
+            return Promise.resolve([]);
+        }
+        if (this.getProviderType() === 'xtream') {
+            var chObj = channelByIdMap[key];
+            var stId = (chObj && chObj.xtreamStreamId) ? chObj.xtreamStreamId : key.replace(/^xt_live_/, '');
+            return this.xtreamRequest('get_simple_data_table', { stream_id: stId }).then(function(res) {
+                var list = normalizeXtreamEpgListings(res && res.epg_listings);
+                if (list.length > 0) {
+                    return list;
+                }
+                return self.fetchShortEpg(channelId);
+            }).catch(function() {
+                return self.fetchShortEpg(channelId);
+            });
+        }
         var profScope = activeProfileId || 'prof_default';
         var cachedFull = fullEpgCache[profScope];
         if (cachedFull && (Date.now() - cachedFull.ts) < 600000 && cachedFull.map) {
@@ -1421,34 +2498,48 @@
         if (item && item.isCatchup && item.channelRef && item.epgProgRef) {
             return self.createArchiveLink(item.channelRef, item.epgProgRef);
         }
+        var pType = this.getProviderType();
         var portalBase = getPortalBaseUrl();
-        var rawItemCmd = String(item.cmd || '').trim();
+        var rawItemCmd = String((item && item.cmd) || '').trim();
         var directUrl = extractStreamUrl(rawItemCmd, portalBase);
+
+        if (pType === 'xtream' || pType === 'm3u' || (item && item.directUrl)) {
+            if (pType === 'xtream' && forceAlternate && !item.isVod && !item.isEpisode && /\.ts$/i.test(directUrl)) {
+                return Promise.resolve(directUrl.replace(/\.ts$/i, '.m3u8'));
+            }
+            return Promise.resolve(directUrl);
+        }
         var isLive = !item.isVod && !item.isEpisode;
 
         if (isLive && forceAlternate && item._preferDirectUrl && !isLocalhostOrInvalidUrl(directUrl)) {
             return Promise.resolve(directUrl);
         }
-        var needsCreateLink = isLive ? (item.useTmpLink || isLocalhostOrInvalidUrl(directUrl)) : true;
+        var defaultNeedsCreateLink = Boolean(item.useTmpLink || isLocalhostOrInvalidUrl(directUrl));
+        var needsCreateLink = isLive ? (forceAlternate ? true : defaultNeedsCreateLink) : true;
         if (!needsCreateLink) {
             return Promise.resolve(directUrl);
         }
 
         var primaryType = item.isEpisode ? 'vod' : (item.streamType || (item.isVod ? 'vod' : 'itv'));
         var cmdToSend = isLive ? cleanCmdPrefix(rawItemCmd) : rawItemCmd;
-        var params = {
-            type: primaryType,
-            action: 'create_link',
-            cmd: cmdToSend
-        };
-        if (item.seriesNum !== undefined && item.seriesNum !== null) {
-            params.series = item.seriesNum;
-        }
-        if (self.token) {
-            params.token = self.token;
-        }
+        var ensureTokenPromise = (!self.token && pType === 'stalker') ?
+            self.ensureAuthenticatedSession().catch(function() {}) :
+            Promise.resolve();
 
-        return this.request(params).then(function(res) {
+        return ensureTokenPromise.then(function() {
+            var params = {
+                type: primaryType,
+                action: 'create_link',
+                cmd: cmdToSend
+            };
+            if (item.seriesNum !== undefined && item.seriesNum !== null) {
+                params.series = item.seriesNum;
+            }
+            if (self.token) {
+                params.token = self.token;
+            }
+            return self.request(params);
+        }).then(function(res) {
             var returnedCmd = (res && res.cmd) ? res.cmd : (res && res.url ? res.url : '');
             var resolved = extractStreamUrl(returnedCmd, portalBase);
             if (!isLocalhostOrInvalidUrl(resolved)) {
@@ -1488,10 +2579,37 @@
     };
     StalkerAPI.prototype.createArchiveLink = function(channel, epgProg) {
         var self = this;
-        var portalBase = getPortalBaseUrl();
         var startTs = Number(epgProg.start_timestamp || 0);
         var stopTs = Number(epgProg.stop_timestamp || 0);
         var durationSec = stopTs > startTs ? (stopTs - startTs) : 3600;
+        var pType = this.getProviderType();
+
+        if (pType === 'xtream') {
+            var activeProf = getActiveProfile();
+            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
+            var xUser = encodeURIComponent(String(activeProf.xtreamUser || '').trim());
+            var xPass = encodeURIComponent(String(activeProf.xtreamPass || '').trim());
+            var stId = channel.xtreamStreamId || String(channel.id).replace(/^xt_live_/, '');
+            var durMin = Math.max(1, Math.round(durationSec / 60));
+            var dt = new Date(startTs * 1000);
+            var yyyy = dt.getUTCFullYear();
+            var mm = ('0' + (dt.getUTCMonth() + 1)).slice(-2);
+            var dd = ('0' + dt.getUTCDate()).slice(-2);
+            var hh = ('0' + dt.getUTCHours()).slice(-2);
+            var min = ('0' + dt.getUTCMinutes()).slice(-2);
+            var startFormatted = yyyy + '-' + mm + '-' + dd + ':' + hh + '-' + min;
+            return Promise.resolve(xBase + '/timeshift/' + xUser + '/' + xPass + '/' + durMin + '/' + startFormatted + '/' + stId + '.ts');
+        }
+        if (pType === 'm3u') {
+            var baseM3u = String(channel.catchupSource || channel.cmd || '').trim();
+            if (startTs > 0 && baseM3u.indexOf('utc=') === -1) {
+                var sepM3u = baseM3u.indexOf('?') === -1 ? '?' : '&';
+                return Promise.resolve(baseM3u + sepM3u + 'utc=' + startTs + '&lutc=' + Math.floor(Date.now() / 1000));
+            }
+            return Promise.resolve(baseM3u);
+        }
+
+        var portalBase = getPortalBaseUrl();
         var archiveCmd = channel.cmd;
         return self.request({
             type: 'tv_archive',
@@ -1681,6 +2799,7 @@
             num: item.num || 0,
             name: item.name,
             cmd: item.cmd,
+            directUrl: Boolean(item.directUrl),
             useTmpLink: item.useTmpLink || 0,
             desc: item.desc || '',
             poster: item.poster || item.logo || '',
@@ -1689,6 +2808,8 @@
             censored: item.censored || 0,
             isVod: Boolean(item.isVod),
             isSeries: Boolean(item.isSeries),
+            isEpisode: Boolean(item.isEpisode),
+            streamType: item.streamType || '',
             seriesNum: item.seriesNum
         });
         if (filtered.length > 40) {
@@ -1928,10 +3049,18 @@
         try {
             localStorage.removeItem('stalker_live');
         } catch (ex) {}
+        api.resetProviderCaches();
+        var activeProf = getActiveProfile();
+        if (activeProf && activeProf.id) {
+            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id) + '&action=delete', {
+                method: 'GET'
+            }).catch(function() {});
+        }
         liveGenres = [];
         allChannels = [];
         vodCats = [];
         seriesCats = [];
+        loadedCatSignature = '';
         switchMode(modeIdx);
     }
 
@@ -1957,7 +3086,7 @@
         var payload = buildBackupPayload();
         var jsonStr = JSON.stringify(payload, null, 2);
         safeSetStorage('smartstb_local_backup', jsonStr);
-        fetch(api.proxyUrl + '/backup', {
+        proxyFetch(api.proxyUrl + '/backup', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: jsonStr
@@ -1996,7 +3125,7 @@
 
     function importBackupJson() {
         if (typeof tizen !== 'undefined') {
-            fetch(api.proxyUrl + '/backup', { method: 'GET' }).then(function(r) {
+            proxyFetch(api.proxyUrl + '/backup', { method: 'GET' }).then(function(r) {
                 if (!r.ok) {
                     throw new Error('No proxy backup');
                 }
@@ -2146,21 +3275,58 @@
         }, 5000);
     }
 
+    var bufferingDiagPollTimer = null;
     function clearBufferingWatchdog() {
         if (bufferingWatchdogTimer) {
             clearTimeout(bufferingWatchdogTimer);
             bufferingWatchdogTimer = null;
         }
+        if (bufferingDiagPollTimer) {
+            clearInterval(bufferingDiagPollTimer);
+            bufferingDiagPollTimer = null;
+        }
+    }
+
+    function pollStreamDiagDuringBuffer(item, streamUrl, activeSession) {
+        if (!streamUrl || activeSession !== playSessionId) {
+            return;
+        }
+        fetch(api.proxyUrl + '/stream-diag?url=' + encodeURIComponent(streamUrl))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (!d || activeSession !== playSessionId || !osdStatus) {
+                    return;
+                }
+                if (d.verdict && d.verdict.source === 'provider' && (d.elapsedMs || 0) >= 2200) {
+                    var shortReason;
+                    if (d.httpStatus && d.httpStatus >= 400) {
+                        shortReason = 'PROVIDER HTTP ' + d.httpStatus;
+                    } else {
+                        shortReason = 'PROVIDER 0 KB/s (IDLE FEED)';
+                    }
+                    osdStatus.textContent = shortReason;
+                } else if (d.isTranscoding) {
+                    osdStatus.textContent = d.vTranscode ? 'TRANSCODING H.264+AAC...' : 'TRANSCODING AUDIO...';
+                } else if (d.kBps > 0) {
+                    osdStatus.textContent = 'BUFFERING (' + d.kBps + ' KB/s)';
+                }
+            })
+            .catch(function() {});
     }
 
     function startBufferingWatchdog(item, streamUrl, activeSession) {
         clearBufferingWatchdog();
+        bufferingDiagPollTimer = setInterval(function() {
+            pollStreamDiagDuringBuffer(item, streamUrl, activeSession);
+        }, 1200);
+        var isLiveFastSwitch = item && !item.isVod && !item.isEpisode && !item.isCatchup;
+        var watchdogMs = isLiveFastSwitch ? (retryCount === 0 ? 3200 : 5000) : 16000;
         bufferingWatchdogTimer = setTimeout(function() {
             if (activeSession !== playSessionId) {
                 return;
             }
             handlePlaybackErrorOrRetry(item, streamUrl, 'BUFFER_TIMEOUT', activeSession);
-        }, 18000);
+        }, watchdogMs);
     }
 
     function isCurrentlyPlayingEntry(entry) {
@@ -2204,6 +3370,7 @@
     }
 
     function stopPlayback() {
+        isPlaybackHealthy = false;
         clearNextEpisodePrompt();
         clearBufferingWatchdog();
         clearSubtitleBox();
@@ -2403,6 +3570,7 @@
         stopPlayback();
         var isProxyStreamUrl = String(streamUrl || '').indexOf('/stream?url=') !== -1;
         if (!streamUrl || (!isProxyStreamUrl && isLocalhostOrInvalidUrl(streamUrl))) {
+            hasActivePlaybackError = true;
             showOSD(formatOsdTitle(item), 'Invalid Stream URL');
             return;
         }
@@ -2410,6 +3578,8 @@
         var hasSyncedTracksOnBuffer = false;
         try {
             if (typeof webapis === 'undefined' || !webapis.avplay) {
+                isPlaybackHealthy = true;
+                hasActivePlaybackError = false;
                 showOSD(formatOsdTitle(item), 'SIMULATED PLAY');
                 return;
             }
@@ -2420,6 +3590,11 @@
                     'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'
                 );
             } catch (eUa) {}
+            try {
+                if (webapis.productinfo && typeof webapis.productinfo.isUdPanelSupported === 'function' && webapis.productinfo.isUdPanelSupported()) {
+                    webapis.avplay.setStreamingProperty('SET_MODE_4K', 'TRUE');
+                }
+            } catch (e4k) {}
             applyAvPlayDisplayRect();
             try {
                 webapis.avplay.setDisplayMethod(currentAspect);
@@ -2454,14 +3629,24 @@
                         return;
                     }
                     clearBufferingWatchdog();
-                    if (!hasSyncedTracksOnBuffer) {
-                        hasSyncedTracksOnBuffer = true;
+                    isPlaybackHealthy = true;
+                    hasActivePlaybackError = false;
+                    if (!hasSyncedTracksOnBuffer || audioTracks.length <= 1) {
+                        var hadAudioBefore = audioTracks.length > 0;
                         refreshTrackLists();
-                        syncInitialActiveTracks();
+                        if (!hasSyncedTracksOnBuffer || !hadAudioBefore) {
+                            syncInitialActiveTracks();
+                        }
+                        if (audioTracks.length > 0) {
+                            hasSyncedTracksOnBuffer = true;
+                        }
                         updateOsdStreamTelemetry();
                     }
+                    var liveStatusLabel = isPlayingCatchup ? 'CATCH-UP' : (isPlayingVod ? 'VOD' : 'LIVE');
                     if (!uiVisible) {
-                        showOSD(formatOsdTitle(item), isPlayingCatchup ? 'CATCH-UP' : (isPlayingVod ? 'VOD' : 'LIVE'));
+                        showOSD(formatOsdTitle(item), liveStatusLabel);
+                    } else if (osdStatus) {
+                        osdStatus.textContent = liveStatusLabel;
                     }
                 },
                 oncurrentplaytime: function(currentTimeMs) {
@@ -2469,6 +3654,16 @@
                         return;
                     }
                     clearBufferingWatchdog();
+                    isPlaybackHealthy = true;
+                    hasActivePlaybackError = false;
+                    if (!hasSyncedTracksOnBuffer || audioTracks.length === 0) {
+                        refreshTrackLists();
+                        if (audioTracks.length > 0 && !hasSyncedTracksOnBuffer) {
+                            hasSyncedTracksOnBuffer = true;
+                            syncInitialActiveTracks();
+                            updateOsdStreamTelemetry();
+                        }
+                    }
                     vodCurrentMs = Number(currentTimeMs) || 0;
                     if (isPlayingVod || isPlayingCatchup) {
                         if (!vodDurationMs) {
@@ -2515,6 +3710,11 @@
                     }
                     clearBufferingWatchdog();
                     clearSubtitleBox();
+                    if (!isPlayingVod && !isPlayingCatchup && item) {
+                        retryCount = 0;
+                        handlePlaybackErrorOrRetry(item, streamUrl, 'LIVE_STREAM_EOF', activeSession);
+                        return;
+                    }
                     if (isPlayingVod && item) {
                         saveResumeTime(item.id, vodDurationMs / 1000, vodDurationMs / 1000);
                     }
@@ -2542,6 +3742,8 @@
                 }
                 clearBufferingWatchdog();
                 retryCount = 0;
+                isPlaybackHealthy = true;
+                hasActivePlaybackError = false;
                 setScreensaverDisabled(true);
                 applyAvPlayDisplayRect();
                 try {
@@ -2583,12 +3785,18 @@
         if (activeSession !== playSessionId || !item) {
             return;
         }
-        if (retryCount < 2) {
+        isPlaybackHealthy = false;
+        if (retryCount < 3) {
             retryCount++;
-            showOSD(formatOsdTitle(item), 'Retrying (' + retryCount + '/2)...');
+            showOSD(formatOsdTitle(item), 'Reconnecting (' + retryCount + '/3)...');
             if (!item.isVod && !item.isEpisode && !item.isCatchup && retryCount === 1) {
-                item._preferDirectUrl = !item._preferDirectUrl;
+                if (item.useTmpLink) {
+                    item._preferDirectUrl = !item._preferDirectUrl;
+                } else {
+                    item._preferDirectUrl = false;
+                }
             }
+            var retryDelayMs = retryCount === 1 ? 150 : 400;
             setTimeout(function() {
                 if (activeSession !== playSessionId) {
                     return;
@@ -2598,7 +3806,7 @@
                         return;
                     }
                     var candidate = newUrl || failedUrl;
-                    if (retryCount === 2 && candidate && candidate.indexOf('/stream?url=') === -1 && /^https?:\/\//i.test(candidate)) {
+                    if (retryCount >= 2 && candidate && candidate.indexOf('/stream?url=') === -1 && /^https?:\/\//i.test(candidate)) {
                         candidate = api.proxyUrl + '/stream?url=' + encodeURIComponent(candidate);
                     }
                     playUrl(candidate, item, activeSession);
@@ -2607,14 +3815,27 @@
                         return;
                     }
                     var fallbackCandidate = failedUrl;
-                    if (retryCount === 2 && fallbackCandidate && fallbackCandidate.indexOf('/stream?url=') === -1 && /^https?:\/\//i.test(fallbackCandidate)) {
+                    if (retryCount >= 2 && fallbackCandidate && fallbackCandidate.indexOf('/stream?url=') === -1 && /^https?:\/\//i.test(fallbackCandidate)) {
                         fallbackCandidate = api.proxyUrl + '/stream?url=' + encodeURIComponent(fallbackCandidate);
                     }
                     playUrl(fallbackCandidate, item, activeSession);
                 });
-            }, 700);
+            }, retryDelayMs);
         } else {
-            showOSD(formatOsdTitle(item), 'Stream Unavailable (' + String(reason) + ')');
+            hasActivePlaybackError = true;
+            showOSD(formatOsdTitle(item), 'Stream Unavailable (' + String(reason) + ') — Press OK to Retry');
+            if (failedUrl) {
+                fetch(api.proxyUrl + '/stream-diag?url=' + encodeURIComponent(failedUrl))
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        if (d && d.verdict && d.verdict.summary && activeSession === playSessionId) {
+                            var statusLabel = (d.verdict.source === 'provider') ? 'PROVIDER OFFLINE' : 'STREAM ERROR';
+                            showOSD(formatOsdTitle(item), statusLabel, d.verdict.summary, 'Press OK to Retry • Tools/Settings for options');
+                            showToast('🩺 ' + d.verdict.summary);
+                        }
+                    })
+                    .catch(function() {});
+            }
         }
     }
 
@@ -2627,8 +3848,14 @@
             previousLiveChannel = currentPlayingItem;
         }
         var mySession = ++playSessionId;
+        if (previewEpgTimeout) {
+            clearTimeout(previewEpgTimeout);
+            previewEpgTimeout = null;
+        }
         stopPlayback();
         currentPlayingItem = item;
+        isPlaybackHealthy = false;
+        hasActivePlaybackError = false;
         isPlayingVod = Boolean(item.isVod || item.isEpisode);
         isPlayingCatchup = false;
         vodDurationMs = 0;
@@ -2672,17 +3899,18 @@
                     api.fetchShortEpg(item.id).then(function(epgList) {
                         if (mySession === playSessionId && currentPlayingItem && String(currentPlayingItem.id) === String(item.id)) {
                             var parsed = parseShortEpgNowNext(epgList);
-                            if (!uiVisible) {
+                            if (!uiVisible && !hasActivePlaybackError) {
                                 showOSD(formatOsdTitle(item), 'LIVE', parsed.now, parsed.next);
                             }
                         }
                     }).catch(function() {});
-                }, 750);
+                }, 2200);
             }
         }).catch(function(err) {
             if (mySession !== playSessionId) {
                 return;
             }
+            hasActivePlaybackError = true;
             showOSD(formatOsdTitle(item), 'Link Error: ' + err.message);
         });
     }
@@ -2735,15 +3963,15 @@
             var info = typeof trackObj.extra_info === 'object' ? trackObj.extra_info : JSON.parse(trackObj.extra_info);
             var parts = ['Track #' + fallbackNum];
             var meta = [];
-            var lang = info.language || info.lang || info.track_lang || info.iso639_2 || '';
+            var lang = info.language || info.Language || info.lang || info.track_lang || info.Track_Lang || info.iso639_2 || '';
             if (lang && String(lang).trim() && String(lang).toLowerCase() !== 'und') {
                 meta.push(String(lang).trim().toUpperCase());
             }
-            var codec = info.fourCC || info.codec || '';
+            var codec = info.fourCC || info.FourCC || info.codec || info.Codec || info.audio_type || '';
             if (codec && String(codec).trim()) {
                 meta.push(String(codec).trim().toUpperCase());
             }
-            var ch = info.channels || info.channel_count || '';
+            var ch = info.channels || info.Channels || info.channel_count || '';
             if (ch && Number(ch) > 0) {
                 meta.push(Number(ch) + 'ch');
             }
@@ -2814,6 +4042,13 @@
                 }
             }
         } catch (ex) {}
+        try {
+            if (typeof webapis !== 'undefined' && webapis.tvaudiocontrol && typeof webapis.tvaudiocontrol.isMute === 'function') {
+                if (webapis.tvaudiocontrol.isMute()) {
+                    webapis.tvaudiocontrol.setMute(false);
+                }
+            }
+        } catch (eMute) {}
     }
 
     function togglePlayPause() {
@@ -2911,7 +4146,8 @@
     }
 
     function openTracksModal(preferredSection) {
-        if (!currentPlayingItem) {
+        var activeOrSelectedItem = currentPlayingItem || currentItems[itemIdx] || null;
+        if (!activeOrSelectedItem) {
             showToast('Play a channel, movie, or episode first');
             return;
         }
@@ -2950,9 +4186,28 @@
         tracksModalItems = items;
         tracksModalIdx = 0;
         if (preferredSection === 'sub') {
+            var foundSub = false;
             for (var s = 0; s < items.length; s++) {
                 if (items[s].kind === 'sub') {
-                    tracksModalIdx = s;
+                    if ((subtitlesEnabled && items[s].trackArrIdx === textIdx) || (!subtitlesEnabled && items[s].trackArrIdx === -1)) {
+                        tracksModalIdx = s;
+                        foundSub = true;
+                        break;
+                    }
+                }
+            }
+            if (!foundSub) {
+                for (var s2 = 0; s2 < items.length; s2++) {
+                    if (items[s2].kind === 'sub') {
+                        tracksModalIdx = s2;
+                        break;
+                    }
+                }
+            }
+        } else {
+            for (var au = 0; au < items.length; au++) {
+                if (items[au].kind === 'audio' && items[au].trackArrIdx === audioIdx) {
+                    tracksModalIdx = au;
                     break;
                 }
             }
@@ -2962,7 +4217,7 @@
             tracksModalTitleEl.textContent = preferredSection === 'sub' ? 'Subtitles & Appearance' : 'Audio & Subtitle Tracks';
         }
         if (tracksModalSubtitleEl) {
-            tracksModalSubtitleEl.textContent = formatOsdTitle(currentPlayingItem) + ' • ' + audioTracks.length + ' Audio / ' + textTracks.length + ' Sub';
+            tracksModalSubtitleEl.textContent = formatOsdTitle(activeOrSelectedItem) + ' • ' + audioTracks.length + ' Audio / ' + textTracks.length + ' Sub';
         }
         if (tracksModalEl) {
             tracksModalEl.classList.add('visible');
@@ -2977,6 +4232,14 @@
         }
     }
 
+    window._openTizenTracksModal = function(preferredSection) {
+        if (tracksModalOpen) {
+            closeTracksModal();
+            return;
+        }
+        openTracksModal(preferredSection);
+    };
+
     function renderTracksModalList() {
         if (!tracksListEl) {
             return;
@@ -2984,7 +4247,11 @@
         tracksListEl._forceRebuild = true;
         renderList(tracksListEl, tracksModalItems, tracksModalIdx, function(entry) {
             return entry.label;
-        }, 8);
+        }, Math.max(50, tracksModalItems.length));
+        var selEl = tracksListEl.querySelector('.item.selected');
+        if (selEl && typeof selEl.scrollIntoView === 'function') {
+            try { selEl.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+        }
     }
 
     function activateSelectedTrackModalRow() {
@@ -3002,6 +4269,40 @@
             selectSubtitleTrackByArrayIndex(entry.trackArrIdx);
         }
         closeTracksModal();
+    }
+
+    if (tracksStyleColorEl) {
+        tracksStyleColorEl.onclick = function(ev) {
+            ev.stopPropagation();
+            cycleSubtitleColor(1);
+        };
+    }
+    if (tracksStyleSizeEl) {
+        tracksStyleSizeEl.onclick = function(ev) {
+            ev.stopPropagation();
+            cycleSubtitleSize(1);
+        };
+    }
+    if (tracksModalEl) {
+        tracksModalEl.addEventListener('click', function(ev) {
+            if (ev.target === tracksModalEl) {
+                closeTracksModal();
+            }
+        });
+    }
+    if (tracksListEl) {
+        tracksListEl.addEventListener('click', function(ev) {
+            var rowEl = ev.target;
+            while (rowEl && rowEl !== tracksListEl && !rowEl.classList.contains('item')) {
+                rowEl = rowEl.parentNode;
+            }
+            if (rowEl && typeof rowEl._itemIdx === 'number') {
+                ev.stopPropagation();
+                tracksModalIdx = rowEl._itemIdx;
+                renderTracksModalList();
+                activateSelectedTrackModalRow();
+            }
+        });
     }
 
     function openMiniZapDrawer() {
@@ -3048,10 +4349,6 @@
             return;
         }
         refreshTrackLists();
-        if (audioTracks.length > 2 && !uiVisible) {
-            openTracksModal('audio');
-            return;
-        }
         if (audioTracks.length === 0) {
             showOSD(formatOsdTitle(currentPlayingItem), 'Audio: Default Track (1/1)');
             showToast('🔊 Only 1 Audio Track Available');
@@ -3073,10 +4370,6 @@
             return;
         }
         refreshTrackLists();
-        if (textTracks.length > 1 && !uiVisible) {
-            openTracksModal('sub');
-            return;
-        }
         if (textTracks.length === 0) {
             clearSubtitleBox();
             showOSD(formatOsdTitle(currentPlayingItem), 'No Subtitles');
@@ -3378,7 +4671,7 @@
         }
         if (sel.isSeries && !sel.isEpisode) {
             stepIntoSeries(sel);
-        } else if (currentPlayingItem && String(currentPlayingItem.id) === String(sel.id)) {
+        } else if (currentPlayingItem && String(currentPlayingItem.id) === String(sel.id) && isPlaybackHealthy && !hasActivePlaybackError) {
             setOverlayVisible(false);
         } else {
             playItem(sel);
@@ -3610,6 +4903,18 @@
                         playItem(chosen);
                     }
                 }
+            } else if (container === tracksListEl) {
+                tracksModalIdx = rowIndex;
+                renderTracksModalList();
+                activateSelectedTrackModalRow();
+            } else if (container === miniZapListEl) {
+                miniZapIdx = rowIndex;
+                renderMiniZapList();
+                if (currentItems[miniZapIdx]) {
+                    itemIdx = miniZapIdx;
+                    renderItems();
+                    playItem(currentItems[miniZapIdx]);
+                }
             }
         };
         row.ondblclick = function(ev) {
@@ -3620,6 +4925,10 @@
             } else if (container === epgModalList) {
                 epgModalIdx = rowIndex;
                 triggerSelectedEpgProgram();
+            } else if (container === tracksListEl) {
+                tracksModalIdx = rowIndex;
+                renderTracksModalList();
+                activateSelectedTrackModalRow();
             }
         };
 
@@ -4136,6 +5445,9 @@
             return false;
         }
         hasAutoResumedOnBoot = true;
+        if (userInteractedSinceBoot || currentPlayingItem) {
+            return false;
+        }
         var saved = getLastLiveChannel();
         if (!saved || !saved.channelId) {
             return false;
@@ -4150,7 +5462,7 @@
                 break;
             }
         }
-        selectCategory(targetCatPos);
+        selectCategory(targetCatPos, true);
         for (var j = 0; j < currentItems.length; j++) {
             if (String(currentItems[j].id) === String(saved.channelId)) {
                 itemIdx = j;
@@ -4187,6 +5499,10 @@
             clearTimeout(previewDebounceTimer);
             previewDebounceTimer = null;
         }
+        if (catHoverTimer) {
+            clearTimeout(catHoverTimer);
+            catHoverTimer = null;
+        }
         lastContentModeIdx = modeIdx;
         seriesStack = [];
         catFilterText = '';
@@ -4197,6 +5513,7 @@
         vodLoading = false;
         vodHasMore = true;
         liveGenrePaged = false;
+        loadedCatSignature = '';
         if (catsHeaderEl) {
             catsHeaderEl.textContent = 'Categories';
         }
@@ -4206,14 +5523,16 @@
 
         if (mode.id === 'live') {
             if (liveGenres.length > 3 && allChannels.length > 0) {
+                liveCatalogLoading = false;
                 rebuildGenreChannelCounts();
                 rawCats = liveGenres;
                 applyColumnFilters();
                 if (!tryAutoResumeLastLiveChannel()) {
-                    selectCategory(0);
+                    selectCategory(0, true);
                 }
                 return;
             }
+            liveCatalogLoading = true;
             rawCats = [
                 { id: '*', title: 'All Channels', censored: false },
                 { id: 'fav', title: '★ Favorites', censored: false },
@@ -4225,8 +5544,13 @@
             if (catsHeaderEl) {
                 catsHeaderEl.textContent = 'Categories (Loading...)';
             }
+            if (itemsListEl) {
+                itemsListEl._lastItemsRef = null;
+                itemsListEl.innerHTML = '<div class="item">Loading Live TV channels...</div>';
+            }
 
             api.fetchLiveCatalog(false).then(function(catalog) {
+                liveCatalogLoading = false;
                 if (catalog && Array.isArray(catalog.genres) && catalog.genres.length > 3) {
                     liveGenres = catalog.genres;
                 }
@@ -4234,20 +5558,28 @@
                     allChannels = catalog.channels;
                 }
                 rebuildGenreChannelCounts();
-                if (modes[modeIdx] && modes[modeIdx].id === 'live') {
-                    rawCats = liveGenres.length > 3 ? liveGenres : (catalog.genres || rawCats);
+                var isLiveActive = (modes[modeIdx] && modes[modeIdx].id === 'live') ||
+                    (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live');
+                if (isLiveActive) {
+                    rawCats = liveGenres.length > 3 ? liveGenres : ((catalog && catalog.genres) ? catalog.genres : rawCats);
                     applyColumnFilters();
+                    catIdx = Math.min(catIdx, Math.max(0, currentCats.length - 1));
                     renderCats();
                     if (!tryAutoResumeLastLiveChannel()) {
-                        selectCategory(catIdx);
+                        selectCategory(catIdx, true);
                     }
                 }
             }).catch(function(err) {
+                liveCatalogLoading = false;
                 showOSD('Live TV', 'Catalog Error: ' + err.message);
                 showToast('⚠ Retrying Live TV Categories...');
                 setTimeout(function() {
-                    if (modes[modeIdx] && modes[modeIdx].id === 'live' && liveGenres.length <= 3) {
+                    var isLiveStillActive = (modes[modeIdx] && modes[modeIdx].id === 'live') ||
+                        (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live');
+                    if (isLiveStillActive && liveGenres.length <= 3) {
+                        liveCatalogLoading = true;
                         api.fetchLiveCatalog(true).then(function(catalog2) {
+                            liveCatalogLoading = false;
                             if (catalog2 && Array.isArray(catalog2.genres) && catalog2.genres.length > 3) {
                                 liveGenres = catalog2.genres;
                             }
@@ -4255,13 +5587,18 @@
                                 allChannels = catalog2.channels;
                             }
                             rebuildGenreChannelCounts();
-                            if (modes[modeIdx] && modes[modeIdx].id === 'live') {
-                                rawCats = liveGenres.length > 3 ? liveGenres : (catalog2.genres || rawCats);
+                            var isLiveNow = (modes[modeIdx] && modes[modeIdx].id === 'live') ||
+                                (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live');
+                            if (isLiveNow) {
+                                rawCats = liveGenres.length > 3 ? liveGenres : ((catalog2 && catalog2.genres) ? catalog2.genres : rawCats);
                                 applyColumnFilters();
+                                catIdx = Math.min(catIdx, Math.max(0, currentCats.length - 1));
                                 renderCats();
-                                selectCategory(catIdx);
+                                selectCategory(catIdx, true);
                             }
-                        }).catch(function() {});
+                        }).catch(function() {
+                            liveCatalogLoading = false;
+                        });
                     }
                 }, 1500);
             });
@@ -4269,7 +5606,7 @@
             if (vodCats.length > 4) {
                 rawCats = vodCats;
                 applyColumnFilters();
-                selectCategory(0);
+                selectCategory(0, true);
                 return;
             }
             rawCats = [
@@ -4297,11 +5634,11 @@
                     rawCats = vodCats.length > 4 ? vodCats : (cats || rawCats);
                     applyColumnFilters();
                     renderCats();
-                    selectCategory(catIdx);
+                    selectCategory(catIdx, true);
                 }
             }).catch(function() {
                 if (modes[modeIdx] && modes[modeIdx].id === 'vod') {
-                    selectCategory(0);
+                    selectCategory(0, true);
                 }
                 showToast('⚠ Retrying VOD Categories...');
                 setTimeout(function() {
@@ -4314,7 +5651,7 @@
                                 rawCats = vodCats.length > 4 ? vodCats : (cats2 || rawCats);
                                 applyColumnFilters();
                                 renderCats();
-                                selectCategory(catIdx);
+                                selectCategory(catIdx, true);
                             }
                         }).catch(function() {});
                     }
@@ -4324,7 +5661,7 @@
             if (seriesCats.length > 4) {
                 rawCats = seriesCats;
                 applyColumnFilters();
-                selectCategory(0);
+                selectCategory(0, true);
                 return;
             }
             rawCats = [
@@ -4352,11 +5689,11 @@
                     rawCats = seriesCats.length > 4 ? seriesCats : (cats || rawCats);
                     applyColumnFilters();
                     renderCats();
-                    selectCategory(catIdx);
+                    selectCategory(catIdx, true);
                 }
             }).catch(function() {
                 if (modes[modeIdx] && modes[modeIdx].id === 'series') {
-                    selectCategory(0);
+                    selectCategory(0, true);
                 }
                 showToast('⚠ Retrying Series Categories...');
                 setTimeout(function() {
@@ -4369,7 +5706,7 @@
                                 rawCats = seriesCats.length > 4 ? seriesCats : (cats2 || rawCats);
                                 applyColumnFilters();
                                 renderCats();
-                                selectCategory(catIdx);
+                                selectCategory(catIdx, true);
                             }
                         }).catch(function() {});
                     }
@@ -4378,7 +5715,28 @@
         }
     }
 
-    function selectCategory(targetCatIdx) {
+    function scheduleCategoryPreview() {
+        if (catHoverTimer) {
+            clearTimeout(catHoverTimer);
+        }
+        catHoverTimer = setTimeout(function() {
+            catHoverTimer = null;
+            if (activeCol !== 'cats') {
+                return;
+            }
+            var cat = currentCats[catIdx];
+            if (!cat) {
+                return;
+            }
+            var isAdultCat = Boolean(cat.censored) || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(String(cat.title || ''));
+            if (isAdultCat && !window._parentalUnlocked) {
+                return;
+            }
+            selectCategory(catIdx, false);
+        }, 160);
+    }
+
+    function selectCategory(targetCatIdx, forceReload) {
         if (targetCatIdx !== undefined) {
             catIdx = targetCatIdx;
         }
@@ -4394,12 +5752,19 @@
             openPinModal(function() {
                 activeCol = 'items';
                 updateColumnFocusClasses();
-                selectCategory(catIdx);
+                selectCategory(catIdx, true);
             });
             return;
         }
 
         var mode = modes[modeIdx];
+        var sig = (mode ? mode.id : 'live') + ':' + String(cat.id);
+        var isDynamicBuiltIn = (cat.id === 'cont' || cat.id === 'fav' || cat.id === 'rec');
+        if (!forceReload && !isDynamicBuiltIn && loadedCatSignature === sig && seriesStack.length === 0 && (rawItems.length > 0 || vodLoading)) {
+            renderUI();
+            return;
+        }
+        loadedCatSignature = sig;
         itemIdx = 0;
         seriesStack = [];
         vodPage = 1;
@@ -4431,6 +5796,13 @@
                     rawItems = genreChannelsMap[String(cat.id)] || [];
                 }
                 if (rawItems.length === 0) {
+                    if (cat.id === '*' && liveCatalogLoading) {
+                        if (itemsListEl) {
+                            itemsListEl._lastItemsRef = null;
+                            itemsListEl.innerHTML = '<div class="item">Loading Live TV channels...</div>';
+                        }
+                        return;
+                    }
                     vodLoading = true;
                     liveGenrePaged = true;
                     if (itemsListEl) {
@@ -4656,21 +6028,26 @@
             });
         } else if (item.isSeason) {
             var episodes = [];
-            var epNums = Array.isArray(item.episodes) ? item.episodes : [];
-            for (var i = 0; i < epNums.length; i++) {
-                var epNum = epNums[i];
-                episodes.push({
-                    id: item.parentSeries.id + '_s' + item.id + '_e' + epNum,
-                    name: 'Episode ' + epNum,
-                    cmd: item.cmd,
-                    desc: item.desc,
-                    poster: item.poster,
-                    seriesNum: epNum,
-                    isEpisode: true,
-                    isVod: true,
-                    isSeries: true,
-                    streamType: item.streamType
-                });
+            var epList = Array.isArray(item.episodes) ? item.episodes : [];
+            for (var i = 0; i < epList.length; i++) {
+                var epEntry = epList[i];
+                if (epEntry && typeof epEntry === 'object' && epEntry.isEpisode) {
+                    episodes.push(epEntry);
+                } else {
+                    var epNum = epEntry;
+                    episodes.push({
+                        id: item.parentSeries.id + '_s' + item.id + '_e' + epNum,
+                        name: 'Episode ' + epNum,
+                        cmd: item.cmd,
+                        desc: item.desc,
+                        poster: item.poster,
+                        seriesNum: epNum,
+                        isEpisode: true,
+                        isVod: true,
+                        isSeries: true,
+                        streamType: item.streamType
+                    });
+                }
             }
             seriesStack.push({
                 rawItems: rawItems.slice(),
@@ -4729,6 +6106,20 @@
         return true;
     }
 
+    function formatProfileSelectLabel(p) {
+        if (!p) {
+            return 'Profile';
+        }
+        var t = (p.type || 'stalker').toLowerCase();
+        if (t === 'xtream') {
+            return p.name + ' [Xtream: ' + (p.xtreamUser || 'No User') + ']';
+        }
+        if (t === 'm3u') {
+            return p.name + ' [M3U: ' + (p.m3uFileName || (p.m3uUrl ? 'URL' : 'Empty')) + ']';
+        }
+        return p.name + ' [MAG: ' + (p.mac || 'No MAC') + ']';
+    }
+
     function saveCurrentInputsToEditingProfile() {
         if (!profiles || editingProfileIndex < 0 || editingProfileIndex >= profiles.length) {
             return;
@@ -4736,6 +6127,9 @@
         var p = profiles[editingProfileIndex];
         if (!p) {
             return;
+        }
+        if (selProviderTypeEl && selProviderTypeEl.value) {
+            p.type = selProviderTypeEl.value;
         }
         if (inpProfileNameEl && typeof inpProfileNameEl.value === 'string') {
             p.name = inpProfileNameEl.value.trim() || ('Portal ' + (editingProfileIndex + 1));
@@ -4745,6 +6139,18 @@
         }
         if (inpMacEl && typeof inpMacEl.value === 'string') {
             p.mac = inpMacEl.value.trim();
+        }
+        if (inpXtreamUrlEl && typeof inpXtreamUrlEl.value === 'string') {
+            p.xtreamUrl = inpXtreamUrlEl.value.trim();
+        }
+        if (inpXtreamUserEl && typeof inpXtreamUserEl.value === 'string') {
+            p.xtreamUser = inpXtreamUserEl.value.trim();
+        }
+        if (inpXtreamPassEl && typeof inpXtreamPassEl.value === 'string') {
+            p.xtreamPass = inpXtreamPassEl.value.trim();
+        }
+        if (inpM3uUrlEl && typeof inpM3uUrlEl.value === 'string') {
+            p.m3uUrl = inpM3uUrlEl.value.trim();
         }
     }
 
@@ -4759,7 +6165,7 @@
                 var optEl = selProfileEl.children[c];
                 if (optEl) {
                     optEl.value = profiles[c].id;
-                    optEl.textContent = profiles[c].name + ' (' + (profiles[c].mac || 'No MAC') + ')';
+                    optEl.textContent = formatProfileSelectLabel(profiles[c]);
                 }
             }
             selProfileEl.selectedIndex = editingProfileIndex;
@@ -4770,7 +6176,7 @@
         for (var i = 0; i < profiles.length; i++) {
             var opt = document.createElement('option');
             opt.value = profiles[i].id;
-            opt.textContent = profiles[i].name + ' (' + (profiles[i].mac || 'No MAC') + ')';
+            opt.textContent = formatProfileSelectLabel(profiles[i]);
             if (i === editingProfileIndex) {
                 opt.selected = true;
             }
@@ -4779,9 +6185,27 @@
         selProfileEl.selectedIndex = editingProfileIndex;
         isRenderingProfileOptions = false;
     }
+    function updateM3uFileStatusText(p) {
+        if (!m3uFileStatusEl) {
+            return;
+        }
+        var hasCachedRaw = Boolean(p && (m3uRawMemoryCache[p.id] || localStorage.getItem('m3u_raw_' + p.id)));
+        if (p && p.m3uFileName && hasCachedRaw) {
+            m3uFileStatusEl.textContent = 'Loaded: ' + p.m3uFileName;
+        } else if (p && p.m3uFileName) {
+            m3uFileStatusEl.textContent = p.m3uFileName;
+        } else {
+            m3uFileStatusEl.textContent = 'No local file loaded';
+        }
+    }
     function loadProfileIntoSettingsInputs(idx, syncDropdown) {
         editingProfileIndex = Math.max(0, Math.min(profiles.length - 1, idx));
         var p = profiles[editingProfileIndex];
+        var pType = (p && p.type) ? String(p.type).toLowerCase() : 'stalker';
+        if (selProviderTypeEl) {
+            selProviderTypeEl.value = pType;
+        }
+        rebuildSettingsGrid(pType);
         if (syncDropdown !== false) {
             renderProfileSelectOptions(false);
         }
@@ -4794,6 +6218,99 @@
         if (inpMacEl) {
             inpMacEl.value = p.mac || '';
         }
+        if (inpXtreamUrlEl) {
+            inpXtreamUrlEl.value = p.xtreamUrl || '';
+        }
+        if (inpXtreamUserEl) {
+            inpXtreamUserEl.value = p.xtreamUser || '';
+        }
+        if (inpXtreamPassEl) {
+            inpXtreamPassEl.value = p.xtreamPass || '';
+        }
+        if (inpM3uUrlEl) {
+            inpM3uUrlEl.value = p.m3uUrl || '';
+        }
+        updateM3uFileStatusText(p);
+    }
+    function setSettingsProviderType(newType) {
+        var cleanType = (newType === 'xtream' || newType === 'm3u') ? newType : 'stalker';
+        if (selProviderTypeEl) {
+            selProviderTypeEl.value = cleanType;
+        }
+        if (profiles[editingProfileIndex]) {
+            profiles[editingProfileIndex].type = cleanType;
+        }
+        rebuildSettingsGrid(cleanType);
+        renderProfileSelectOptions(false);
+        updateSettingsFocus();
+    }
+    function openM3uFilePicker() {
+        if (!inpM3uFileHiddenEl) {
+            return;
+        }
+        inpM3uFileHiddenEl.value = '';
+        inpM3uFileHiddenEl.click();
+    }
+    function clearLocalM3uFileFromProfile() {
+        var p = profiles[editingProfileIndex];
+        if (!p) {
+            return;
+        }
+        p.m3uFileName = '';
+        if (p.m3uUrl && p.m3uUrl.indexOf('local://') === 0) {
+            p.m3uUrl = '';
+            if (inpM3uUrlEl) {
+                inpM3uUrlEl.value = '';
+            }
+        }
+        delete m3uRawMemoryCache[p.id];
+        try {
+            localStorage.removeItem('m3u_raw_' + p.id);
+        } catch (e) {}
+        proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent('m3u_raw_' + p.id) + '&action=delete', {
+            method: 'GET'
+        }).catch(function() {});
+        updateM3uFileStatusText(p);
+        renderProfileSelectOptions(false);
+        showToast('Cleared local M3U file for ' + (p.name || 'profile'));
+    }
+    if (inpM3uFileHiddenEl) {
+        inpM3uFileHiddenEl.onchange = function(ev) {
+            var file = ev.target && ev.target.files ? ev.target.files[0] : null;
+            if (!file) {
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function() {
+                var text = String(reader.result || '');
+                if (text.indexOf('#EXTM3U') === -1 && text.indexOf('#EXTINF') === -1) {
+                    showOSD('Invalid M3U File', 'Selected file does not contain #EXTM3U / #EXTINF entries');
+                    showToast('⚠ Invalid M3U playlist file');
+                    return;
+                }
+                var p = profiles[editingProfileIndex];
+                if (p) {
+                    p.m3uFileName = file.name;
+                    if (!p.m3uUrl || p.m3uUrl.indexOf('local://') === 0) {
+                        p.m3uUrl = 'local://' + file.name;
+                        if (inpM3uUrlEl) {
+                            inpM3uUrlEl.value = p.m3uUrl;
+                        }
+                    }
+                    m3uRawMemoryCache[p.id] = text;
+                    safeSetStorage('m3u_raw_' + p.id, text);
+                    proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent('m3u_raw_' + p.id), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ rawText: text, fileName: file.name, ts: Date.now() })
+                    }).catch(function() {});
+                    updateM3uFileStatusText(p);
+                    renderProfileSelectOptions(false);
+                    showToast('📂 Loaded M3U file: ' + file.name);
+                }
+            };
+            reader.readAsText(file);
+        };
     }
     if (selProfileEl) {
         selProfileEl.onchange = function() {
@@ -4805,10 +6322,92 @@
                 if (profiles[p].id === selectedId) {
                     saveCurrentInputsToEditingProfile();
                     loadProfileIntoSettingsInputs(p, false);
+                    updateSettingsFocus();
                     break;
                 }
             }
         };
+    }
+    if (selProviderTypeEl) {
+        selProviderTypeEl.onchange = function() {
+            setSettingsProviderType(selProviderTypeEl.value || 'stalker');
+        };
+    }
+    function syncSettingsCoordinatesForEl(targetEl) {
+        for (var r = 0; r < settingsGrid.length; r++) {
+            for (var c = 0; c < settingsGrid[r].length; c++) {
+                if (settingsGrid[r][c] === targetEl) {
+                    settingsRow = r;
+                    settingsCol = c;
+                    return;
+                }
+            }
+        }
+    }
+    (function bindSettingsElementFocusSync() {
+        function attachSync(el) {
+            if (!el) {
+                return;
+            }
+            el.addEventListener('focus', function() {
+                if (!settingsOpen) {
+                    return;
+                }
+                syncSettingsCoordinatesForEl(el);
+                if (el.tagName === 'INPUT') {
+                    imeActive = true;
+                }
+                updateSettingsFocus();
+            });
+            el.addEventListener('click', function() {
+                if (!settingsOpen) {
+                    return;
+                }
+                syncSettingsCoordinatesForEl(el);
+                if (el.tagName === 'INPUT') {
+                    imeActive = true;
+                }
+                updateSettingsFocus();
+            });
+        }
+        for (var s = 0; s < settingsEls.length; s++) {
+            attachSync(settingsEls[s]);
+        }
+    })();
+    if (tabProvStalkerEl) {
+        tabProvStalkerEl.onclick = function() {
+            setSettingsProviderType('stalker');
+            syncSettingsCoordinatesForEl(tabProvStalkerEl);
+            updateSettingsFocus();
+        };
+    }
+    if (tabProvXtreamEl) {
+        tabProvXtreamEl.onclick = function() {
+            setSettingsProviderType('xtream');
+            syncSettingsCoordinatesForEl(tabProvXtreamEl);
+            updateSettingsFocus();
+        };
+    }
+    if (tabProvM3uEl) {
+        tabProvM3uEl.onclick = function() {
+            setSettingsProviderType('m3u');
+            syncSettingsCoordinatesForEl(tabProvM3uEl);
+            updateSettingsFocus();
+        };
+    }
+    if (btnXtreamPassToggleEl && inpXtreamPassEl) {
+        btnXtreamPassToggleEl.onclick = function(ev) {
+            ev.stopPropagation();
+            var isMasked = inpXtreamPassEl.type === 'password';
+            inpXtreamPassEl.type = isMasked ? 'text' : 'password';
+            btnXtreamPassToggleEl.textContent = isMasked ? 'Hide' : 'Show';
+        };
+    }
+    if (btnM3uFileEl) {
+        btnM3uFileEl.onclick = function() { openM3uFilePicker(); };
+    }
+    if (btnM3uClearEl) {
+        btnM3uClearEl.onclick = function() { clearLocalM3uFileFromProfile(); };
     }
     if (selThemeEl) {
         selThemeEl.onchange = function() {
@@ -4883,14 +6482,53 @@
     function saveSettingsAndBoot() {
         saveCurrentInputsToEditingProfile();
         var prof = profiles[editingProfileIndex];
-        if (prof) {
-            prof.name = (inpProfileNameEl && inpProfileNameEl.value.trim()) || 'Portal ' + (editingProfileIndex + 1);
-            prof.portal = (inpPortalEl && inpPortalEl.value.trim()) || '';
-            prof.mac = (inpMacEl && inpMacEl.value.trim()) || '00:1A:79:00:00:01';
-            activeProfileId = prof.id;
-            safeSetStorage('cfg_profiles', JSON.stringify(profiles));
-            syncActiveProfileToLegacyKeys(prof);
+        if (!prof) {
+            return;
         }
+        var pType = (selProviderTypeEl && selProviderTypeEl.value) ? selProviderTypeEl.value : (prof.type || 'stalker');
+        prof.type = pType;
+        prof.name = (inpProfileNameEl && inpProfileNameEl.value.trim()) || 'Portal ' + (editingProfileIndex + 1);
+        prof.portal = (inpPortalEl && inpPortalEl.value.trim()) || '';
+        prof.mac = (inpMacEl && inpMacEl.value.trim()) || '';
+        prof.xtreamUrl = (inpXtreamUrlEl && inpXtreamUrlEl.value.trim()) || '';
+        prof.xtreamUser = (inpXtreamUserEl && inpXtreamUserEl.value.trim()) || '';
+        prof.xtreamPass = (inpXtreamPassEl && inpXtreamPassEl.value.trim()) || '';
+        prof.m3uUrl = (inpM3uUrlEl && inpM3uUrlEl.value.trim()) || '';
+
+        if (pType === 'xtream') {
+            if (!prof.xtreamUrl || !/^https?:\/\//i.test(prof.xtreamUrl)) {
+                showOSD('Validation Error', 'Xtream Server URL must start with http:// or https://');
+                showToast('⚠ Enter a valid Xtream Server URL');
+                return;
+            }
+            if (!prof.xtreamUser || !prof.xtreamPass) {
+                showOSD('Validation Error', 'Xtream Username and Password are required');
+                showToast('⚠ Enter Xtream Username and Password');
+                return;
+            }
+        } else if (pType === 'm3u') {
+            var hasValidRemoteM3u = Boolean(prof.m3uUrl && /^https?:\/\/.+/i.test(prof.m3uUrl));
+            var hasRawM3u = Boolean(m3uRawMemoryCache[prof.id] || localStorage.getItem('m3u_raw_' + prof.id) || prof.m3uFileName);
+            if (!hasValidRemoteM3u && !hasRawM3u) {
+                showOSD('Validation Error', 'Provide an http(s):// M3U URL or upload a local .m3u/.m3u8 file');
+                showToast('⚠ Enter M3U URL or load a local M3U file');
+                return;
+            }
+        } else {
+            if (!prof.portal || !/^https?:\/\//i.test(prof.portal)) {
+                showOSD('Validation Error', 'Stalker Portal URL must start with http:// or https://');
+                showToast('⚠ Enter a valid Stalker Portal URL');
+                return;
+            }
+            if (!prof.mac) {
+                prof.mac = '00:1A:79:00:00:01';
+            }
+        }
+
+        activeProfileId = prof.id;
+        safeSetStorage('cfg_profiles', JSON.stringify(profiles));
+        syncActiveProfileToLegacyKeys(prof);
+
         if (selThemeEl) {
             applyTheme(selThemeEl.value);
         }
@@ -4906,6 +6544,7 @@
         currentPlayingItem = null;
         previousLiveChannel = null;
         hasAutoResumedOnBoot = false;
+        userInteractedSinceBoot = false;
         liveGenres = [];
         allChannels = [];
         vodCats = [];
@@ -4919,9 +6558,7 @@
         shortEpgKeys = [];
         fullEpgCache = {};
         rebuildGenreChannelCounts();
-        api.token = '';
-        api.handshakePromise = null;
-        api.authPromise = null;
+        api.resetProviderCaches();
         if (accountBadgeEl) {
             accountBadgeEl.textContent = 'Connecting...';
         }
@@ -4939,10 +6576,22 @@
     function createNewProfileInSettings() {
         saveCurrentInputsToEditingProfile();
         var newId = 'prof_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
-        profiles.push({ id: newId, name: 'Portal ' + (profiles.length + 1), portal: 'http://', mac: '00:1A:79:00:00:01' });
+        var curType = (selProviderTypeEl && selProviderTypeEl.value) ? selProviderTypeEl.value : 'stalker';
+        profiles.push({
+            id: newId,
+            name: 'Profile ' + (profiles.length + 1),
+            type: curType,
+            portal: 'http://',
+            mac: '00:1A:79:00:00:01',
+            xtreamUrl: '',
+            xtreamUser: '',
+            xtreamPass: '',
+            m3uUrl: '',
+            m3uFileName: ''
+        });
         renderProfileSelectOptions(true);
         loadProfileIntoSettingsInputs(profiles.length - 1, true);
-        showToast('Created Profile: Portal ' + profiles.length);
+        showToast('Created Profile: Profile ' + profiles.length);
     }
     function deleteCurrentProfileInSettings() {
         if (profiles.length <= 1) {
@@ -4959,7 +6608,9 @@
         safeSetStorage('cfg_profiles', JSON.stringify(profiles));
         syncActiveProfileToLegacyKeys(profiles[editingProfileIndex]);
         if (deletedId) {
+            delete m3uRawMemoryCache[deletedId];
             try {
+                localStorage.removeItem('m3u_raw_' + deletedId);
                 var scopedPrefixes = [
                     'fav_live_', 'fav_vod_objs_', 'fav_series_objs_',
                     'rec_items_', 'rec_vod_', 'vod_resume_', 'vod_watched_',
@@ -4990,7 +6641,10 @@
                 }
             } catch (exClean) {}
             delete fullEpgCache[deletedId];
-            fetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(deletedId) + '&action=delete&mac=' + encodeURIComponent(deletedMac), {
+            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(deletedId) + '&action=delete&mac=' + encodeURIComponent(deletedMac), {
+                method: 'GET'
+            }).catch(function() {});
+            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent('m3u_raw_' + deletedId) + '&action=delete', {
                 method: 'GET'
             }).catch(function() {});
         }
@@ -5345,17 +6999,20 @@
             if (currentCats.length === 0) {
                 return;
             }
+            userInteractedSinceBoot = true;
             activeCol = 'cats';
             var dir = ev.deltaY > 0 ? 1 : -1;
             catIdx = (catIdx + dir + currentCats.length) % currentCats.length;
             updateColumnFocusClasses();
             renderCats();
+            scheduleCategoryPreview();
         });
         bindWheelSafe(itemsColEl, function(ev) {
             ev.preventDefault();
             if (currentItems.length === 0) {
                 return;
             }
+            userInteractedSinceBoot = true;
             activeCol = 'items';
             var step = ev.deltaY > 0 ? 2 : -2;
             itemIdx = Math.max(0, Math.min(currentItems.length - 1, itemIdx + step));
@@ -5439,6 +7096,7 @@
         } catch (ex2) {}
 
         document.addEventListener('keydown', function(e) {
+            userInteractedSinceBoot = true;
             var code = e.keyCode;
             var key = e.key || '';
             var isInputFocused = Boolean(document.activeElement && document.activeElement.tagName === 'INPUT');
@@ -5447,7 +7105,9 @@
             var isLeft = code === 37 || key === 'ArrowLeft';
             var isRight = code === 39 || key === 'ArrowRight';
             var isEnter = code === 13 || key === 'Enter';
-            var isHardwareOrEscBack = code === 10009 || code === 27 || key === 'Escape';
+            var isImeDone = code === 65376;
+            var isImeCancel = code === 65385;
+            var isHardwareOrEscBack = code === 10009 || code === 27 || key === 'Escape' || isImeCancel;
             var isBackspaceKey = code === 8 || key === 'Backspace';
             var isBack = isHardwareOrEscBack || (isBackspaceKey && !isInputFocused);
             var isRed = code === 403 || key === 'ColorF0Red' || key === 'r';
@@ -5563,45 +7223,73 @@
             // 2. Settings Modal
             if (settingsOpen) {
                 var focusedEl = getFocusedModalElement(settingsGrid, settingsRow, settingsCol);
-                if (imeActive && !isEnter && !isHardwareOrEscBack && !isUp && !isDown) {
+                if (isImeDone && focusedEl) {
+                    e.preventDefault();
+                    if (focusedEl.blur) {
+                        focusedEl.blur();
+                    }
+                    imeActive = false;
+                    return;
+                }
+                if ((imeActive || isInputFocused) && !isEnter && !isHardwareOrEscBack && !isUp && !isDown) {
                     return;
                 }
                 e.preventDefault();
                 if (isBack || isHardwareOrEscBack) {
-                    if (imeActive && focusedEl) {
-                        focusedEl.blur();
+                    if ((imeActive || isInputFocused) && focusedEl) {
+                        if (focusedEl.blur) {
+                            focusedEl.blur();
+                        }
                         imeActive = false;
                     } else {
                         closeSettings();
                     }
                 } else if (isUp) {
-                    if (imeActive && focusedEl) {
+                    if (focusedEl && focusedEl.blur) {
                         focusedEl.blur();
                     }
                     imeActive = false;
+                    var prevRowUp = settingsRow;
                     settingsRow = Math.max(0, settingsRow - 1);
+                    if (settingsRow !== prevRowUp) {
+                        if (settingsGrid[settingsRow] && settingsGrid[settingsRow][0] === tabProvStalkerEl) {
+                            var curTypeUp = (selProviderTypeEl && selProviderTypeEl.value) ? selProviderTypeEl.value : 'stalker';
+                            settingsCol = (curTypeUp === 'xtream') ? 1 : ((curTypeUp === 'm3u') ? 2 : 0);
+                        } else {
+                            settingsCol = 0;
+                        }
+                    }
                     settingsCol = Math.min(settingsCol, settingsGrid[settingsRow].length - 1);
                     updateSettingsFocus();
                 } else if (isDown) {
-                    if (imeActive && focusedEl) {
+                    if (focusedEl && focusedEl.blur) {
                         focusedEl.blur();
                     }
                     imeActive = false;
+                    var prevRowDown = settingsRow;
                     settingsRow = Math.min(settingsGrid.length - 1, settingsRow + 1);
+                    if (settingsRow !== prevRowDown) {
+                        if (settingsGrid[settingsRow] && settingsGrid[settingsRow][0] === tabProvStalkerEl) {
+                            var curTypeDown = (selProviderTypeEl && selProviderTypeEl.value) ? selProviderTypeEl.value : 'stalker';
+                            settingsCol = (curTypeDown === 'xtream') ? 1 : ((curTypeDown === 'm3u') ? 2 : 0);
+                        } else {
+                            settingsCol = 0;
+                        }
+                    }
                     settingsCol = Math.min(settingsCol, settingsGrid[settingsRow].length - 1);
                     updateSettingsFocus();
                 } else if (isLeft) {
-                    if (imeActive && focusedEl) {
+                    if (focusedEl && focusedEl.blur) {
                         focusedEl.blur();
-                        imeActive = false;
                     }
+                    imeActive = false;
                     settingsCol = Math.max(0, settingsCol - 1);
                     updateSettingsFocus();
                 } else if (isRight) {
-                    if (imeActive && focusedEl) {
+                    if (focusedEl && focusedEl.blur) {
                         focusedEl.blur();
-                        imeActive = false;
                     }
+                    imeActive = false;
                     settingsCol = Math.min(settingsGrid[settingsRow].length - 1, settingsCol + 1);
                     updateSettingsFocus();
                 } else if (isEnter) {
@@ -5609,6 +7297,21 @@
                         saveCurrentInputsToEditingProfile();
                         var nextProfIdx = (editingProfileIndex + 1) % profiles.length;
                         loadProfileIntoSettingsInputs(nextProfIdx);
+                    } else if (focusedEl === tabProvStalkerEl) {
+                        setSettingsProviderType('stalker');
+                    } else if (focusedEl === tabProvXtreamEl) {
+                        setSettingsProviderType('xtream');
+                    } else if (focusedEl === tabProvM3uEl) {
+                        setSettingsProviderType('m3u');
+                    } else if (focusedEl === selProviderTypeEl) {
+                        var pTypes = ['stalker', 'xtream', 'm3u'];
+                        var curPT = pTypes.indexOf(selProviderTypeEl.value);
+                        var nextPT = pTypes[(curPT + 1) % pTypes.length];
+                        setSettingsProviderType(nextPT);
+                    } else if (focusedEl === btnM3uFileEl) {
+                        openM3uFilePicker();
+                    } else if (focusedEl === btnM3uClearEl) {
+                        clearLocalM3uFileFromProfile();
                     } else if (focusedEl === selThemeEl) {
                         var themes = ['blue', 'green', 'red', 'amber'];
                         var curT = themes.indexOf(selThemeEl.value);
@@ -5630,7 +7333,7 @@
                     } else if (focusedEl === btnBackupImportEl) {
                         importBackupJson();
                     } else if (focusedEl && focusedEl.tagName === 'INPUT') {
-                        if (imeActive) {
+                        if (imeActive || document.activeElement === focusedEl) {
                             focusedEl.blur();
                             imeActive = false;
                         } else {
@@ -5643,7 +7346,25 @@
             }
             // 3. Global Search Modal
             if (searchOpen) {
-                if (searchFocusArea === 'input' && !isDown && !isEnter && !isBack) {
+                var isSearchBack = isHardwareOrEscBack ||
+                    (isBackspaceKey && (!isInputFocused || !searchInput || searchInput.value === ''));
+                if (isSearchBack) {
+                    e.preventDefault();
+                    closeSearch();
+                    return;
+                }
+                if (isImeDone && searchInput) {
+                    e.preventDefault();
+                    searchInput.blur();
+                    performSearch(searchInput.value);
+                    if (searchResults.length > 0) {
+                        searchFocusArea = 'results';
+                        searchInput.classList.remove('focused');
+                        renderSearchResults();
+                    }
+                    return;
+                }
+                if (searchFocusArea === 'input' && !isDown && !isEnter) {
                     if (searchDebounce) {
                         clearTimeout(searchDebounce);
                     }
@@ -5653,16 +7374,18 @@
                     return;
                 }
                 e.preventDefault();
-                if (isBack) {
-                    closeSearch();
-                } else if (isDown) {
-                    if (searchFocusArea === 'input' && searchResults.length > 0) {
-                        searchFocusArea = 'results';
+                if (isDown) {
+                    if (searchFocusArea === 'input') {
                         if (searchInput) {
                             searchInput.blur();
-                            searchInput.classList.remove('focused');
                         }
-                        renderSearchResults();
+                        if (searchResults.length > 0) {
+                            searchFocusArea = 'results';
+                            if (searchInput) {
+                                searchInput.classList.remove('focused');
+                            }
+                            renderSearchResults();
+                        }
                     } else if (searchFocusArea === 'results') {
                         searchIdx = Math.min(searchResults.length - 1, searchIdx + 1);
                         renderSearchResults();
@@ -5681,8 +7404,18 @@
                     }
                 } else if (isEnter) {
                     if (searchFocusArea === 'input' && searchInput) {
-                        searchInput.focus();
-                        performSearch(searchInput.value);
+                        if (document.activeElement === searchInput) {
+                            searchInput.blur();
+                            performSearch(searchInput.value);
+                            if (searchResults.length > 0) {
+                                searchFocusArea = 'results';
+                                searchInput.classList.remove('focused');
+                                renderSearchResults();
+                            }
+                        } else {
+                            searchInput.focus();
+                            performSearch(searchInput.value);
+                        }
                     } else if (searchFocusArea === 'results' && searchResults[searchIdx]) {
                         var chosen = searchResults[searchIdx];
                         closeSearch();
@@ -5848,7 +7581,9 @@
                 if (isBack) {
                     setOverlayVisible(true);
                 } else if (isEnter) {
-                    if (!isPlayingVod && !isPlayingCatchup && currentItems.length > 0) {
+                    if (hasActivePlaybackError && currentPlayingItem) {
+                        playItem(currentPlayingItem);
+                    } else if (!isPlayingVod && !isPlayingCatchup && currentItems.length > 0) {
                         openMiniZapDrawer();
                     } else {
                         setOverlayVisible(true);
@@ -5875,7 +7610,7 @@
                     }
                     zapTimeout = setTimeout(function() {
                         playItem(currentItems[itemIdx]);
-                    }, 220);
+                    }, 120);
                 } else if ((isDown || isChDown) && !isPlayingVod && !isPlayingCatchup && currentItems.length > 0) {
                     itemIdx = (itemIdx + 1) % currentItems.length;
                     renderItems();
@@ -5885,7 +7620,7 @@
                     }
                     zapTimeout = setTimeout(function() {
                         playItem(currentItems[itemIdx]);
-                    }, 220);
+                    }, 120);
                 } else if (isRed) {
                     cycleAudioTrack();
                 } else if (isGreen) {
@@ -5948,6 +7683,10 @@
                         updateColumnFocusClasses();
                     }
                 } else if (activeCol === 'cats') {
+                    if (catHoverTimer) {
+                        clearTimeout(catHoverTimer);
+                        catHoverTimer = null;
+                    }
                     activeCol = 'modes';
                     updateColumnFocusClasses();
                 }
@@ -5956,8 +7695,13 @@
                     activeCol = 'cats';
                     updateColumnFocusClasses();
                 } else if (activeCol === 'cats') {
+                    if (catHoverTimer) {
+                        clearTimeout(catHoverTimer);
+                        catHoverTimer = null;
+                    }
                     activeCol = 'items';
                     updateColumnFocusClasses();
+                    selectCategory(catIdx, false);
                 } else if (activeCol === 'items' && quickActionButtons.length > 0) {
                     activeCol = 'info';
                     infoActionIdx = 0;
@@ -5975,6 +7719,7 @@
                 } else if (activeCol === 'cats' && currentCats.length > 0) {
                     catIdx = (catIdx - 1 + currentCats.length) % currentCats.length;
                     renderCats();
+                    scheduleCategoryPreview();
                 } else if (activeCol === 'items' && currentItems.length > 0) {
                     var nowUpMs = Date.now();
                     var isFastRepeatUp = (nowUpMs - lastKeyRepeatTime) < 80;
@@ -6000,6 +7745,7 @@
                 } else if (activeCol === 'cats' && currentCats.length > 0) {
                     catIdx = (catIdx + 1) % currentCats.length;
                     renderCats();
+                    scheduleCategoryPreview();
                 } else if (activeCol === 'items' && currentItems.length > 0) {
                     var nowDownMs = Date.now();
                     var isFastRepeatDown = (nowDownMs - lastKeyRepeatTime) < 80;
@@ -6036,9 +7782,13 @@
                         updateColumnFocusClasses();
                     }
                 } else if (activeCol === 'cats') {
+                    if (catHoverTimer) {
+                        clearTimeout(catHoverTimer);
+                        catHoverTimer = null;
+                    }
                     activeCol = 'items';
                     updateColumnFocusClasses();
-                    selectCategory(catIdx);
+                    selectCategory(catIdx, false);
                 } else if (activeCol === 'items') {
                     activateCurrentItemSelection();
                 } else if (activeCol === 'info' && quickActionButtons[infoActionIdx]) {
@@ -6123,19 +7873,26 @@
         setupMouseListeners();
         registerLifecycleHandlers();
         renderUI();
+        var activeProf = getActiveProfile();
+        if (!isProfileConfigured(activeProf)) {
+            openSettings();
+            wakeLocalService();
+            return;
+        }
+        switchMode(0);
         wakeLocalService().then(function() {
-            var portal = localStorage.getItem('cfg_portal');
-            var mac = localStorage.getItem('cfg_mac');
-            if (!portal || !mac) {
-                openSettings();
-                return;
-            }
-            api.boot().then(function() {
+            return api.boot();
+        }).then(function() {
+            var isLiveView = (modes[modeIdx] && modes[modeIdx].id === 'live') ||
+                (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live');
+            if (isLiveView && liveGenres.length <= 3 && !liveCatalogLoading) {
                 switchMode(0);
-            }).catch(function(err) {
-                showOSD('Connection Error', err.message);
+            }
+        }).catch(function(err) {
+            showOSD('Connection Error', err.message);
+            if (liveGenres.length <= 3 && allChannels.length === 0) {
                 openSettings();
-            });
+            }
         });
     }
     if (document.readyState === 'loading') {
