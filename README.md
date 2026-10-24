@@ -1,4 +1,4 @@
-# SmartSTB Clone v2 for Samsung Tizen Smart TVs & Windows PC
+# IPTV Player for Samsung Tizen Smart TVs
 
 [![Tizen OS](https://img.shields.io/badge/Tizen%20OS-4.0%20to%209.0%2B-0083D6?logo=tizen&logoColor=white)](https://developer.samsung.com/smarttv)
 [![Platform](https://img.shields.io/badge/Platform-Samsung%20Smart%20TV%20%7C%20Windows%20PC-1428A0?logo=samsung&logoColor=white)](https://www.samsung.com/)
