@@ -1314,3 +1314,87 @@ body.theme-amber .item-progress-fill {
     color: #9ca3af;
     text-align: center;
 }
+#tracks-list .item:hover {
+    background: rgba(59, 130, 246, 0.18);
+    border-color: rgba(96, 165, 250, 0.45);
+    color: #ffffff;
+    cursor: pointer;
+}
+#tracks-style-color, #tracks-style-size {
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: #1e293b;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    -webkit-user-select: none;
+    user-select: none;
+}
+#tracks-style-color:hover, #tracks-style-size:hover {
+    background: #2563eb;
+    color: #ffffff;
+}
+.settings-card {
+    background: rgba(17, 24, 39, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin-top: 12px;
+}
+.provider-tabs {
+    display: flex;
+    gap: 10px;
+    margin-top: 6px;
+    margin-bottom: 4px;
+}
+.provider-tab {
+    flex: 1;
+    text-align: center;
+    padding: 11px 14px;
+    font-size: 20px;
+    font-weight: 600;
+    border-radius: 9px;
+    background: #111827;
+    color: #9ca3af;
+    border: 2px solid #374151;
+    cursor: pointer;
+    transition: all 0.14s ease;
+    -webkit-user-select: none;
+    user-select: none;
+}
+.provider-tab:hover {
+    color: #f8fafc;
+    border-color: #60a5fa;
+}
+.provider-tab.active {
+    background: rgba(59, 130, 246, 0.22);
+    color: #ffffff;
+    border-color: #3b82f6;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.28);
+}
+.provider-tab.focused {
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.45);
+    color: #ffffff;
+}
+.pass-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.pass-toggle-btn {
+    position: absolute;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #cbd5e1;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 16px;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+.pass-toggle-btn:hover {
+    background: #3b82f6;
+    color: #fff;
+}
