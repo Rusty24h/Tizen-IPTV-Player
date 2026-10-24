@@ -134,35 +134,82 @@
 
     <!-- Settings & Multi-Portal Profile Modal -->
     <div id="settings-modal" class="modal">
-        <div class="modal-box">
-            <h2>Portal &amp; Profile Settings</h2>
-            <div class="modal-row">
-                <div>
-                    <label for="sel-profile">Active Portal Profile</label>
-                    <select id="sel-profile"></select>
+        <div class="modal-box" style="width: 1040px; padding: 26px 32px;">
+            <h2 style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                <span>Portal &amp; Profile Settings</span>
+                <span id="settings-active-type-pill" style="font-size: 16px; padding: 4px 12px; border-radius: 999px; background: rgba(59, 130, 246, 0.22); border: 1px solid #3b82f6; color: #93c5fd;">Stalker MAC</span>
+            </h2>
+            <div class="settings-card">
+                <div class="modal-row">
+                    <div>
+                        <label for="sel-profile">Active Portal Profile</label>
+                        <select id="sel-profile"></select>
+                    </div>
+                    <div>
+                        <label for="inp-profile-name">Profile Name</label>
+                        <input id="inp-profile-name" type="text" placeholder="Living Room IPTV" />
+                    </div>
                 </div>
-                <div>
-                    <label for="inp-profile-name">Profile Name</label>
-                    <input id="inp-profile-name" type="text" placeholder="Living Room IPTV" />
+                <label>Provider Type (Click Tab or Cycle with Enter)</label>
+                <div class="provider-tabs">
+                    <div id="tab-prov-stalker" class="provider-tab active" data-prov="stalker">📡 Stalker MAC Portal</div>
+                    <div id="tab-prov-xtream" class="provider-tab" data-prov="xtream">🔑 Xtream Codes API</div>
+                    <div id="tab-prov-m3u" class="provider-tab" data-prov="m3u">📋 M3U / M3U8 Playlist</div>
+                </div>
+                <select id="sel-provider-type" style="display:none;">
+                    <option value="stalker">Stalker MAC Portal (MAG STB)</option>
+                    <option value="xtream">Xtream Codes API (Username &amp; Password)</option>
+                    <option value="m3u">M3U / M3U8 Playlist (URL or Local File)</option>
+                </select>
+            </div>
+            <div id="provider-fields-stalker" class="settings-card">
+                <label for="inp-portal">Stalker Portal URL</label>
+                <input id="inp-portal" type="text" placeholder="http://example.com/stalker_portal/c/" />
+                <label for="inp-mac">MAC Address</label>
+                <input id="inp-mac" type="text" placeholder="00:1A:79:XX:XX:XX" />
+            </div>
+            <div id="provider-fields-xtream" class="settings-card" style="display:none;">
+                <label for="inp-xtream-url">Xtream Server URL (http://host:port)</label>
+                <input id="inp-xtream-url" type="text" placeholder="http://server.example.com:8080" />
+                <div class="modal-row" style="margin-top:6px;">
+                    <div>
+                        <label for="inp-xtream-user" style="margin-top:6px;">Username</label>
+                        <input id="inp-xtream-user" type="text" placeholder="username" />
+                    </div>
+                    <div>
+                        <label for="inp-xtream-pass" style="margin-top:6px;">Password</label>
+                        <div class="pass-wrap">
+                            <input id="inp-xtream-pass" type="password" placeholder="password" style="padding-right: 74px;" />
+                            <span id="btn-xtream-pass-toggle" class="pass-toggle-btn" title="Show / Hide Password">Show</span>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <label for="inp-portal">Stalker Portal URL</label>
-            <input id="inp-portal" type="text" placeholder="http://example.com/stalker_portal/c/" />
-            <label for="inp-mac">MAC Address</label>
-            <input id="inp-mac" type="text" placeholder="00:1A:79:XX:XX:XX" />
-            <div class="modal-row">
-                <div>
-                    <label for="sel-theme">UI Color Theme</label>
-                    <select id="sel-theme">
-                        <option value="blue">Classic Blue</option>
-                        <option value="green">Emerald Green</option>
-                        <option value="red">Crimson Red</option>
-                        <option value="amber">Gold Amber</option>
-                    </select>
+            <div id="provider-fields-m3u" class="settings-card" style="display:none;">
+                <label for="inp-m3u-url">M3U / M3U8 Playlist URL (Optional if Local File Loaded)</label>
+                <input id="inp-m3u-url" type="text" placeholder="https://example.com/playlist.m3u8" />
+                <div class="btn-row" style="margin-top:12px;margin-bottom:2px;align-items:center;">
+                    <div id="btn-m3u-file" class="btn" style="flex:0 0 auto; padding: 10px 18px;">📂 Upload Local .M3U / .M3U8</div>
+                    <div id="btn-m3u-clear" class="btn" style="flex:0 0 auto; padding: 10px 14px; background:#374151; font-size:19px;">✕ Clear File</div>
+                    <span id="m3u-file-status" style="font-size:18px;color:#93c5fd;padding-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">No local file loaded</span>
+                    <input id="inp-m3u-file-hidden" type="file" accept=".m3u,.m3u8,audio/x-mpegurl,application/vnd.apple.mpegurl,text/plain" style="display:none;" />
                 </div>
-                <div>
-                    <label for="inp-pin">Parental Control PIN (4 Digits)</label>
-                    <input id="inp-pin" type="password" maxlength="4" placeholder="0000" />
+            </div>
+            <div class="settings-card">
+                <div class="modal-row">
+                    <div>
+                        <label for="sel-theme">UI Color Theme</label>
+                        <select id="sel-theme">
+                            <option value="blue">Classic Blue</option>
+                            <option value="green">Emerald Green</option>
+                            <option value="red">Crimson Red</option>
+                            <option value="amber">Gold Amber</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="inp-pin">Parental Control PIN (4 Digits)</label>
+                        <input id="inp-pin" type="password" maxlength="4" placeholder="0000" />
+                    </div>
                 </div>
             </div>
             <div class="btn-row">
