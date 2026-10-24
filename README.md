@@ -262,9 +262,6 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
 
 ## Troubleshooting & FAQs
 
-### Q: The screen says "Local Proxy Service Unreachable"?
-**A**: Ensure your TV's `config.xml` includes the `<tizen:service>` tag for `smartstbv2.StalkerProxy` and that network privileges are enabled. If running on PC, ensure `node service/proxy.js` or `node pc-server.js` is running on port 3001.
-
 ### Q: How do I know if buffering is caused by my IPTV provider or the app?
 **A**: While a stream is buffering or playing, check the OSD telemetry badge. SmartSTB v2 polls `/stream-diag` on the local proxy to display real-time download throughput (`KB/s`) and upstream HTTP status codes. If the badge reports `Provider HTTP 403 / 458` or `Provider Feed Idle (0 KB/s)`, the stall is originating from the upstream IPTV server rather than the TV decoder.
 
