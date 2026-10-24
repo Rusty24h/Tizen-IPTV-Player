@@ -45,9 +45,6 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
   - Direct **Red Button** (cycle audio tracks) and **Blue Button** (cycle subtitles) during fullscreen playback, plus an interactive **Audio & Subtitles Modal** (`🔊 Audio / Subs` in Quick Actions) with live subtitle color (`White`, `Yellow`, `Cyan`, `Green`) and size (`Small`, `Normal`, `Large`, `Extra Large`) controls.
 - **📊 Real-Time Provider vs. App Buffering Diagnostics (`/stream-diag`)**: Live OSD diagnostic badge distinguishes between provider-side stream stalls (HTTP `403`/`458` token limit, 0 KB/s idle feed) and local network throughput (`KB/s`).
 - **▶ Continue Watching & Watched Badges (`✓`)**: Virtual **▶ Continue Watching** category in Movies & Series with inline progress bars on partially watched items and `✓` badges on completed episodes/movies.
-- **🎯 Refined 10-Foot Remote Navigation**:
-  - Deterministic vertical/horizontal spatial focus inside the **Settings Modal** so pressing `Down` from the Portal URL moves directly into the MAC Address input and subsequent fields in strict vertical order.
-  - Global Search modal allows immediate exit back to the keyboard/cancel button via `Up` or `Left` even when a search query returns 0 matching channels.
 
 ---
 
