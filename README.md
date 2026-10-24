@@ -25,11 +25,10 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
    - [Phase 3: Generate Samsung Certificates (Author & Distributor)](#phase-3-generate-samsung-certificates-author--distributor)
    - [Phase 4: Connect Tizen Studio to your Samsung TV](#phase-4-connect-tizen-studio-to-your-samsung-tv)
    - [Phase 5: Build and Deploy the `.wgt` Package](#phase-5-build-and-deploy-the-wgt-package)
-6. [Standalone Windows PC Edition](#standalone-windows-pc-edition)
-7. [Remote Control & PC Keyboard Mapping](#remote-control--pc-keyboard-mapping)
-8. [Initial Setup & Multi-Provider Configuration](#initial-setup--multi-provider-configuration)
-9. [Troubleshooting & FAQs](#troubleshooting--faqs)
-10. [License](#license)
+6. [Remote Control & PC Keyboard Mapping](#remote-control--pc-keyboard-mapping)
+7. [Initial Setup & Multi-Provider Configuration](#initial-setup--multi-provider-configuration)
+8. [Troubleshooting & FAQs](#troubleshooting--faqs)
+9. [License](#license)
 
 ---
 
