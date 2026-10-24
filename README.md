@@ -27,8 +27,7 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
    - [Phase 5: Build and Deploy the `.wgt` Package](#phase-5-build-and-deploy-the-wgt-package)
 6. [Remote Control & PC Keyboard Mapping](#remote-control--pc-keyboard-mapping)
 7. [Initial Setup & Multi-Provider Configuration](#initial-setup--multi-provider-configuration)
-8. [Troubleshooting & FAQs](#troubleshooting--faqs)
-9. [License](#license)
+8. [License](#license)
 
 ---
 
@@ -257,16 +256,6 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
 3. Choose your preferred **UI Color Theme** and optional **4-Digit Parental PIN** (default: `0000`).
 4. Click **Save & Connect**.
 5. The app immediately fetches and displays your Live TV categories while loading the full channel list in the background.
-
----
-
-## Troubleshooting & FAQs
-
-### Q: How do I know if buffering is caused by my IPTV provider or the app?
-**A**: While a stream is buffering or playing, check the OSD telemetry badge. SmartSTB v2 polls `/stream-diag` on the local proxy to display real-time download throughput (`KB/s`) and upstream HTTP status codes. If the badge reports `Provider HTTP 403 / 458` or `Provider Feed Idle (0 KB/s)`, the stall is originating from the upstream IPTV server rather than the TV decoder.
-
-### Q: How do I backup my profiles, settings, and channel favorites?
-**A**: Open **Settings** > Click **Export Backup**. The app saves a complete snapshot to TV storage, local proxy disk (`/backup`), or a `.json` file, which can be restored anytime via **Import Backup**.
 
 ---
 
