@@ -7,7 +7,7 @@
 [![Protocol](https://img.shields.io/badge/Providers-Stalker%20MAC%20%7C%20Xtream%20API%20%7C%20M3U8-blue)](#multi-provider-architecture--profile-system)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A high-performance, hardware-accelerated IPTV client engineered specifically for **Samsung Smart TVs running Tizen OS** (Tizen 4.0+ through 9.0+, model years 2018 to present) with a companion **Standalone Windows PC Edition**.
+A high-performance, hardware-accelerated IPTV client engineered specifically for **Samsung Smart TVs running Tizen OS** (Tizen 4.0+ through 9.0+, model years 2018 to present)
 
 Designed as a modern, lightweight, and customizable replacement for legacy set-top box middleware, it provides a native **10-foot remote-controlled television interface** with unified **Multi-Provider Architecture** (**Stalker / Ministra MAC Portals**, **Xtream Codes API**, and **M3U / M3U8 Playlists + Local File Import**), progressive instant category boot, seamless EPG timelines, catch-up TV archives, multi-season VOD series management, multi-audio/subtitle track switching, real-time stream diagnostics, and a built-in local background streaming proxy service.
 
@@ -162,8 +162,7 @@ Before installing the app on your Samsung Smart TV, ensure you have:
 
 ### Phase 2: Install Tizen Studio & TV Extension
 
-1. Download and install **Tizen Studio** (with IDE or CLI) from the official Samsung Developer portal:
-   👉 [Samsung Developers: Tizen Studio Download](https://developer.samsung.com/smarttv/develop/tools/tizen-studio/download.html)
+1. Download and install **Tizen Studio** (with IDE or CLI) from the official Samsung Developer portal.
 2. Launch **Tizen Package Manager**:
    - Under the **Main SDK** tab, install **Tizen SDK Tools**.
    - Under the **Extension SDK** tab, install:
@@ -232,16 +231,6 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
 
 ---
 
-## Standalone Windows PC Edition
-
-In addition to Samsung Tizen Smart TVs, a self-contained **Windows PC Edition** is available:
-1. Ensure **Node.js** (v16+) is installed on your Windows PC.
-2. *(Optional but recommended)* Install **FFmpeg** (`ffmpeg` and `ffprobe` in your system `PATH`) to enable real-time audio/video transcoding for Dolby `AC-3`/`E-AC-3` audio, `HEVC`, and `.mkv` containers.
-3. Double-click **`run-windows.bat`** (or run `node pc-server.js` and open `http://127.0.0.1:3001/index.html`).
-4. Enjoy full mouse hover HUD controls, scroll-wheel navigation, fullscreen double-click, and complete feature parity with the TV edition.
-
----
-
 ## Remote Control & PC Keyboard Mapping
 
 | Remote Button | PC Key | Action in Overlay (Menu) | Action in Fullscreen Playback |
@@ -286,12 +275,6 @@ In addition to Samsung Tizen Smart TVs, a self-contained **Windows PC Edition** 
 
 ### Q: How do I know if buffering is caused by my IPTV provider or the app?
 **A**: While a stream is buffering or playing, check the OSD telemetry badge. SmartSTB v2 polls `/stream-diag` on the local proxy to display real-time download throughput (`KB/s`) and upstream HTTP status codes. If the badge reports `Provider HTTP 403 / 458` or `Provider Feed Idle (0 KB/s)`, the stall is originating from the upstream IPTV server rather than the TV decoder.
-
-### Q: What happens if a Live TV channel disconnects after watching for a long time?
-**A**: Many IPTV providers terminate open MPEG-TS/HLS connections after 30–120 minutes or rotate stream tokens. SmartSTB v2 detects unexpected `onstreamcompleted` (EOF) events during Live TV playback and automatically re-authenticates and reconnects the channel in fullscreen without interrupting your session or opening the channel list overlay.
-
-### Q: Audio plays fine on TV, but is silent on PC?
-**A**: Samsung Smart TVs have built-in hardware DSP decoders for Dolby Digital (`AC-3` / `E-AC-3`). Standard PC browsers do not decode AC-3 natively without transcoding. Run `pc-server.js` with `ffmpeg` installed on Windows to enable automatic on-the-fly AAC audio transcoding and multi-audio track switching.
 
 ### Q: How do I backup my profiles, settings, and channel favorites?
 **A**: Open **Settings** > Click **Export Backup**. The app saves a complete snapshot to TV storage, local proxy disk (`/backup`), or a `.json` file, which can be restored anytime via **Import Backup**.
