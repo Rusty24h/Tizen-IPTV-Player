@@ -1,7 +1,6 @@
 # IPTV Player for Samsung Tizen Smart TVs
 
 [![Tizen OS](https://img.shields.io/badge/Tizen%20OS-4.0%20to%209.0%2B-0083D6?logo=tizen&logoColor=white)](https://developer.samsung.com/smarttv)
-[![Resolution](https://img.shields.io/badge/Viewport-1080p%20FHD%20%2F%204K%20UHD-success)](#hardware-accelerated-video-playback-avplay)
 [![Engine](https://img.shields.io/badge/Player-Hardware%20AVPlay%20%2B%20FFmpeg%20MSE-blueviolet)](#key-features)
 [![Protocol](https://img.shields.io/badge/Providers-Stalker%20MAC%20%7C%20Xtream%20API%20%7C%20M3U8-blue)](#multi-provider-architecture--profile-system)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
