@@ -7,8 +7,9 @@
  */
 (function() {
     'use strict';
-    var PROXY_URL = 'http://127.0.0.1:3001';
-    var FALLBACK_PROXY_URL = 'http://127.0.0.1:3000';
+    var isDevPort3000 = (typeof window !== 'undefined' && window.location && window.location.port === '3000');
+    var PROXY_URL = isDevPort3000 ? 'http://127.0.0.1:3000' : 'http://127.0.0.1:3001';
+    var FALLBACK_PROXY_URL = isDevPort3000 ? 'http://127.0.0.1:3001' : 'http://127.0.0.1:3000';
     var SERVICE_ID = 'smartstbv2.StalkerProxy';
     var modes = [
         { id: 'live', title: 'Live TV', icon: '📺' },
@@ -87,9 +88,19 @@
     var favSeriesCache = null;
     var favLookupCache = { live: null, vod: null, series: null };
     var watchedLookupCache = null;
+    var vodResumeCache = null;
     var pinnedCatsCache = {};
+    var pinnedCatsMapCache = {};
+    var hiddenCatsCache = {};
+    var hiddenCatsMapCache = {};
+    var hiddenItemsCache = {};
+    var hiddenItemsMapCache = {};
+    var showHiddenEntries = false;
+    var xmltvCache = {};
     var recLiveCache = null;
     var recVodCache = null;
+    var ADULT_RE = /adult|xxx|18\+|\+18|18\||for adults|erotic|porn/i;
+    var layoutEnforced = false;
     var genreChannelCounts = {};
     var genreChannelsMap = {};
     var channelByIdMap = {};
@@ -135,6 +146,12 @@
     var epgModalChannel = null;
     var epgModalItems = [];
     var epgModalIdx = 0;
+    var epgViewMode = 'list';
+    var epgGridChannels = [];
+    var epgGridProgramsByCh = {};
+    var epgGridChIdx = 0;
+    var epgGridSlotIdx = 0;
+    var epgGridWindowStartSec = 0;
 
     // Interactive Audio & Subtitle Track Picker Modal State
     var tracksModalOpen = false;
@@ -142,6 +159,10 @@
     var tracksModalIdx = 0;
     var subtitleColor = localStorage.getItem('cfg_sub_color') || 'white';
     var subtitleSize = localStorage.getItem('cfg_sub_size') || 'normal';
+    var subtitleDelayMs = Math.max(-5000, Math.min(5000, Math.round((Number(localStorage.getItem('cfg_sub_delay')) || 0) / 250) * 250));
+    window._subtitleDelayMs = subtitleDelayMs;
+    var subtitleDelayTimer = null;
+    var lanSetupPollTimer = null;
 
     // Fullscreen Quick Channel Zapper Drawer State
     var miniZapOpen = false;
@@ -224,6 +245,7 @@
     var tracksListEl = document.getElementById('tracks-list');
     var tracksStyleColorEl = document.getElementById('tracks-style-color');
     var tracksStyleSizeEl = document.getElementById('tracks-style-size');
+    var tracksStyleDelayEl = document.getElementById('tracks-style-delay');
     var settingsModal = document.getElementById('settings-modal');
     var selProfileEl = document.getElementById('sel-profile');
     var inpProfileNameEl = document.getElementById('inp-profile-name');
@@ -248,6 +270,8 @@
         inpM3uFileHiddenEl.style.display = 'none';
         document.body.appendChild(inpM3uFileHiddenEl);
     }
+    var inpEpgUrlEl = document.getElementById('inp-epg-url');
+    var lanSetupUrlEl = document.getElementById('lan-setup-url');
     var selThemeEl = document.getElementById('sel-theme');
     var inpPinEl = document.getElementById('inp-pin');
     var btnSaveEl = document.getElementById('btn-save');
@@ -308,7 +332,7 @@
         inpPortalEl, inpMacEl,
         inpXtreamUrlEl, inpXtreamUserEl, inpXtreamPassEl,
         inpM3uUrlEl, btnM3uFileEl, btnM3uClearEl,
-        selThemeEl, inpPinEl, btnSaveEl, btnProfileNewEl, btnProfileDelEl,
+        inpEpgUrlEl, selThemeEl, inpPinEl, btnSaveEl, btnProfileNewEl, btnProfileDelEl,
         btnRestartEl, btnCancelEl, btnBackupExportEl, btnBackupImportEl
     ].filter(Boolean);
 
@@ -362,6 +386,9 @@
             rows.push([inpPortalEl].filter(Boolean));
             rows.push([inpMacEl].filter(Boolean));
         }
+        if (inpEpgUrlEl) {
+            rows.push([inpEpgUrlEl]);
+        }
         rows.push([selThemeEl, inpPinEl].filter(Boolean));
         rows.push([btnSaveEl, btnProfileNewEl, btnProfileDelEl, btnCancelEl].filter(Boolean));
         rows.push([btnBackupExportEl, btnBackupImportEl, btnRestartEl].filter(Boolean));
@@ -402,10 +429,16 @@
 
     var epgModal = document.getElementById('epg-modal');
     var epgModalTitle = document.getElementById('epg-modal-title');
+    var btnEpgViewToggleEl = document.getElementById('btn-epg-view-toggle');
     var epgModalList = document.getElementById('epg-modal-list');
     var epgModalProgTitle = document.getElementById('epg-modal-prog-title');
     var epgModalProgTime = document.getElementById('epg-modal-prog-time');
     var epgModalDesc = document.getElementById('epg-modal-desc');
+    var epgGridContainerEl = document.getElementById('epg-grid-container');
+    var epgGridTimelineEl = document.getElementById('epg-grid-timeline');
+    var epgGridRowsEl = document.getElementById('epg-grid-rows');
+    var epgGridSelTitleEl = document.getElementById('epg-grid-sel-title');
+    var epgGridSelDescEl = document.getElementById('epg-grid-sel-desc');
 
     if (previewPosterEl) {
         previewPosterEl.onerror = function() {
@@ -435,6 +468,14 @@
         }, 2500);
     }
 
+    function formatSubtitleDelayLabel(ms) {
+        var clean = Math.max(-5000, Math.min(5000, Math.round((Number(ms) || 0) / 250) * 250));
+        if (clean === 0) {
+            return '0ms';
+        }
+        return (clean > 0 ? '+' : '') + clean + 'ms';
+    }
+
     function applySubtitleAppearance() {
         if (!subtitleBoxEl) {
             return;
@@ -459,6 +500,22 @@
         if (tracksStyleSizeEl) {
             tracksStyleSizeEl.textContent = 'Size: ' + subtitleSize.toUpperCase() + ' ▶';
         }
+        if (tracksStyleDelayEl) {
+            tracksStyleDelayEl.textContent = '⏱ Sync: ' + formatSubtitleDelayLabel(subtitleDelayMs);
+        }
+    }
+
+    function adjustSubtitleDelay(deltaMs) {
+        subtitleDelayMs = Math.max(-5000, Math.min(5000, Math.round(((subtitleDelayMs || 0) + deltaMs) / 250) * 250));
+        window._subtitleDelayMs = subtitleDelayMs;
+        safeSetStorage('cfg_sub_delay', String(subtitleDelayMs));
+        try {
+            if (typeof webapis !== 'undefined' && webapis.avplay && typeof webapis.avplay.setSubtitlePosition === 'function') {
+                webapis.avplay.setSubtitlePosition(subtitleDelayMs);
+            }
+        } catch (ePos) {}
+        applySubtitleAppearance();
+        showToast('⏱ Subtitle Sync: ' + formatSubtitleDelayLabel(subtitleDelayMs));
     }
 
     function cycleSubtitleColor() {
@@ -484,13 +541,17 @@
             clearTimeout(subtitleClearTimer);
             subtitleClearTimer = null;
         }
+        if (subtitleDelayTimer) {
+            clearTimeout(subtitleDelayTimer);
+            subtitleDelayTimer = null;
+        }
         if (subtitleBoxEl) {
             subtitleBoxEl.textContent = '';
             subtitleBoxEl.classList.remove('visible');
         }
     }
 
-    function renderSubtitleCue(rawText, durationMs) {
+    function showSubtitleCueNow(cleaned, durationMs) {
         if (!subtitleBoxEl || !subtitlesEnabled) {
             return;
         }
@@ -498,11 +559,6 @@
             clearTimeout(subtitleClearTimer);
             subtitleClearTimer = null;
         }
-        var cleaned = String(rawText || '')
-            .replace(/<br\s*\/?>/gi, '\n')
-            .replace(/\{[^}]*\}/g, '')
-            .replace(/<[^>]+>/g, '')
-            .trim();
         if (!cleaned) {
             subtitleBoxEl.textContent = '';
             subtitleBoxEl.classList.remove('visible');
@@ -520,6 +576,28 @@
                 }
             }, Math.min(dur, 12000));
         }
+    }
+
+    function renderSubtitleCue(rawText, durationMs) {
+        if (!subtitleBoxEl || !subtitlesEnabled) {
+            return;
+        }
+        if (subtitleDelayTimer) {
+            clearTimeout(subtitleDelayTimer);
+            subtitleDelayTimer = null;
+        }
+        var cleaned = String(rawText || '')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/\{[^}]*\}/g, '')
+            .replace(/<[^>]+>/g, '')
+            .trim();
+        if (subtitleDelayMs > 0 && cleaned) {
+            subtitleDelayTimer = setTimeout(function() {
+                showSubtitleCueNow(cleaned, durationMs);
+            }, subtitleDelayMs);
+            return;
+        }
+        showSubtitleCueNow(cleaned, durationMs);
     }
 
     function rebuildGenreChannelCounts() {
@@ -565,8 +643,9 @@
             return true;
         } catch (ex1) {
             try {
-                if (key !== 'stalker_live') {
-                    localStorage.removeItem('stalker_live');
+                localStorage.removeItem('stalker_live');
+                if (key === 'stalker_live') {
+                    return false;
                 }
                 localStorage.setItem(key, valueStr);
                 return true;
@@ -574,6 +653,40 @@
                 return false;
             }
         }
+    }
+    function processArrayInChunks(arr, chunkSize, itemFn) {
+        var list = Array.isArray(arr) ? arr : [];
+        var total = list.length;
+        var stepSize = chunkSize || 1500;
+        if (total <= stepSize) {
+            var syncOut = [];
+            for (var i = 0; i < total; i++) {
+                var mappedSync = itemFn(list[i], i);
+                if (mappedSync !== null && mappedSync !== undefined) {
+                    syncOut.push(mappedSync);
+                }
+            }
+            return Promise.resolve(syncOut);
+        }
+        return new Promise(function(resolve) {
+            var asyncOut = [];
+            var cursor = 0;
+            function processSlice() {
+                var end = Math.min(cursor + stepSize, total);
+                for (; cursor < end; cursor++) {
+                    var mapped = itemFn(list[cursor], cursor);
+                    if (mapped !== null && mapped !== undefined) {
+                        asyncOut.push(mapped);
+                    }
+                }
+                if (cursor < total) {
+                    setTimeout(processSlice, 0);
+                } else {
+                    resolve(asyncOut);
+                }
+            }
+            processSlice();
+        });
     }
     function getProfileScopedKey(baseKey) {
         var pid = activeProfileId || 'prof_default';
@@ -610,13 +723,17 @@
                 xtreamUser: '',
                 xtreamPass: '',
                 m3uUrl: '',
-                m3uName: ''
+                m3uName: '',
+                epgUrl: ''
             }];
             safeSetStorage('cfg_profiles', JSON.stringify(saved));
         }
         for (var p = 0; p < saved.length; p++) {
             if (!saved[p].type) {
                 saved[p].type = 'stalker';
+            }
+            if (saved[p].epgUrl === undefined) {
+                saved[p].epgUrl = '';
             }
         }
         profiles = saved;
@@ -649,6 +766,7 @@
         safeSetStorage('cfg_xtream_user', prof.xtreamUser || '');
         safeSetStorage('cfg_xtream_pass', prof.xtreamPass || '');
         safeSetStorage('cfg_m3u_url', prof.m3uUrl || '');
+        safeSetStorage('cfg_epg_url', prof.epgUrl || '');
         if (profileBadgeEl) {
             var typeTag = pType === 'xtream' ? ' [XC]' : ((pType === 'm3u') ? ' [M3U]' : '');
             profileBadgeEl.textContent = '⚡ ' + (prof.name || 'Default') + typeTag;
@@ -744,10 +862,11 @@
         return clean.replace(/\/player_api\.php.*$/i, '').replace(/\/get\.php.*$/i, '').replace(/\/+$/, '');
     }
 
-    function buildXtreamDirectStreamUrl(baseUrl, username, password, kind, streamId, ext) {
-        var base = normalizeXtreamServerUrl(baseUrl);
-        var user = encodeURIComponent(String(username || '').trim());
-        var pass = encodeURIComponent(String(password || '').trim());
+    function buildXtreamDirectStreamUrl(auth, kind, streamId, ext) {
+        var a = auth || {};
+        var base = a.base !== undefined ? a.base : normalizeXtreamServerUrl(a.xtreamUrl || '');
+        var user = a.user !== undefined ? a.user : encodeURIComponent(String(a.xtreamUser || '').trim());
+        var pass = a.pass !== undefined ? a.pass : encodeURIComponent(String(a.xtreamPass || '').trim());
         var id = String(streamId || '').trim();
         var cleanExt = String(ext || (kind === 'live' ? 'ts' : 'mp4')).trim().replace(/^\.+/, '');
         if (kind === 'live') {
@@ -815,15 +934,24 @@
         var seriesGroupsKeys = [];
         var pendingInf = null;
         var currentExtGrp = '';
+        var headerEpgUrl = '';
 
         var seriesRe1 = /^(.*?)\s*[-–:|]?\s*\bS(\d{1,2})\s*E(\d{1,3})\b\s*[-–:|]?\s*(.*)$/i;
         var seriesRe2 = /^(.*?)\s*[-–:|]?\s*\bSeason\s*(\d{1,2})\s*Episode\s*(\d{1,3})\b\s*[-–:|]?\s*(.*)$/i;
         var seriesRe3 = /^(.*?)\s*[-–:|]?\s*\b(\d{1,2})x(\d{2,3})\b\s*[-–:|]?\s*(.*)$/i;
-        var adultRe = /adult|xxx|18\+|18\||for adults|erotic|porn/i;
+        var adultRe = ADULT_RE;
 
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim();
             if (!line) {
+                continue;
+            }
+            if (line.indexOf('#EXTM3U') === 0) {
+                var hdrAttrs = parseM3uAttributesMap(line.slice(7));
+                var candidateEpg = hdrAttrs['url-tvg'] || hdrAttrs['x-tvg-url'] || hdrAttrs['tvg-url'] || '';
+                if (candidateEpg) {
+                    headerEpgUrl = String(candidateEpg).split(',')[0].trim();
+                }
                 continue;
             }
             if (line.indexOf('#EXTINF:') === 0) {
@@ -878,11 +1006,11 @@
             var epMatch = info.title.match(seriesRe1) || info.title.match(seriesRe2) || info.title.match(seriesRe3);
             var isSeriesPath = /\/series\//i.test(streamUrl) || /\b(?:series|tv\s*shows?)\b/i.test(groupTitle);
 
-            if (epMatch && epMatch[1] && epMatch[1].trim().length > 0) {
-                var seriesTitle = epMatch[1].trim();
-                var seasonNum = parseInt(epMatch[2], 10) || 1;
-                var epNum = parseInt(epMatch[3], 10) || 1;
-                var epSubTitle = String(epMatch[4] || '').trim();
+            if ((epMatch && epMatch[1] && epMatch[1].trim().length > 0) || isSeriesPath) {
+                var seriesTitle = (epMatch && epMatch[1] && epMatch[1].trim()) ? epMatch[1].trim() : info.title;
+                var seasonNum = epMatch ? (parseInt(epMatch[2], 10) || 1) : 1;
+                var epNum = epMatch ? (parseInt(epMatch[3], 10) || 1) : 1;
+                var epSubTitle = epMatch ? String(epMatch[4] || '').trim() : '';
                 var sCatId = 'm3u_scat_' + groupTitle.toLowerCase().replace(/[^a-z0-9]+/g, '_');
                 if (!seriesCatsSeen[sCatId]) {
                     seriesCatsSeen[sCatId] = true;
@@ -928,17 +1056,19 @@
                     grp.seasonsMap[sKey] = seasonObj;
                     grp.seriesItem.seasons.push(seasonObj);
                 }
+                var nextEpIdx = grp.seasonsMap[sKey].episodes.length + 1;
+                var resolvedEpNum = epMatch ? epNum : nextEpIdx;
                 grp.seasonsMap[sKey].episodes.push({
-                    id: grp.seriesItem.id + '_s' + seasonNum + '_e' + epNum + '_' + (grp.seasonsMap[sKey].episodes.length + 1),
-                    name: epSubTitle ? ('E' + epNum + ' - ' + epSubTitle) : ('Episode ' + epNum),
+                    id: grp.seriesItem.id + '_s' + seasonNum + '_e' + resolvedEpNum + '_' + nextEpIdx,
+                    name: epSubTitle ? ('E' + resolvedEpNum + ' - ' + epSubTitle) : ('Episode ' + resolvedEpNum),
                     cmd: streamUrl,
                     directUrl: true,
                     useTmpLink: 0,
                     genreId: sCatId,
                     poster: logo || grp.seriesItem.poster || '',
                     logo: logo || grp.seriesItem.poster || '',
-                    desc: seriesTitle + ' • Season ' + seasonNum + ', Episode ' + epNum,
-                    seriesNum: epNum,
+                    desc: seriesTitle + ' • Season ' + seasonNum + ', Episode ' + resolvedEpNum,
+                    seriesNum: resolvedEpNum,
                     censored: isCensored ? 1 : 0,
                     isEpisode: true,
                     isVod: true,
@@ -1004,12 +1134,18 @@
             });
         }
 
+        function compareSeasonsById(a, b) {
+            return Number(a.id) - Number(b.id);
+        }
+        function compareEpisodesByNum(a, b) {
+            return (a.seriesNum || 0) - (b.seriesNum || 0);
+        }
         var seriesItems = [];
         for (var sk = 0; sk < seriesGroupsKeys.length; sk++) {
             var gEntry = seriesGroupsMap[seriesGroupsKeys[sk]];
-            gEntry.seriesItem.seasons.sort(function(a, b) { return Number(a.id) - Number(b.id); });
+            gEntry.seriesItem.seasons.sort(compareSeasonsById);
             for (var sn = 0; sn < gEntry.seriesItem.seasons.length; sn++) {
-                gEntry.seriesItem.seasons[sn].episodes.sort(function(a, b) { return (a.seriesNum || 0) - (b.seriesNum || 0); });
+                gEntry.seriesItem.seasons[sn].episodes.sort(compareEpisodesByNum);
             }
             seriesItems.push(gEntry.seriesItem);
         }
@@ -1030,10 +1166,204 @@
                 { id: 'fav', title: '★ Favorites', censored: false },
                 { id: 'rec', title: '⏱ History', censored: false }
             ].concat(seriesCatsList),
-            seriesItems: seriesItems
+            seriesItems: seriesItems,
+            epgUrl: headerEpgUrl
         };
     }
 
+    function decodeXmlTextEntities(str) {
+        return String(str || '')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&apos;/g, "'")
+            .replace(/&#(\d+);/g, function(_, dec) {
+                return String.fromCharCode(parseInt(dec, 10));
+            })
+            .replace(/&#x([0-9a-fA-F]+);/g, function(_, hex) {
+                return String.fromCharCode(parseInt(hex, 16));
+            });
+    }
+
+    function normalizeXmltvLookupKey(val) {
+        return String(val || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    }
+
+    function parseXmltvDateSec(raw) {
+        var s = String(raw || '').trim();
+        var m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-]\d{4}|Z))?/);
+        if (!m) {
+            return 0;
+        }
+        var year = parseInt(m[1], 10);
+        var month = parseInt(m[2], 10) - 1;
+        var day = parseInt(m[3], 10);
+        var hour = parseInt(m[4], 10);
+        var min = parseInt(m[5], 10);
+        var sec = parseInt(m[6], 10);
+        var utcMs = Date.UTC(year, month, day, hour, min, sec);
+        var tz = m[7];
+        if (tz && tz !== 'Z') {
+            var sign = tz.charAt(0) === '-' ? -1 : 1;
+            var tzH = parseInt(tz.slice(1, 3), 10) || 0;
+            var tzM = parseInt(tz.slice(3, 5), 10) || 0;
+            var offsetMs = sign * ((tzH * 60) + tzM) * 60000;
+            utcMs -= offsetMs;
+        }
+        return Math.floor(utcMs / 1000);
+    }
+
+    function parseXmltvDocument(xmlText) {
+        var text = String(xmlText || '');
+        var channelsById = {};
+        var aliasToChannelId = {};
+        var programsByChannel = {};
+        if (!text || text.indexOf('<programme') === -1) {
+            return {
+                channelsById: channelsById,
+                aliasToChannelId: aliasToChannelId,
+                programsByChannel: programsByChannel
+            };
+        }
+        var chRe = /<channel\b[^>]*\bid\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/channel>/gi;
+        var chMatch;
+        while ((chMatch = chRe.exec(text)) !== null) {
+            var rawId = decodeXmlTextEntities(chMatch[1] || chMatch[2] || '').trim();
+            if (!rawId) {
+                continue;
+            }
+            var body = chMatch[3] || '';
+            var names = [];
+            var dnRe = /<display-name[^>]*>([\s\S]*?)<\/display-name>/gi;
+            var dnMatch;
+            while ((dnMatch = dnRe.exec(body)) !== null) {
+                var dn = decodeXmlTextEntities(dnMatch[1].replace(/<[^>]+>/g, '')).trim();
+                if (dn) {
+                    names.push(dn);
+                }
+            }
+            channelsById[rawId] = { id: rawId, displayNames: names };
+            var normId = normalizeXmltvLookupKey(rawId);
+            if (normId) {
+                aliasToChannelId[normId] = rawId;
+            }
+            for (var n = 0; n < names.length; n++) {
+                var normName = normalizeXmltvLookupKey(names[n]);
+                if (normName && !aliasToChannelId[normName]) {
+                    aliasToChannelId[normName] = rawId;
+                }
+            }
+        }
+        var progRe = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/gi;
+        var progMatch;
+        var idx = 0;
+        while ((progMatch = progRe.exec(text)) !== null) {
+            var attrsPart = progMatch[1] || '';
+            var pBody = progMatch[2] || '';
+            var chAttr = attrsPart.match(/\bchannel\s*=\s*(?:"([^"]+)"|'([^']+)')/i);
+            var startAttr = attrsPart.match(/\bstart\s*=\s*(?:"([^"]+)"|'([^']+)')/i);
+            var stopAttr = attrsPart.match(/\bstop\s*=\s*(?:"([^"]+)"|'([^']+)')/i);
+            var chId = decodeXmlTextEntities((chAttr && (chAttr[1] || chAttr[2])) || '').trim();
+            var startTs = parseXmltvDateSec((startAttr && (startAttr[1] || startAttr[2])) || '');
+            var stopTs = parseXmltvDateSec((stopAttr && (stopAttr[1] || stopAttr[2])) || '');
+            if (!chId || !startTs) {
+                continue;
+            }
+            if (!stopTs || stopTs <= startTs) {
+                stopTs = startTs + 1800;
+            }
+            var titleMatch = pBody.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            var descMatch = pBody.match(/<desc[^>]*>([\s\S]*?)<\/desc>/i);
+            var title = titleMatch ? decodeXmlTextEntities(titleMatch[1].replace(/<[^>]+>/g, '')).trim() : 'Program';
+            var descr = descMatch ? decodeXmlTextEntities(descMatch[1].replace(/<[^>]+>/g, '')).trim() : '';
+            if (!programsByChannel[chId]) {
+                programsByChannel[chId] = [];
+            }
+            if (programsByChannel[chId].length >= 120) {
+                continue;
+            }
+            idx++;
+            programsByChannel[chId].push({
+                id: 'xmltv_' + idx,
+                name: title || 'Program',
+                descr: descr,
+                start_timestamp: startTs,
+                stop_timestamp: stopTs
+            });
+            var normCh = normalizeXmltvLookupKey(chId);
+            if (normCh && !aliasToChannelId[normCh]) {
+                aliasToChannelId[normCh] = chId;
+            }
+        }
+        function compareXmltvProgByStart(a, b) {
+            return a.start_timestamp - b.start_timestamp;
+        }
+        var chKeys = Object.keys(programsByChannel);
+        for (var k = 0; k < chKeys.length; k++) {
+            programsByChannel[chKeys[k]].sort(compareXmltvProgByStart);
+        }
+        return {
+            channelsById: channelsById,
+            aliasToChannelId: aliasToChannelId,
+            programsByChannel: programsByChannel
+        };
+    }
+
+    function lookupXmltvChannelPrograms(catalog, channelObj) {
+        if (!catalog || !channelObj || !catalog.programsByChannel) {
+            return [];
+        }
+        var tvgId = String(channelObj.epgChannelId || '').trim();
+        if (tvgId && catalog.programsByChannel[tvgId]) {
+            return catalog.programsByChannel[tvgId];
+        }
+        if (tvgId) {
+            var normTvg = normalizeXmltvLookupKey(tvgId);
+            var mappedByTvg = normTvg ? catalog.aliasToChannelId[normTvg] : '';
+            if (mappedByTvg && catalog.programsByChannel[mappedByTvg]) {
+                return catalog.programsByChannel[mappedByTvg];
+            }
+        }
+        var chName = String(channelObj.name || '').trim();
+        if (chName) {
+            var normName = normalizeXmltvLookupKey(chName);
+            var mappedByName = normName ? catalog.aliasToChannelId[normName] : '';
+            if (mappedByName && catalog.programsByChannel[mappedByName]) {
+                return catalog.programsByChannel[mappedByName];
+            }
+            var stripped = chName.replace(/^[A-Z]{2,3}\s*[:|\-]\s*/i, '').replace(/\b(FHD|UHD|4K|HD|SD|HEVC|RAW)\b/gi, '').trim();
+            var normStripped = normalizeXmltvLookupKey(stripped);
+            var mappedStripped = normStripped ? catalog.aliasToChannelId[normStripped] : '';
+            if (mappedStripped && catalog.programsByChannel[mappedStripped]) {
+                return catalog.programsByChannel[mappedStripped];
+            }
+        }
+        return [];
+    }
+
+    function compareItemsByNameAsc(a, b) {
+        var na = String((a && a.name) || '').toLowerCase();
+        var nb = String((b && b.name) || '').toLowerCase();
+        if (na < nb) {
+            return -1;
+        }
+        if (na > nb) {
+            return 1;
+        }
+        return 0;
+    }
+    function compareItemsByNameDesc(a, b) {
+        var na = String((a && a.name) || '').toLowerCase();
+        var nb = String((b && b.name) || '').toLowerCase();
+        if (na > nb) {
+            return -1;
+        }
+        if (na < nb) {
+            return 1;
+        }
+        return 0;
+    }
     function filterAndPaginateLocalList(allList, categoryId, page, searchQuery, sortBy) {
         var list = Array.isArray(allList) ? allList : [];
         var q = String(searchQuery || '').trim().toLowerCase();
@@ -1053,9 +1383,9 @@
             filtered.push(it);
         }
         if (sortBy === 'title_asc') {
-            filtered.sort(function(a, b) { return String(a.name || '').localeCompare(String(b.name || '')); });
+            filtered.sort(compareItemsByNameAsc);
         } else if (sortBy === 'title_desc') {
-            filtered.sort(function(a, b) { return String(b.name || '').localeCompare(String(a.name || '')); });
+            filtered.sort(compareItemsByNameDesc);
         }
         var p = Math.max(1, Number(page) || 1);
         var pageSize = 50;
@@ -1266,6 +1596,9 @@
         this.seriesModule = null;
         this.handshakePromise = null;
         this.authPromise = null;
+        this.liveRefreshPromise = null;
+        this.xtreamVodPromise = null;
+        this.xtreamSeriesPromise = null;
         this.xtreamVodStreamsCache = null;
         this.xtreamSeriesCache = null;
         this.m3uCatalogCache = null;
@@ -1278,9 +1611,15 @@
         return 'stalker';
     };
     StalkerAPI.prototype.resetProviderCaches = function() {
+        this.liveRefreshPromise = null;
+        this.xtreamVodPromise = null;
+        this.xtreamSeriesPromise = null;
         this.xtreamVodStreamsCache = null;
         this.xtreamSeriesCache = null;
         this.m3uCatalogCache = null;
+        xmltvCache = {};
+        epgGridProgramsByCh = {};
+        epgGridChannels = [];
     };
     StalkerAPI.prototype.xtreamRequest = function(action, extraParams) {
         var prof = getActiveProfile();
@@ -1305,12 +1644,26 @@
         }
         var targetUrl = baseUrl + '/player_api.php?' + qs.join('&');
         var proxiedUrl = this.proxyUrl + '/xtream?url=' + encodeURIComponent(targetUrl);
-        return proxyFetch(proxiedUrl, { method: 'GET' }).then(function(res) {
+        var controller = (typeof window !== 'undefined' && typeof window.AbortController !== 'undefined') ? new window.AbortController() : null;
+        var timeoutId = setTimeout(function() {
+            if (controller) {
+                try {
+                    controller.abort();
+                } catch (eAb) {}
+            }
+        }, 35000);
+        var fetchOpts = { method: 'GET' };
+        if (controller) {
+            fetchOpts.signal = controller.signal;
+        }
+        return proxyFetch(proxiedUrl, fetchOpts).then(function(res) {
+            clearTimeout(timeoutId);
             if (!res.ok) {
                 throw new Error('HTTP ' + res.status);
             }
             return res.json();
         }).catch(function(err) {
+            clearTimeout(timeoutId);
             return proxyFetch(targetUrl, { method: 'GET' }).then(function(res2) {
                 if (!res2.ok) {
                     throw err;
@@ -1339,6 +1692,11 @@
                 throw new Error('Invalid or empty M3U playlist');
             }
             var parsed = parseM3uPlaylistCatalog(rawText);
+            if (parsed.epgUrl && !prof.epgUrl) {
+                prof.epgUrl = parsed.epgUrl;
+                safeSetStorage('cfg_epg_url', parsed.epgUrl);
+                safeSetStorage('cfg_profiles', JSON.stringify(profiles));
+            }
             self.m3uCatalogCache = {
                 profileId: prof.id,
                 catalog: parsed
@@ -1424,8 +1782,11 @@
         var isEpgOrWatchdog = params.action === 'get_short_epg' ||
                               params.action === 'get_epg_info' ||
                               params.type === 'watchdog';
+        var isLargeCatalogAction = params.action === 'get_all_channels' ||
+                                   params.action === 'get_genres' ||
+                                   params.action === 'get_categories';
         var controller = (typeof window !== 'undefined' && typeof window.AbortController !== 'undefined') ? new window.AbortController() : null;
-        var reqTimeoutMs = isEpgOrWatchdog ? 6000 : 14000;
+        var reqTimeoutMs = isEpgOrWatchdog ? 6000 : (isLargeCatalogAction ? 35000 : 14000);
         var timeoutId = setTimeout(function() {
             if (controller) {
                 try {
@@ -1683,7 +2044,7 @@
                 continue;
             }
             seen[gid] = true;
-            var isAdult = String(g.censored) === '1' || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(gtitle);
+            var isAdult = String(g.censored) === '1' || ADULT_RE.test(gtitle);
             base.push({ id: gid, title: gtitle, censored: isAdult });
         }
         return base;
@@ -1699,10 +2060,16 @@
                 };
             });
         }
+        if (!isRetryAttempt && this.liveRefreshPromise) {
+            return this.liveRefreshPromise;
+        }
+        var runPromise;
         if (this.getProviderType() === 'xtream') {
-            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
-            var xUser = activeProf.xtreamUser || '';
-            var xPass = activeProf.xtreamPass || '';
+            var xAuthLive = {
+                base: normalizeXtreamServerUrl(activeProf.xtreamUrl || ''),
+                user: encodeURIComponent(String(activeProf.xtreamUser || '').trim()),
+                pass: encodeURIComponent(String(activeProf.xtreamPass || '').trim())
+            };
             var xCatsPromise = this.xtreamRequest('get_live_categories').then(function(catsArr) {
                 var list = Array.isArray(catsArr) ? catsArr : [];
                 var earlySlim = [];
@@ -1712,7 +2079,7 @@
                         continue;
                     }
                     var gTitle = String(gc.category_name || 'Category').trim();
-                    var gAdult = /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(gTitle);
+                    var gAdult = ADULT_RE.test(gTitle);
                     earlySlim.push({
                         id: String(gc.category_id),
                         title: gTitle,
@@ -1732,7 +2099,7 @@
                 }
                 return list;
             }).catch(function() { return []; });
-            return Promise.all([
+            runPromise = Promise.all([
                 xCatsPromise,
                 this.xtreamRequest('get_live_streams').catch(function() { return []; })
             ]).then(function(xRes) {
@@ -1745,30 +2112,29 @@
                         continue;
                     }
                     var gTitle = String(gc.category_name || 'Category').trim();
-                    var gAdult = /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(gTitle);
+                    var gAdult = ADULT_RE.test(gTitle);
                     slimGenres.push({
                         id: String(gc.category_id),
                         title: gTitle,
                         censored: gAdult ? 1 : 0
                     });
                 }
-                var slimChannels = [];
-                for (var j = 0; j < streamsArr.length; j++) {
-                    var st = streamsArr[j];
+                return processArrayInChunks(streamsArr, 1500, function(st, j) {
                     if (!st || st.stream_id === undefined) {
-                        continue;
+                        return null;
                     }
                     var stId = String(st.stream_id);
                     var stName = String(st.name || ('Channel ' + (j + 1)));
                     var hasArch = Number(st.tv_archive) === 1;
                     var archDur = (Number(st.tv_archive_duration) || (hasArch ? 3 : 0)) * 24;
                     var isAdultCh = String(st.is_adult) === '1' || /adult|xxx|18\+|18\||erotic|porn/i.test(stName);
-                    slimChannels.push({
+                    return {
                         id: 'xt_live_' + stId,
                         xtreamStreamId: stId,
+                        epgChannelId: String(st.epg_channel_id || ''),
                         num: Number(st.num) || (j + 1),
                         name: stName,
-                        cmd: buildXtreamDirectStreamUrl(xBase, xUser, xPass, 'live', stId, 'ts'),
+                        cmd: buildXtreamDirectStreamUrl(xAuthLive, 'live', stId, 'ts'),
                         directUrl: true,
                         useTmpLink: 0,
                         genreId: String(st.category_id || '*'),
@@ -1778,128 +2144,155 @@
                         censored: isAdultCh ? 1 : 0,
                         isVod: false,
                         isSeries: false
+                    };
+                }).then(function(slimChannels) {
+                    if (slimGenres.length > 0 && slimChannels.length > 0) {
+                        setTimeout(function() {
+                            try {
+                                if (slimChannels.length > 1200 || slimGenres.length > 250) {
+                                    try {
+                                        localStorage.removeItem('stalker_live');
+                                    } catch (eRm1) {}
+                                }
+                                if (slimChannels.length <= 12000) {
+                                    var payloadStr = JSON.stringify({
+                                        profileId: activeProf.id,
+                                        updatedAt: Date.now(),
+                                        genres: slimGenres,
+                                        channels: slimChannels
+                                    });
+                                    if (slimChannels.length <= 1200 && slimGenres.length <= 250 && payloadStr.length <= 450000) {
+                                        safeSetStorage('stalker_live', payloadStr);
+                                    }
+                                    proxyFetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: payloadStr
+                                    }).catch(function() {});
+                                }
+                            } catch (eCache) {}
+                        }, 1500);
+                    }
+                    return {
+                        genres: self.getOrderedGenres(slimGenres),
+                        channels: slimChannels
+                    };
+                });
+            });
+        } else {
+            var genresPromise = this.request({ type: 'itv', action: 'get_genres' }).then(function(gRes) {
+                var genresRaw = Array.isArray(gRes) ? gRes : (gRes && gRes.data ? gRes.data : []);
+                var earlySlim = [];
+                for (var k = 0; k < genresRaw.length; k++) {
+                    var g = genresRaw[k];
+                    if (g && g.id !== undefined && String(g.id) !== '*') {
+                        var title = String(g.title || g.name || 'Category').trim();
+                        if (!title) {
+                            continue;
+                        }
+                        var isAdult = String(g.censored || '0') === '1' || ADULT_RE.test(title);
+                        earlySlim.push({
+                            id: String(g.id),
+                            title: title,
+                            censored: isAdult ? 1 : 0
+                        });
+                    }
+                }
+                if (earlySlim.length > 0 && liveGenres.length <= 3) {
+                    liveGenres = self.getOrderedGenres(earlySlim);
+                    if ((modes[modeIdx] && modes[modeIdx].id === 'live') || (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live')) {
+                        rawCats = liveGenres;
+                        applyColumnFilters();
+                        renderCats();
+                        if (catsHeaderEl) {
+                            catsHeaderEl.textContent = 'Categories (' + Math.max(0, currentCats.length - 3) + ')';
+                        }
+                    }
+                }
+                return gRes;
+            }).catch(function() {
+                return [];
+            });
+            var channelsPromise = this.request({ type: 'itv', action: 'get_all_channels' }).catch(function() {
+                return [];
+            });
+            runPromise = Promise.all([genresPromise, channelsPromise]).then(function(results) {
+                var genresRaw = Array.isArray(results[0]) ? results[0] : (results[0] && results[0].data ? results[0].data : []);
+                var chRes = results[1] || {};
+                var chData = Array.isArray(chRes.data) ? chRes.data : (Array.isArray(chRes) ? chRes : []);
+                var slimGenres = [];
+                for (var i = 0; i < genresRaw.length; i++) {
+                    var g = genresRaw[i];
+                    if (g && g.id !== undefined && String(g.id) !== '*') {
+                        var title = String(g.title || g.name || 'Category').trim();
+                        if (!title) {
+                            continue;
+                        }
+                        var isAdult = String(g.censored || '0') === '1' || ADULT_RE.test(title);
+                        slimGenres.push({
+                            id: String(g.id),
+                            title: title,
+                            censored: isAdult ? 1 : 0
+                        });
+                    }
+                }
+                if (slimGenres.length === 0 && !isRetryAttempt) {
+                    return self.ensureAuthenticatedSession().then(function() {
+                        return self.refreshLiveInBackground(true);
                     });
                 }
-                if (slimGenres.length > 0 && slimChannels.length > 0) {
-                    setTimeout(function() {
-                        try {
-                            var payloadStr = JSON.stringify({
-                                profileId: activeProf.id,
-                                updatedAt: Date.now(),
-                                genres: slimGenres,
-                                channels: slimChannels
-                            });
-                            if (slimChannels.length <= 6000) {
-                                safeSetStorage('stalker_live', payloadStr);
-                            }
-                            proxyFetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: payloadStr
-                            }).catch(function() {});
-                        } catch (eCache) {}
-                    }, 1500);
-                }
-                return {
-                    genres: self.getOrderedGenres(slimGenres),
-                    channels: slimChannels
-                };
+                return processArrayInChunks(chData, 1500, function(c, j) {
+                    if (!c) {
+                        return null;
+                    }
+                    return normalizeChannelObj(c, j + 1, '*');
+                }).then(function(slimChannels) {
+                    chData = null;
+                    if (slimGenres.length > 0 && slimChannels.length > 0) {
+                        setTimeout(function() {
+                            try {
+                                if (slimChannels.length > 1200 || slimGenres.length > 250) {
+                                    try {
+                                        localStorage.removeItem('stalker_live');
+                                    } catch (eRm2) {}
+                                }
+                                if (slimChannels.length <= 12000) {
+                                    var cachePayloadStr = JSON.stringify({
+                                        profileId: activeProf.id,
+                                        updatedAt: Date.now(),
+                                        genres: slimGenres,
+                                        channels: slimChannels
+                                    });
+                                    if (slimChannels.length <= 1200 && slimGenres.length <= 250 && cachePayloadStr.length <= 450000) {
+                                        safeSetStorage('stalker_live', cachePayloadStr);
+                                    }
+                                    proxyFetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: cachePayloadStr
+                                    }).catch(function() {});
+                                }
+                            } catch (eCache) {}
+                        }, 2500);
+                    }
+                    return {
+                        genres: self.getOrderedGenres(slimGenres),
+                        channels: slimChannels
+                    };
+                });
             });
         }
-        var genresPromise = this.request({ type: 'itv', action: 'get_genres' }).then(function(gRes) {
-            var genresRaw = Array.isArray(gRes) ? gRes : (gRes && gRes.data ? gRes.data : []);
-            var earlySlim = [];
-            for (var k = 0; k < genresRaw.length; k++) {
-                var g = genresRaw[k];
-                if (g && g.id !== undefined && String(g.id) !== '*') {
-                    var title = String(g.title || g.name || 'Category').trim();
-                    if (!title) {
-                        continue;
-                    }
-                    var isAdult = String(g.censored || '0') === '1' || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title);
-                    earlySlim.push({
-                        id: String(g.id),
-                        title: title,
-                        censored: isAdult ? 1 : 0
-                    });
-                }
-            }
-            if (earlySlim.length > 0 && liveGenres.length <= 3) {
-                liveGenres = self.getOrderedGenres(earlySlim);
-                if ((modes[modeIdx] && modes[modeIdx].id === 'live') || (modes[lastContentModeIdx] && modes[lastContentModeIdx].id === 'live')) {
-                    rawCats = liveGenres;
-                    applyColumnFilters();
-                    renderCats();
-                    if (catsHeaderEl) {
-                        catsHeaderEl.textContent = 'Categories (' + Math.max(0, currentCats.length - 3) + ')';
-                    }
-                }
-            }
-            return gRes;
-        }).catch(function() {
-            return [];
-        });
-        var channelsPromise = this.request({ type: 'itv', action: 'get_all_channels' }).catch(function() {
-            return [];
-        });
-        return Promise.all([genresPromise, channelsPromise]).then(function(results) {
-            var genresRaw = Array.isArray(results[0]) ? results[0] : (results[0] && results[0].data ? results[0].data : []);
-            var chRes = results[1] || {};
-            var chData = Array.isArray(chRes.data) ? chRes.data : (Array.isArray(chRes) ? chRes : []);
-            var slimGenres = [];
-            for (var i = 0; i < genresRaw.length; i++) {
-                var g = genresRaw[i];
-                if (g && g.id !== undefined && String(g.id) !== '*') {
-                    var title = String(g.title || g.name || 'Category').trim();
-                    if (!title) {
-                        continue;
-                    }
-                    var isAdult = String(g.censored || '0') === '1' || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title);
-                    slimGenres.push({
-                        id: String(g.id),
-                        title: title,
-                        censored: isAdult ? 1 : 0
-                    });
-                }
-            }
-            if (slimGenres.length === 0 && !isRetryAttempt) {
-                return self.ensureAuthenticatedSession().then(function() {
-                    return self.refreshLiveInBackground(true);
-                });
-            }
-            var slimChannels = [];
-            for (var j = 0; j < chData.length; j++) {
-                var c = chData[j];
-                if (!c) {
-                    continue;
-                }
-                slimChannels.push(normalizeChannelObj(c, j + 1, '*'));
-            }
-            if (slimGenres.length > 0 && slimChannels.length > 0) {
-                setTimeout(function() {
-                    try {
-                        var cachePayloadStr = JSON.stringify({
-                            profileId: activeProf.id,
-                            updatedAt: Date.now(),
-                            genres: slimGenres,
-                            channels: slimChannels
-                        });
-                        if (slimChannels.length <= 6000) {
-                            safeSetStorage('stalker_live', cachePayloadStr);
-                        }
-                        proxyFetch(self.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: cachePayloadStr
-                        }).catch(function() {});
-                    } catch (eCache) {}
-                }, 2500);
-            }
-            return {
-                genres: self.getOrderedGenres(slimGenres),
-                channels: slimChannels
-            };
-        });
+        if (!isRetryAttempt) {
+            this.liveRefreshPromise = runPromise.then(function(res) {
+                self.liveRefreshPromise = null;
+                return res;
+            }).catch(function(err) {
+                self.liveRefreshPromise = null;
+                throw err;
+            });
+            return this.liveRefreshPromise;
+        }
+        return runPromise;
     };
     StalkerAPI.prototype.fetchLiveGenrePage = function(genreId, page) {
         if (this.getProviderType() !== 'stalker') {
@@ -1965,7 +2358,7 @@
                     if (!title) {
                         continue;
                     }
-                    var isAdult = /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title);
+                    var isAdult = ADULT_RE.test(title);
                     out.push({ id: String(c.category_id), title: title, censored: isAdult });
                 }
                 return out;
@@ -1988,7 +2381,7 @@
                 if (!title) {
                     continue;
                 }
-                var isAdult = String(c.censored) === '1' || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title);
+                var isAdult = String(c.censored) === '1' || ADULT_RE.test(title);
                 out.push({ id: String(c.id), title: title, censored: isAdult });
             }
             if (out.length <= 4 && !isRetryAttempt) {
@@ -2018,39 +2411,49 @@
             if (this.xtreamVodStreamsCache && this.xtreamVodStreamsCache.profileId === activeProf.id) {
                 return Promise.resolve(filterAndPaginateLocalList(this.xtreamVodStreamsCache.items, categoryId, page, searchQuery, sortBy));
             }
-            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
-            var xUser = activeProf.xtreamUser || '';
-            var xPass = activeProf.xtreamPass || '';
-            return this.xtreamRequest('get_vod_streams').then(function(rows) {
-                var arr = Array.isArray(rows) ? rows : [];
-                var items = [];
-                for (var i = 0; i < arr.length; i++) {
-                    var m = arr[i];
-                    if (!m || m.stream_id === undefined) {
-                        continue;
-                    }
-                    var stId = String(m.stream_id);
-                    var ext = String(m.container_extension || 'mp4').trim();
-                    var mName = String(m.name || 'Movie');
-                    var yearMatch = mName.match(/\((\d{4})\)/);
-                    items.push({
-                        id: 'xt_vod_' + stId,
-                        xtreamStreamId: stId,
-                        name: mName,
-                        cmd: buildXtreamDirectStreamUrl(xBase, xUser, xPass, 'movie', stId, ext),
-                        directUrl: true,
-                        useTmpLink: 0,
-                        desc: String(m.plot || m.description || ''),
-                        year: String(m.year || (yearMatch ? yearMatch[1] : '')),
-                        rating: String(m.rating || m.rating_5based || ''),
-                        poster: String(m.stream_icon || m.cover || ''),
-                        genreId: String(m.category_id || '*'),
-                        censored: String(m.is_adult) === '1' ? 1 : 0,
-                        isVod: true,
-                        isSeries: false
+            if (!this.xtreamVodPromise) {
+                var xAuthVod = {
+                    base: normalizeXtreamServerUrl(activeProf.xtreamUrl || ''),
+                    user: encodeURIComponent(String(activeProf.xtreamUser || '').trim()),
+                    pass: encodeURIComponent(String(activeProf.xtreamPass || '').trim())
+                };
+                this.xtreamVodPromise = this.xtreamRequest('get_vod_streams').then(function(rows) {
+                    var arr = Array.isArray(rows) ? rows : [];
+                    return processArrayInChunks(arr, 1500, function(m) {
+                        if (!m || m.stream_id === undefined) {
+                            return null;
+                        }
+                        var stId = String(m.stream_id);
+                        var ext = String(m.container_extension || 'mp4').trim();
+                        var mName = String(m.name || 'Movie');
+                        var yearMatch = mName.match(/\((\d{4})\)/);
+                        return {
+                            id: 'xt_vod_' + stId,
+                            xtreamStreamId: stId,
+                            name: mName,
+                            cmd: buildXtreamDirectStreamUrl(xAuthVod, 'movie', stId, ext),
+                            directUrl: true,
+                            useTmpLink: 0,
+                            desc: String(m.plot || m.description || ''),
+                            year: String(m.year || (yearMatch ? yearMatch[1] : '')),
+                            rating: String(m.rating || m.rating_5based || ''),
+                            poster: String(m.stream_icon || m.cover || ''),
+                            genreId: String(m.category_id || '*'),
+                            censored: String(m.is_adult) === '1' ? 1 : 0,
+                            isVod: true,
+                            isSeries: false
+                        };
                     });
-                }
-                self.xtreamVodStreamsCache = { profileId: activeProf.id, items: items };
+                }).then(function(items) {
+                    self.xtreamVodPromise = null;
+                    self.xtreamVodStreamsCache = { profileId: activeProf.id, items: items };
+                    return items;
+                }).catch(function(err) {
+                    self.xtreamVodPromise = null;
+                    throw err;
+                });
+            }
+            return this.xtreamVodPromise.then(function(items) {
                 return filterAndPaginateLocalList(items, categoryId, page, searchQuery, sortBy);
             });
         }
@@ -2117,7 +2520,7 @@
                     out.push({
                         id: String(c.category_id),
                         title: title,
-                        censored: /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title)
+                        censored: ADULT_RE.test(title)
                     });
                 }
                 return out;
@@ -2154,7 +2557,7 @@
                 out.push({
                     id: String(c.id),
                     title: title,
-                    censored: String(c.censored) === '1' || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(title)
+                    censored: String(c.censored) === '1' || ADULT_RE.test(title)
                 });
             }
             if (out.length <= 4 && !isRetryAttempt) {
@@ -2184,33 +2587,41 @@
             if (this.xtreamSeriesCache && this.xtreamSeriesCache.profileId === activeProf.id) {
                 return Promise.resolve(filterAndPaginateLocalList(this.xtreamSeriesCache.items, categoryId, page, searchQuery, sortBy));
             }
-            return this.xtreamRequest('get_series').then(function(rows) {
-                var arr = Array.isArray(rows) ? rows : [];
-                var items = [];
-                for (var i = 0; i < arr.length; i++) {
-                    var s = arr[i];
-                    if (!s || s.series_id === undefined) {
-                        continue;
-                    }
-                    var serId = String(s.series_id);
-                    var relYear = String(s.releaseDate || s.year || '').slice(0, 4);
-                    items.push({
-                        id: 'xt_ser_' + serId,
-                        xtreamSeriesId: serId,
-                        name: String(s.name || 'Series'),
-                        cmd: '',
-                        desc: String(s.plot || s.cast || ''),
-                        year: relYear,
-                        rating: String(s.rating || s.rating_5based || ''),
-                        poster: String(s.cover || ''),
-                        genreId: String(s.category_id || '*'),
-                        censored: 0,
-                        isVod: true,
-                        isSeries: true,
-                        streamType: 'series'
+            if (!this.xtreamSeriesPromise) {
+                this.xtreamSeriesPromise = this.xtreamRequest('get_series').then(function(rows) {
+                    var arr = Array.isArray(rows) ? rows : [];
+                    return processArrayInChunks(arr, 1500, function(s) {
+                        if (!s || s.series_id === undefined) {
+                            return null;
+                        }
+                        var serId = String(s.series_id);
+                        var relYear = String(s.releaseDate || s.year || '').slice(0, 4);
+                        return {
+                            id: 'xt_ser_' + serId,
+                            xtreamSeriesId: serId,
+                            name: String(s.name || 'Series'),
+                            cmd: '',
+                            desc: String(s.plot || s.cast || ''),
+                            year: relYear,
+                            rating: String(s.rating || s.rating_5based || ''),
+                            poster: String(s.cover || ''),
+                            genreId: String(s.category_id || '*'),
+                            censored: 0,
+                            isVod: true,
+                            isSeries: true,
+                            streamType: 'series'
+                        };
                     });
-                }
-                self.xtreamSeriesCache = { profileId: activeProf.id, items: items };
+                }).then(function(items) {
+                    self.xtreamSeriesPromise = null;
+                    self.xtreamSeriesCache = { profileId: activeProf.id, items: items };
+                    return items;
+                }).catch(function(err) {
+                    self.xtreamSeriesPromise = null;
+                    throw err;
+                });
+            }
+            return this.xtreamSeriesPromise.then(function(items) {
                 return filterAndPaginateLocalList(items, categoryId, page, searchQuery, sortBy);
             });
         }
@@ -2260,9 +2671,11 @@
         }
         if (this.getProviderType() === 'xtream') {
             var activeProf = getActiveProfile();
-            var xBase = normalizeXtreamServerUrl(activeProf.xtreamUrl || '');
-            var xUser = activeProf.xtreamUser || '';
-            var xPass = activeProf.xtreamPass || '';
+            var xAuthSeries = {
+                base: normalizeXtreamServerUrl(activeProf.xtreamUrl || ''),
+                user: encodeURIComponent(String(activeProf.xtreamUser || '').trim()),
+                pass: encodeURIComponent(String(activeProf.xtreamPass || '').trim())
+            };
             var serId = seriesItem.xtreamSeriesId || String(seriesItem.id).replace(/^xt_ser_/, '');
             return this.xtreamRequest('get_series_info', { series_id: serId }).then(function(res) {
                 var episodesObj = (res && res.episodes && typeof res.episodes === 'object') ? res.episodes : {};
@@ -2284,7 +2697,7 @@
                         builtEpisodes.push({
                             id: 'xt_ep_' + ep.id,
                             name: 'E' + epNum + (epTitle.indexOf('Episode') === 0 ? '' : (' - ' + epTitle)),
-                            cmd: buildXtreamDirectStreamUrl(xBase, xUser, xPass, 'series', ep.id, ext),
+                            cmd: buildXtreamDirectStreamUrl(xAuthSeries, 'series', ep.id, ext),
                             directUrl: true,
                             useTmpLink: 0,
                             desc: String((ep.info && ep.info.plot) || seriesItem.desc || ''),
@@ -2387,23 +2800,92 @@
         }
         return out;
     }
+    StalkerAPI.prototype.getEffectiveXmltvUrl = function() {
+        var prof = getActiveProfile();
+        var customUrl = String((prof && prof.epgUrl) || localStorage.getItem('cfg_epg_url') || '').trim();
+        if (customUrl && /^https?:\/\/.+/i.test(customUrl)) {
+            return customUrl;
+        }
+        if (this.m3uCatalogCache && this.m3uCatalogCache.catalog && this.m3uCatalogCache.catalog.epgUrl) {
+            return this.m3uCatalogCache.catalog.epgUrl;
+        }
+        if (this.getProviderType() === 'xtream' && prof && prof.xtreamUrl && prof.xtreamUser && prof.xtreamPass) {
+            var xBase = normalizeXtreamServerUrl(prof.xtreamUrl);
+            if (xBase) {
+                return xBase + '/xmltv.php?username=' + encodeURIComponent(prof.xtreamUser) + '&password=' + encodeURIComponent(prof.xtreamPass);
+            }
+        }
+        return '';
+    };
+    StalkerAPI.prototype.ensureXmltvLoaded = function() {
+        var xmlUrl = this.getEffectiveXmltvUrl();
+        if (!xmlUrl) {
+            return Promise.resolve(null);
+        }
+        var cached = xmltvCache[xmlUrl];
+        if (cached && cached.catalog && (Date.now() - cached.ts) < 1800000) {
+            return Promise.resolve(cached.catalog);
+        }
+        if (cached && cached.promise) {
+            return cached.promise;
+        }
+        var proxiedUrl = this.proxyUrl + '/xmltv?url=' + encodeURIComponent(xmlUrl);
+        var p = proxyFetch(proxiedUrl, { method: 'GET' }).then(function(r) {
+            if (!r.ok) {
+                throw new Error('HTTP ' + r.status);
+            }
+            return r.text();
+        }).catch(function() {
+            return proxyFetch(xmlUrl, { method: 'GET' }).then(function(r2) {
+                if (!r2.ok) {
+                    throw new Error('HTTP ' + r2.status);
+                }
+                return r2.text();
+            });
+        }).then(function(rawXml) {
+            var parsed = parseXmltvDocument(rawXml);
+            xmltvCache[xmlUrl] = { ts: Date.now(), catalog: parsed, promise: null };
+            return parsed;
+        }).catch(function() {
+            xmltvCache[xmlUrl] = { ts: Date.now(), catalog: null, promise: null };
+            return null;
+        });
+        xmltvCache[xmlUrl] = { ts: Date.now(), catalog: null, promise: p };
+        return p;
+    };
     StalkerAPI.prototype.fetchShortEpg = function(channelId) {
+        var self = this;
         var key = String(channelId);
         var cached = shortEpgCache[key];
         if (cached && (Date.now() - cached.ts) < 300000) {
             return Promise.resolve(cached.list);
         }
+        var chObj = channelByIdMap[key];
         if (this.getProviderType() === 'm3u') {
-            storeShortEpgEntry(key, []);
-            return Promise.resolve([]);
+            return this.ensureXmltvLoaded().then(function(xmlCat) {
+                var list = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
+                storeShortEpgEntry(key, list);
+                return list;
+            });
         }
         if (this.getProviderType() === 'xtream') {
-            var chObj = channelByIdMap[key];
             var stId = (chObj && chObj.xtreamStreamId) ? chObj.xtreamStreamId : key.replace(/^xt_live_/, '');
             return this.xtreamRequest('get_short_epg', { stream_id: stId, limit: 10 }).then(function(res) {
                 var list = normalizeXtreamEpgListings(res && res.epg_listings);
-                storeShortEpgEntry(key, list);
-                return list;
+                if (list.length > 0) {
+                    storeShortEpgEntry(key, list);
+                    return list;
+                }
+                var customEpg = String((getActiveProfile() && getActiveProfile().epgUrl) || '').trim();
+                if (!customEpg) {
+                    storeShortEpgEntry(key, []);
+                    return [];
+                }
+                return self.ensureXmltvLoaded().then(function(xmlCat) {
+                    var xmlList = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
+                    storeShortEpgEntry(key, xmlList);
+                    return xmlList;
+                });
             }).catch(function() {
                 storeShortEpgEntry(key, []);
                 return [];
@@ -2421,8 +2903,20 @@
             } else if (res && Array.isArray(res.data)) {
                 list = res.data;
             }
-            storeShortEpgEntry(key, list);
-            return list;
+            if (list.length > 0) {
+                storeShortEpgEntry(key, list);
+                return list;
+            }
+            var customEpg = String((getActiveProfile() && getActiveProfile().epgUrl) || '').trim();
+            if (!customEpg) {
+                storeShortEpgEntry(key, []);
+                return [];
+            }
+            return self.ensureXmltvLoaded().then(function(xmlCat) {
+                var xmlList = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
+                storeShortEpgEntry(key, xmlList);
+                return xmlList;
+            });
         }).catch(function() {
             storeShortEpgEntry(key, []);
             return [];
@@ -2431,11 +2925,13 @@
     StalkerAPI.prototype.fetchFullEpg = function(channelId) {
         var self = this;
         var key = String(channelId);
+        var chObj = channelByIdMap[key];
         if (this.getProviderType() === 'm3u') {
-            return Promise.resolve([]);
+            return this.ensureXmltvLoaded().then(function(xmlCat) {
+                return xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
+            });
         }
         if (this.getProviderType() === 'xtream') {
-            var chObj = channelByIdMap[key];
             var stId = (chObj && chObj.xtreamStreamId) ? chObj.xtreamStreamId : key.replace(/^xt_live_/, '');
             return this.xtreamRequest('get_simple_data_table', { stream_id: stId }).then(function(res) {
                 var list = normalizeXtreamEpgListings(res && res.epg_listings);
@@ -2679,7 +3175,13 @@
         favSeriesCache = null;
         favLookupCache = { live: null, vod: null, series: null };
         watchedLookupCache = null;
+        vodResumeCache = null;
         pinnedCatsCache = {};
+        pinnedCatsMapCache = {};
+        hiddenCatsCache = {};
+        hiddenCatsMapCache = {};
+        hiddenItemsCache = {};
+        hiddenItemsMapCache = {};
         recLiveCache = null;
         recVodCache = null;
     }
@@ -2831,7 +3333,7 @@
         }
         var currentCat = currentCats[catIdx];
         var catId = currentCat ? currentCat.id : '*';
-        var isAdultCat = currentCat && (Boolean(currentCat.censored) || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(String(currentCat.title || '')));
+        var isAdultCat = currentCat && (Boolean(currentCat.censored) || ADULT_RE.test(String(currentCat.title || '')));
         if (isAdultCat) {
             return;
         }
@@ -2848,20 +3350,28 @@
         var mId = modeId || (modes[modeIdx] ? modes[modeIdx].id : 'live');
         if (!pinnedCatsCache[mId]) {
             pinnedCatsCache[mId] = safeGetJson(getProfileScopedKey('pinned_cats_' + mId), []);
+            pinnedCatsMapCache[mId] = null;
         }
         return pinnedCatsCache[mId];
+    }
+    function getPinnedCatMap(modeId) {
+        var mId = modeId || (modes[modeIdx] ? modes[modeIdx].id : 'live');
+        if (pinnedCatsMapCache[mId]) {
+            return pinnedCatsMapCache[mId];
+        }
+        var pinned = getPinnedCatIds(mId);
+        var map = {};
+        for (var i = 0; i < pinned.length; i++) {
+            map[String(pinned[i])] = true;
+        }
+        pinnedCatsMapCache[mId] = map;
+        return map;
     }
     function isPinnedCategory(modeId, catId) {
         if (!catId || catId === '*' || catId === 'cont' || catId === 'fav' || catId === 'rec') {
             return false;
         }
-        var pinned = getPinnedCatIds(modeId);
-        for (var i = 0; i < pinned.length; i++) {
-            if (String(pinned[i]) === String(catId)) {
-                return true;
-            }
-        }
-        return false;
+        return Boolean(getPinnedCatMap(modeId)[String(catId)]);
     }
     function togglePinCategory(catObj) {
         if (!catObj || catObj.id === '*' || catObj.id === 'cont' || catObj.id === 'fav' || catObj.id === 'rec') {
@@ -2885,6 +3395,7 @@
             showToast('📌 Pinned Category to Top: ' + catObj.title);
         }
         pinnedCatsCache[mId] = pinned;
+        pinnedCatsMapCache[mId] = null;
         safeSetStorage(getProfileScopedKey('pinned_cats_' + mId), JSON.stringify(pinned));
         applyColumnFilters();
         for (var c = 0; c < currentCats.length; c++) {
@@ -2897,6 +3408,134 @@
             catsListEl._forceRebuild = true;
         }
         renderCats();
+    }
+    function getHiddenCatIds(modeId) {
+        var mId = modeId || (modes[modeIdx] ? modes[modeIdx].id : 'live');
+        if (!hiddenCatsCache[mId]) {
+            hiddenCatsCache[mId] = safeGetJson(getProfileScopedKey('hidden_cats_' + mId), []);
+            hiddenCatsMapCache[mId] = null;
+        }
+        return hiddenCatsCache[mId];
+    }
+    function getHiddenCatMap(modeId) {
+        var mId = modeId || (modes[modeIdx] ? modes[modeIdx].id : 'live');
+        if (hiddenCatsMapCache[mId]) {
+            return hiddenCatsMapCache[mId];
+        }
+        var hidden = getHiddenCatIds(mId);
+        var map = {};
+        for (var i = 0; i < hidden.length; i++) {
+            map[String(hidden[i])] = true;
+        }
+        hiddenCatsMapCache[mId] = map;
+        return map;
+    }
+    function isHiddenCategory(modeId, catId) {
+        if (!catId || catId === '*' || catId === 'cont' || catId === 'fav' || catId === 'rec') {
+            return false;
+        }
+        return Boolean(getHiddenCatMap(modeId)[String(catId)]);
+    }
+    function toggleHideCategory(catObj) {
+        if (!catObj || catObj.id === '*' || catObj.id === 'cont' || catObj.id === 'fav' || catObj.id === 'rec') {
+            showToast('Built-in categories cannot be hidden');
+            return;
+        }
+        var mId = modes[modeIdx] ? modes[modeIdx].id : 'live';
+        var hidden = getHiddenCatIds(mId).slice();
+        var foundIdx = -1;
+        for (var i = 0; i < hidden.length; i++) {
+            if (String(hidden[i]) === String(catObj.id)) {
+                foundIdx = i;
+                break;
+            }
+        }
+        if (foundIdx !== -1) {
+            hidden.splice(foundIdx, 1);
+            showToast('👁 Unhid Category: ' + catObj.title);
+        } else {
+            hidden.push(String(catObj.id));
+            showToast('🚫 Hid Category: ' + catObj.title);
+        }
+        hiddenCatsCache[mId] = hidden;
+        hiddenCatsMapCache[mId] = null;
+        safeSetStorage(getProfileScopedKey('hidden_cats_' + mId), JSON.stringify(hidden));
+        applyColumnFilters();
+        if (catsListEl) {
+            catsListEl._forceRebuild = true;
+        }
+        renderUI();
+        if (foundIdx === -1 && currentCats[catIdx]) {
+            selectCategory(catIdx, true);
+        }
+    }
+    function getHiddenItemIds(modeId) {
+        var mId = modeId || (modes[modeIdx] ? modes[modeIdx].id : 'live');
+        if (!hiddenItemsCache[mId]) {
+            hiddenItemsCache[mId] = safeGetJson(getProfileScopedKey('hidden_items_' + mId), []);
+            hiddenItemsMapCache[mId] = null;
+        }
+        return hiddenItemsCache[mId];
+    }
+    function getHiddenItemMap(modeId) {
+        var mId = modeId || (modes[modeIdx] ? modes[modeIdx].id : 'live');
+        if (hiddenItemsMapCache[mId]) {
+            return hiddenItemsMapCache[mId];
+        }
+        var hidden = getHiddenItemIds(mId);
+        var map = {};
+        for (var i = 0; i < hidden.length; i++) {
+            map[String(hidden[i])] = true;
+        }
+        hiddenItemsMapCache[mId] = map;
+        return map;
+    }
+    function isHiddenItem(modeId, itemId) {
+        if (!itemId) {
+            return false;
+        }
+        return Boolean(getHiddenItemMap(modeId)[String(itemId)]);
+    }
+    function toggleHideItem(itemObj) {
+        if (!itemObj || itemObj.isSeason || itemObj.isEpisode) {
+            return;
+        }
+        var mId = modes[modeIdx] ? modes[modeIdx].id : 'live';
+        var hidden = getHiddenItemIds(mId).slice();
+        var foundIdx = -1;
+        for (var i = 0; i < hidden.length; i++) {
+            if (String(hidden[i]) === String(itemObj.id)) {
+                foundIdx = i;
+                break;
+            }
+        }
+        if (foundIdx !== -1) {
+            hidden.splice(foundIdx, 1);
+            showToast('👁 Unhid: ' + itemObj.name);
+        } else {
+            hidden.push(String(itemObj.id));
+            showToast('🚫 Hid: ' + itemObj.name);
+        }
+        hiddenItemsCache[mId] = hidden;
+        hiddenItemsMapCache[mId] = null;
+        safeSetStorage(getProfileScopedKey('hidden_items_' + mId), JSON.stringify(hidden));
+        applyColumnFilters();
+        if (itemsListEl) {
+            itemsListEl._forceRebuild = true;
+        }
+        renderUI();
+    }
+    function toggleShowHiddenMode() {
+        showHiddenEntries = !showHiddenEntries;
+        showToast(showHiddenEntries ? '👁 Showing Hidden Categories & Channels' : '🚫 Hiding Filtered Categories & Channels');
+        applyColumnFilters();
+        if (catsListEl) {
+            catsListEl._forceRebuild = true;
+        }
+        if (itemsListEl) {
+            itemsListEl._forceRebuild = true;
+        }
+        renderUI();
     }
     function getContinueWatchingItems(isSeriesMode) {
         var rec = getRecentItems(true);
@@ -2964,27 +3603,43 @@
         sleepTimerInterval = setInterval(updateSleepBadge, 15000);
         showToast('🌙 Sleep Timer set for ' + sleepTimerMinutes + ' minutes');
     }
+    function getVodResumeMap() {
+        if (!vodResumeCache) {
+            vodResumeCache = getScopedJsonWithLegacyFallback('vod_resume', {});
+        }
+        return vodResumeCache;
+    }
     function saveResumeTime(itemId, currentSec, durationSec) {
         if (!itemId || !durationSec || durationSec <= 0) {
             return;
         }
+        var key = String(itemId);
         var scopedKey = getProfileScopedKey('vod_resume');
-        var map = getScopedJsonWithLegacyFallback('vod_resume', {});
+        var map = getVodResumeMap();
         if (currentSec / durationSec > 0.92) {
-            delete map[String(itemId)];
+            delete map[key];
             markItemWatched(itemId);
         } else if (currentSec < 15) {
-            delete map[String(itemId)];
+            if (!map[key]) {
+                return;
+            }
+            delete map[key];
         } else {
-            map[String(itemId)] = { pos: Math.floor(currentSec), dur: Math.floor(durationSec), ts: Date.now() };
+            var newPos = Math.floor(currentSec);
+            var existing = map[key];
+            if (existing && Math.abs(existing.pos - newPos) < 4) {
+                return;
+            }
+            map[key] = { pos: newPos, dur: Math.floor(durationSec), ts: Date.now() };
         }
+        vodResumeCache = map;
         safeSetStorage(scopedKey, JSON.stringify(map));
     }
     function getResumeInfo(itemId) {
         if (!itemId) {
             return null;
         }
-        var map = getScopedJsonWithLegacyFallback('vod_resume', {});
+        var map = getVodResumeMap();
         return map[String(itemId)] || null;
     }
     function getWatchedMap() {
@@ -3291,13 +3946,18 @@
         if (!streamUrl || activeSession !== playSessionId) {
             return;
         }
-        fetch(api.proxyUrl + '/stream-diag?url=' + encodeURIComponent(streamUrl))
+        proxyFetch(api.proxyUrl + '/stream-diag?url=' + encodeURIComponent(streamUrl))
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 if (!d || activeSession !== playSessionId || !osdStatus) {
                     return;
                 }
-                if (d.verdict && d.verdict.source === 'provider' && (d.elapsedMs || 0) >= 2200) {
+                var isProviderIssue = d.verdict && (
+                    d.verdict.source === 'provider' ||
+                    d.verdict.status === 'provider_error' ||
+                    d.verdict.status === 'provider_slow'
+                );
+                if (isProviderIssue && (d.elapsedMs || 0) >= 2200) {
                     var shortReason;
                     if (d.httpStatus && d.httpStatus >= 400) {
                         shortReason = 'PROVIDER HTTP ' + d.httpStatus;
@@ -3825,13 +4485,15 @@
             hasActivePlaybackError = true;
             showOSD(formatOsdTitle(item), 'Stream Unavailable (' + String(reason) + ') — Press OK to Retry');
             if (failedUrl) {
-                fetch(api.proxyUrl + '/stream-diag?url=' + encodeURIComponent(failedUrl))
+                proxyFetch(api.proxyUrl + '/stream-diag?url=' + encodeURIComponent(failedUrl))
                     .then(function(r) { return r.json(); })
                     .then(function(d) {
-                        if (d && d.verdict && d.verdict.summary && activeSession === playSessionId) {
-                            var statusLabel = (d.verdict.source === 'provider') ? 'PROVIDER OFFLINE' : 'STREAM ERROR';
-                            showOSD(formatOsdTitle(item), statusLabel, d.verdict.summary, 'Press OK to Retry • Tools/Settings for options');
-                            showToast('🩺 ' + d.verdict.summary);
+                        var summaryText = d && d.verdict ? (d.verdict.summary || d.verdict.reason || d.verdict.label) : '';
+                        if (summaryText && activeSession === playSessionId) {
+                            var isProv = d.verdict.source === 'provider' || d.verdict.status === 'provider_error' || d.verdict.status === 'provider_slow';
+                            var statusLabel = isProv ? 'PROVIDER OFFLINE' : 'STREAM ERROR';
+                            showOSD(formatOsdTitle(item), statusLabel, summaryText, 'Press OK to Retry • Tools/Settings for options');
+                            showToast('🩺 ' + summaryText);
                         }
                     })
                     .catch(function() {});
@@ -4133,7 +4795,7 @@
                 webapis.avplay.setSelectTrack('TEXT', subIndexNum);
                 try {
                     if (webapis.avplay.setSubtitlePosition) {
-                        webapis.avplay.setSubtitlePosition(0);
+                        webapis.avplay.setSubtitlePosition(subtitleDelayMs);
                     }
                 } catch (ePos) {}
             }
@@ -4183,6 +4845,32 @@
                 label: (isActSub ? '🟢 ' : '💬 ') + 'Subtitle: ' + parseTrackLabel(textTracks[t], t + 1) + (isActSub ? ' [ACTIVE]' : '')
             });
         }
+        if (typeof window._loadLocalSubtitleFile === 'function') {
+            items.push({
+                id: 'sub_load_local',
+                kind: 'sub_load_local',
+                trackArrIdx: -2,
+                label: '📂 Load Local .SRT / .VTT Subtitle File...'
+            });
+        }
+        items.push({
+            id: 'sub_delay_minus',
+            kind: 'delay',
+            deltaMs: -250,
+            label: '⏪ Subtitle Timing Offset: -250ms (Current: ' + formatSubtitleDelayLabel(subtitleDelayMs) + ')'
+        });
+        items.push({
+            id: 'sub_delay_plus',
+            kind: 'delay',
+            deltaMs: 250,
+            label: '⏩ Subtitle Timing Offset: +250ms (Current: ' + formatSubtitleDelayLabel(subtitleDelayMs) + ')'
+        });
+        items.push({
+            id: 'sub_delay_reset',
+            kind: 'delay_reset',
+            deltaMs: 0,
+            label: '⏱ Reset Subtitle Timing Offset (0ms)'
+        });
         tracksModalItems = items;
         tracksModalIdx = 0;
         if (preferredSection === 'sub') {
@@ -4222,6 +4910,9 @@
         if (tracksModalEl) {
             tracksModalEl.classList.add('visible');
         }
+        if (tracksListEl) {
+            tracksListEl._forceRebuild = true;
+        }
         renderTracksModalList();
     }
 
@@ -4239,12 +4930,48 @@
         }
         openTracksModal(preferredSection);
     };
+    window._openPcTracksModal = function(preferredSection) {
+        window._openTizenTracksModal(preferredSection);
+    };
+
+    window._onPcTracksUpdated = function() {
+        refreshTrackLists();
+        syncInitialActiveTracks();
+        updateOsdStreamTelemetry();
+        if (tracksModalOpen) {
+            var prevId = (tracksModalItems[tracksModalIdx] && tracksModalItems[tracksModalIdx].id) || '';
+            openTracksModal();
+            if (prevId) {
+                for (var i = 0; i < tracksModalItems.length; i++) {
+                    if (tracksModalItems[i].id === prevId) {
+                        tracksModalIdx = i;
+                        renderTracksModalList();
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    function refreshTracksDelayLabels() {
+        for (var i = 0; i < tracksModalItems.length; i++) {
+            var it = tracksModalItems[i];
+            if (it.id === 'sub_delay_minus') {
+                it.label = '⏪ Subtitle Timing Offset: -250ms (Current: ' + formatSubtitleDelayLabel(subtitleDelayMs) + ')';
+            } else if (it.id === 'sub_delay_plus') {
+                it.label = '⏩ Subtitle Timing Offset: +250ms (Current: ' + formatSubtitleDelayLabel(subtitleDelayMs) + ')';
+            }
+        }
+        if (tracksListEl) {
+            tracksListEl._forceRebuild = true;
+        }
+        renderTracksModalList();
+    }
 
     function renderTracksModalList() {
         if (!tracksListEl) {
             return;
         }
-        tracksListEl._forceRebuild = true;
         renderList(tracksListEl, tracksModalItems, tracksModalIdx, function(entry) {
             return entry.label;
         }, Math.max(50, tracksModalItems.length));
@@ -4257,6 +4984,27 @@
     function activateSelectedTrackModalRow() {
         var entry = tracksModalItems[tracksModalIdx];
         if (!entry) {
+            return;
+        }
+        if (entry.kind === 'sub_load_local') {
+            closeTracksModal();
+            if (typeof window._loadLocalSubtitleFile === 'function') {
+                window._loadLocalSubtitleFile(function(newExtIdx, fileName) {
+                    refreshTrackLists();
+                    selectSubtitleTrackByArrayIndex(textTracks.length - 1);
+                    showToast('💬 Loaded Subtitle: ' + fileName);
+                });
+            }
+            return;
+        }
+        if (entry.kind === 'delay') {
+            adjustSubtitleDelay(entry.deltaMs);
+            refreshTracksDelayLabels();
+            return;
+        }
+        if (entry.kind === 'delay_reset') {
+            adjustSubtitleDelay(-subtitleDelayMs);
+            refreshTracksDelayLabels();
             return;
         }
         if (entry.kind === 'audio') {
@@ -4274,33 +5022,28 @@
     if (tracksStyleColorEl) {
         tracksStyleColorEl.onclick = function(ev) {
             ev.stopPropagation();
-            cycleSubtitleColor(1);
+            cycleSubtitleColor();
         };
     }
     if (tracksStyleSizeEl) {
         tracksStyleSizeEl.onclick = function(ev) {
             ev.stopPropagation();
-            cycleSubtitleSize(1);
+            cycleSubtitleSize();
+        };
+    }
+    if (tracksStyleDelayEl) {
+        tracksStyleDelayEl.onclick = function(ev) {
+            ev.stopPropagation();
+            adjustSubtitleDelay(250);
+            if (tracksModalOpen) {
+                refreshTracksDelayLabels();
+            }
         };
     }
     if (tracksModalEl) {
         tracksModalEl.addEventListener('click', function(ev) {
             if (ev.target === tracksModalEl) {
                 closeTracksModal();
-            }
-        });
-    }
-    if (tracksListEl) {
-        tracksListEl.addEventListener('click', function(ev) {
-            var rowEl = ev.target;
-            while (rowEl && rowEl !== tracksListEl && !rowEl.classList.contains('item')) {
-                rowEl = rowEl.parentNode;
-            }
-            if (rowEl && typeof rowEl._itemIdx === 'number') {
-                ev.stopPropagation();
-                tracksModalIdx = rowEl._itemIdx;
-                renderTracksModalList();
-                activateSelectedTrackModalRow();
             }
         });
     }
@@ -4450,6 +5193,316 @@
         };
     }
 
+    function syncEpgModalViewModeUI() {
+        var isGrid = epgViewMode === 'grid';
+        var singleSplitEl = document.getElementById('epg-modal-body') || (epgModal ? epgModal.querySelector('.epg-split') : null);
+        if (singleSplitEl) {
+            singleSplitEl.style.display = isGrid ? 'none' : 'flex';
+        }
+        if (epgGridContainerEl) {
+            if (isGrid) {
+                epgGridContainerEl.classList.add('visible');
+            } else {
+                epgGridContainerEl.classList.remove('visible');
+            }
+        }
+        if (btnEpgViewToggleEl) {
+            btnEpgViewToggleEl.textContent = isGrid ? '📋 Single-Channel List [GREEN]' : '📅 2D Multi-Channel Grid [GREEN]';
+        }
+    }
+    function buildEpgGridWindowSlots(baseSec) {
+        var nowSec = baseSec || Math.floor(Date.now() / 1000);
+        var winStart = Math.floor(nowSec / 1800) * 1800;
+        var slots = [];
+        for (var i = 0; i < 6; i++) {
+            var sSec = winStart + (i * 1800);
+            slots.push({
+                startSec: sSec,
+                endSec: sSec + 1800,
+                label: formatUnixTimeHM(sSec)
+            });
+        }
+        return {
+            windowStartSec: winStart,
+            windowEndSec: winStart + (6 * 1800),
+            slots: slots
+        };
+    }
+    function getProgramForChannelAtSlot(chId, slotStartSec, slotEndSec) {
+        var list = epgGridProgramsByCh[String(chId)] || [];
+        var midSec = Math.floor((slotStartSec + slotEndSec) / 2);
+        for (var i = 0; i < list.length; i++) {
+            var p = list[i];
+            if (p.start_timestamp <= midSec && p.stop_timestamp > midSec) {
+                return p;
+            }
+        }
+        for (var j = 0; j < list.length; j++) {
+            var p2 = list[j];
+            if (p2.stop_timestamp > slotStartSec && p2.start_timestamp < slotEndSec) {
+                return p2;
+            }
+        }
+        return null;
+    }
+    function renderEpgGridView() {
+        if (!epgGridContainerEl || !epgGridTimelineEl || !epgGridRowsEl) {
+            return;
+        }
+        var winObj = buildEpgGridWindowSlots(epgGridWindowStartSec || Math.floor(Date.now() / 1000));
+        epgGridWindowStartSec = winObj.windowStartSec;
+        var slots = winObj.slots;
+        if (epgGridSlotIdx >= slots.length) {
+            epgGridSlotIdx = slots.length - 1;
+        }
+        if (epgGridSlotIdx < 0) {
+            epgGridSlotIdx = 0;
+        }
+        var tlHtml = '<div class="epg-grid-ch-col-hdr">Channel</div><div class="epg-grid-slots-hdr">';
+        for (var s = 0; s < slots.length; s++) {
+            tlHtml += '<div class="epg-grid-slot-lbl">' + slots[s].label + '</div>';
+        }
+        tlHtml += '</div>';
+        epgGridTimelineEl.innerHTML = tlHtml;
+
+        var totalCh = epgGridChannels.length;
+        if (totalCh === 0) {
+            epgGridRowsEl.innerHTML = '<div class="item">No Live TV channels loaded.</div>';
+            return;
+        }
+        if (epgGridChIdx >= totalCh) {
+            epgGridChIdx = Math.max(0, totalCh - 1);
+        }
+        var winSize = 6;
+        var half = Math.floor(winSize / 2);
+        var startIdx = Math.max(0, epgGridChIdx - half);
+        var endIdx = Math.min(totalCh, startIdx + winSize);
+        if (endIdx - startIdx < winSize) {
+            startIdx = Math.max(0, endIdx - winSize);
+        }
+        epgGridRowsEl.innerHTML = '';
+        var frag = document.createDocumentFragment();
+        var activeSlot = slots[epgGridSlotIdx] || slots[0];
+        var totalWindowDur = winObj.windowEndSec - winObj.windowStartSec;
+
+        function bindGridChannelOrEmptyClick(el, rowIdx, chRef) {
+            el.onclick = function(ev) {
+                ev.stopPropagation();
+                if (epgGridChIdx === rowIdx) {
+                    closeEpgModal();
+                    setOverlayVisible(false);
+                    playItem(chRef);
+                } else {
+                    epgGridChIdx = rowIdx;
+                    epgModalChannel = chRef;
+                    renderEpgGridView();
+                }
+            };
+        }
+
+        function bindGridProgramBlockClick(el, rowIdx, progRef, chRef) {
+            el.onclick = function(ev) {
+                ev.stopPropagation();
+                epgGridChIdx = rowIdx;
+                epgModalChannel = chRef;
+                for (var sIdx = 0; sIdx < slots.length; sIdx++) {
+                    if (progRef.start_timestamp < slots[sIdx].endSec && progRef.stop_timestamp > slots[sIdx].startSec) {
+                        epgGridSlotIdx = sIdx;
+                        break;
+                    }
+                }
+                if (progRef.isNow) {
+                    closeEpgModal();
+                    setOverlayVisible(false);
+                    playItem(chRef);
+                } else if (progRef.isPast && chRef.archive) {
+                    closeEpgModal();
+                    playCatchupProgram(chRef, progRef);
+                } else {
+                    renderEpgGridView();
+                }
+            };
+        }
+
+        for (var r = startIdx; r < endIdx; r++) {
+            var ch = epgGridChannels[r];
+            var isRowSelected = (r === epgGridChIdx);
+            var rowEl = document.createElement('div');
+            rowEl.className = 'epg-grid-row' + (isRowSelected ? ' selected-row' : '');
+
+            var chCell = document.createElement('div');
+            chCell.className = 'epg-grid-ch-cell';
+            chCell.textContent = (ch.num ? (ch.num + '. ') : '') + ch.name;
+            bindGridChannelOrEmptyClick(chCell, r, ch);
+            rowEl.appendChild(chCell);
+
+            var trackEl = document.createElement('div');
+            trackEl.className = 'epg-grid-progs-track';
+            var chProgs = epgGridProgramsByCh[String(ch.id)] || [];
+            var visibleBlocks = [];
+            for (var p = 0; p < chProgs.length; p++) {
+                var pr = chProgs[p];
+                if (pr.stop_timestamp <= winObj.windowStartSec || pr.start_timestamp >= winObj.windowEndSec) {
+                    continue;
+                }
+                visibleBlocks.push(pr);
+            }
+            var selectedProgForRow = getProgramForChannelAtSlot(ch.id, activeSlot.startSec, activeSlot.endSec);
+
+            if (visibleBlocks.length === 0) {
+                var emptyBlock = document.createElement('div');
+                emptyBlock.className = 'epg-grid-cell' + (isRowSelected ? ' focused' : '');
+                emptyBlock.style.width = '100%';
+                emptyBlock.innerHTML = '<div class="epg-grid-cell-title">No EPG Data</div><div class="epg-grid-cell-time">' + slots[0].label + ' - ' + formatUnixTimeHM(winObj.windowEndSec) + '</div>';
+                bindGridChannelOrEmptyClick(emptyBlock, r, ch);
+                trackEl.appendChild(emptyBlock);
+            } else {
+                var cursorSec = winObj.windowStartSec;
+                for (var b = 0; b < visibleBlocks.length; b++) {
+                    var blk = visibleBlocks[b];
+                    var clampStart = Math.max(winObj.windowStartSec, blk.start_timestamp);
+                    var clampEnd = Math.min(winObj.windowEndSec, blk.stop_timestamp);
+                    if (clampStart > cursorSec) {
+                        var gapPct = ((clampStart - cursorSec) / totalWindowDur) * 100;
+                        var gapEl = document.createElement('div');
+                        gapEl.className = 'epg-grid-cell';
+                        gapEl.style.width = gapPct.toFixed(2) + '%';
+                        gapEl.innerHTML = '<div class="epg-grid-cell-title">—</div>';
+                        trackEl.appendChild(gapEl);
+                    }
+                    var widthPct = Math.max(4, ((clampEnd - clampStart) / totalWindowDur) * 100);
+                    var isBlkFocused = isRowSelected && selectedProgForRow && selectedProgForRow.id === blk.id;
+                    var blkEl = document.createElement('div');
+                    blkEl.className = 'epg-grid-cell' + (blk.isNow ? ' live-now' : '') + (isBlkFocused ? ' focused' : '');
+                    blkEl.style.width = widthPct.toFixed(2) + '%';
+                    var titleDiv = document.createElement('div');
+                    titleDiv.className = 'epg-grid-cell-title';
+                    titleDiv.textContent = (blk.isNow ? '🟢 ' : '') + blk.name;
+                    var timeDiv = document.createElement('div');
+                    timeDiv.className = 'epg-grid-cell-time';
+                    timeDiv.textContent = blk.timeLabel || '';
+                    blkEl.appendChild(titleDiv);
+                    blkEl.appendChild(timeDiv);
+                    bindGridProgramBlockClick(blkEl, r, blk, ch);
+                    trackEl.appendChild(blkEl);
+                    cursorSec = clampEnd;
+                }
+                if (cursorSec < winObj.windowEndSec) {
+                    var tailPct = ((winObj.windowEndSec - cursorSec) / totalWindowDur) * 100;
+                    if (tailPct > 1) {
+                        var tailEl = document.createElement('div');
+                        tailEl.className = 'epg-grid-cell';
+                        tailEl.style.width = tailPct.toFixed(2) + '%';
+                        tailEl.innerHTML = '<div class="epg-grid-cell-title">—</div>';
+                        trackEl.appendChild(tailEl);
+                    }
+                }
+            }
+            rowEl.appendChild(trackEl);
+            frag.appendChild(rowEl);
+        }
+        epgGridRowsEl.appendChild(frag);
+
+        var curCh = epgGridChannels[epgGridChIdx];
+        var curProg = curCh ? getProgramForChannelAtSlot(curCh.id, activeSlot.startSec, activeSlot.endSec) : null;
+        if (curCh && curProg) {
+            if (epgGridSelTitleEl) {
+                epgGridSelTitleEl.textContent = curCh.name + ' • ' + curProg.timeLabel + ' — ' + curProg.name;
+            }
+            if (epgGridSelDescEl) {
+                epgGridSelDescEl.textContent = curProg.descr || 'Press OK to watch channel.';
+            }
+        } else if (curCh) {
+            if (epgGridSelTitleEl) {
+                epgGridSelTitleEl.textContent = curCh.name + ' (' + activeSlot.label + ')';
+            }
+            if (epgGridSelDescEl) {
+                epgGridSelDescEl.textContent = 'No EPG program scheduled for this time slot. Press OK to watch live.';
+            }
+        }
+    }
+    function loadEpgGridVisibleChannels() {
+        var totalCh = epgGridChannels.length;
+        if (totalCh === 0) {
+            renderEpgGridView();
+            return;
+        }
+        var winSize = 6;
+        var half = Math.floor(winSize / 2);
+        var startIdx = Math.max(0, epgGridChIdx - half);
+        var endIdx = Math.min(totalCh, startIdx + winSize);
+        if (endIdx - startIdx < winSize) {
+            startIdx = Math.max(0, endIdx - winSize);
+        }
+        var promises = [];
+        function queueChannelShortEpg(ch) {
+            if (!ch) {
+                return;
+            }
+            var key = String(ch.id);
+            if (epgGridProgramsByCh[key]) {
+                return;
+            }
+            var cached = shortEpgCache[key];
+            if (cached && Array.isArray(cached.list) && cached.list.length > 0) {
+                epgGridProgramsByCh[key] = normalizeEpgEntries(cached.list);
+                return;
+            }
+            promises.push(api.fetchShortEpg(ch.id).then(function(raw) {
+                epgGridProgramsByCh[key] = normalizeEpgEntries(raw);
+            }).catch(function() {
+                epgGridProgramsByCh[key] = [];
+            }));
+        }
+        for (var i = startIdx; i < endIdx; i++) {
+            queueChannelShortEpg(epgGridChannels[i]);
+        }
+        renderEpgGridView();
+        if (promises.length > 0) {
+            Promise.all(promises).then(function() {
+                if (epgModalOpen && epgViewMode === 'grid') {
+                    renderEpgGridView();
+                }
+            });
+        }
+    }
+    function toggleEpgModalViewMode() {
+        if (!epgModalOpen) {
+            return;
+        }
+        epgViewMode = (epgViewMode === 'grid') ? 'list' : 'grid';
+        syncEpgModalViewModeUI();
+        if (epgViewMode === 'grid') {
+            var listSource = (modes[modeIdx] && modes[modeIdx].id === 'live' && currentItems.length > 0) ? currentItems : allChannels;
+            epgGridChannels = listSource.slice(0, 200);
+            epgGridChIdx = 0;
+            if (epgModalChannel) {
+                for (var i = 0; i < epgGridChannels.length; i++) {
+                    if (String(epgGridChannels[i].id) === String(epgModalChannel.id)) {
+                        epgGridChIdx = i;
+                        break;
+                    }
+                }
+            }
+            epgGridSlotIdx = 0;
+            epgGridWindowStartSec = Math.floor(Date.now() / 1800000) * 1800;
+            loadEpgGridVisibleChannels();
+        } else {
+            var selectedGridCh = epgGridChannels[epgGridChIdx];
+            if (selectedGridCh && (!epgModalChannel || String(selectedGridCh.id) !== String(epgModalChannel.id))) {
+                openEpgModal(selectedGridCh);
+            } else {
+                renderEpgModalList();
+            }
+        }
+    }
+    if (btnEpgViewToggleEl) {
+        btnEpgViewToggleEl.onclick = function(ev) {
+            ev.stopPropagation();
+            toggleEpgModalViewMode();
+        };
+    }
+
     function openEpgModal(channel) {
         var baseCh = channel || (modes[modeIdx].id === 'live' ? currentItems[itemIdx] : currentPlayingItem);
         if (baseCh && baseCh.isCatchup && baseCh.channelRef) {
@@ -4464,6 +5517,7 @@
         epgModalChannel = baseCh;
         epgModalItems = [];
         epgModalIdx = 0;
+        syncEpgModalViewModeUI();
         if (epgModalTitle) {
             epgModalTitle.textContent = 'EPG Guide — ' + baseCh.name + (baseCh.archive ? ' (Catch-Up Enabled)' : '');
         }
@@ -4483,11 +5537,29 @@
         if (epgModal) {
             epgModal.classList.add('visible');
         }
+        if (epgViewMode === 'grid') {
+            var listSource = (modes[modeIdx] && modes[modeIdx].id === 'live' && currentItems.length > 0) ? currentItems : allChannels;
+            epgGridChannels = listSource.slice(0, 200);
+            epgGridChIdx = 0;
+            for (var c = 0; c < epgGridChannels.length; c++) {
+                if (String(epgGridChannels[c].id) === String(baseCh.id)) {
+                    epgGridChIdx = c;
+                    break;
+                }
+            }
+            epgGridSlotIdx = 0;
+            epgGridWindowStartSec = Math.floor(Date.now() / 1800000) * 1800;
+            loadEpgGridVisibleChannels();
+        }
         api.fetchFullEpg(baseCh.id).then(function(rawEpg) {
             if (!epgModalOpen) {
                 return;
             }
             epgModalItems = normalizeEpgEntries(rawEpg);
+            epgGridProgramsByCh[String(baseCh.id)] = epgModalItems;
+            if (epgViewMode === 'grid') {
+                renderEpgGridView();
+            }
             if (epgModalItems.length === 0) {
                 if (epgModalList) {
                     epgModalList._lastItemsRef = null;
@@ -4520,6 +5592,28 @@
         }
     }
     function triggerSelectedEpgProgram() {
+        if (epgViewMode === 'grid') {
+            var ch = epgGridChannels[epgGridChIdx];
+            if (!ch) {
+                return;
+            }
+            var winObj = buildEpgGridWindowSlots(epgGridWindowStartSec || Math.floor(Date.now() / 1000));
+            var slot = winObj.slots[epgGridSlotIdx] || winObj.slots[0];
+            var gProg = getProgramForChannelAtSlot(ch.id, slot.startSec, slot.endSec);
+            if (!gProg || gProg.isNow) {
+                closeEpgModal();
+                setOverlayVisible(false);
+                playItem(ch);
+            } else if (gProg.isPast && ch.archive) {
+                closeEpgModal();
+                playCatchupProgram(ch, gProg);
+            } else {
+                closeEpgModal();
+                setOverlayVisible(false);
+                playItem(ch);
+            }
+            return;
+        }
         var prog = epgModalItems[epgModalIdx];
         if (prog && epgModalChannel) {
             if (prog.isNow) {
@@ -4758,11 +5852,16 @@
             pinSpan.textContent = '📌';
             row.appendChild(pinSpan);
         }
+        var isHiddenRowEntry = (container === catsListEl && entry && isHiddenCategory(curModeIdForRow, entry.id)) ||
+                               (container === itemsListEl && entry && isHiddenItem(curModeIdForRow, entry.id));
+        if (isHiddenRowEntry) {
+            row.className += ' hidden-entry';
+        }
         var textStack = document.createElement('div');
         textStack.className = 'item-text-stack';
         var span = document.createElement('span');
         span.className = 'item-label';
-        span.textContent = labelFn(entry, rowIndex);
+        span.textContent = (isHiddenRowEntry ? '🚫 ' : '') + labelFn(entry, rowIndex);
         textStack.appendChild(span);
         row._textStack = textStack;
 
@@ -4799,7 +5898,7 @@
                 countPill.textContent = catCount;
                 row.appendChild(countPill);
             }
-            var isAdult = Boolean(entry.censored) || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(String(entry.title || ''));
+            var isAdult = Boolean(entry.censored) || ADULT_RE.test(String(entry.title || ''));
             if (isAdult) {
                 var lockBadge = document.createElement('span');
                 lockBadge.className = 'cat-lock-badge' + (window._parentalUnlocked ? ' unlocked' : '');
@@ -4958,7 +6057,6 @@
         var firstId = list[start] ? (list[start].id || list[start].catId || list[start].title || list[start].name) : '';
         var lastId = list[end - 1] ? (list[end - 1].id || list[end - 1].catId || list[end - 1].title || list[end - 1].name) : '';
         var sameWindow = !container._forceRebuild &&
-            container._lastItemsRef === list &&
             container._lastLen === list.length &&
             container._lastStart === start &&
             container._lastEnd === end &&
@@ -5014,7 +6112,11 @@
 
     function applyColumnFilters() {
         var curModeId = modes[modeIdx] ? modes[modeIdx].id : 'live';
-        var pinnedIds = getPinnedCatIds(curModeId);
+        var pinnedLookup = getPinnedCatMap(curModeId);
+        var hiddenCatIds = getHiddenCatIds(curModeId);
+        var hiddenCatLookup = getHiddenCatMap(curModeId);
+        var hiddenItemIds = getHiddenItemIds(curModeId);
+        var hiddenItemLookup = getHiddenItemMap(curModeId);
         var builtInCats = [];
         var pinnedCats = [];
         var regularCats = [];
@@ -5023,9 +6125,14 @@
             if (!rc) {
                 continue;
             }
-            if (rc.id === '*' || rc.id === 'cont' || rc.id === 'fav' || rc.id === 'rec') {
+            var rcIdStr = String(rc.id);
+            var isBuiltIn = (rcIdStr === '*' || rcIdStr === 'cont' || rcIdStr === 'fav' || rcIdStr === 'rec');
+            if (!isBuiltIn && !showHiddenEntries && hiddenCatLookup[rcIdStr]) {
+                continue;
+            }
+            if (isBuiltIn) {
                 builtInCats.push(rc);
-            } else if (pinnedIds.indexOf(String(rc.id)) !== -1) {
+            } else if (pinnedLookup[rcIdStr]) {
                 pinnedCats.push(rc);
             } else {
                 regularCats.push(rc);
@@ -5040,24 +6147,38 @@
         } else {
             currentCats = orderedRawCats;
         }
+        var baseItems = rawItems;
+        var hasHiddenFilter = !showHiddenEntries && (hiddenItemIds.length > 0 || hiddenCatIds.length > 0);
+        if (hasHiddenFilter) {
+            baseItems = [];
+            for (var bi = 0; bi < rawItems.length; bi++) {
+                var itemCandidate = rawItems[bi];
+                if (!itemCandidate) {
+                    continue;
+                }
+                if (hiddenItemLookup[String(itemCandidate.id)]) {
+                    continue;
+                }
+                if (itemCandidate.genreId && hiddenCatLookup[String(itemCandidate.genreId)]) {
+                    continue;
+                }
+                baseItems.push(itemCandidate);
+            }
+        }
         var iFilter = (itemFilterText || '').toLowerCase().trim();
         if (iFilter) {
-            currentItems = rawItems.filter(function(it) {
+            currentItems = baseItems.filter(function(it) {
                 return String(it.name || '').toLowerCase().indexOf(iFilter) !== -1;
             });
         } else if (currentSort !== 'added') {
-            currentItems = rawItems.slice();
+            currentItems = baseItems.slice();
         } else {
-            currentItems = rawItems;
+            currentItems = baseItems;
         }
         if (currentSort === 'title_asc') {
-            currentItems.sort(function(a, b) {
-                return String(a.name || '').localeCompare(String(b.name || ''));
-            });
+            currentItems.sort(compareItemsByNameAsc);
         } else if (currentSort === 'title_desc') {
-            currentItems.sort(function(a, b) {
-                return String(b.name || '').localeCompare(String(a.name || ''));
-            });
+            currentItems.sort(compareItemsByNameDesc);
         }
         if (catIdx >= currentCats.length) {
             catIdx = Math.max(0, currentCats.length - 1);
@@ -5075,6 +6196,11 @@
             }
             if (currentSort !== 'added') {
                 activeFilters.push('Sort: ' + currentSort.replace('title_', '').toUpperCase());
+            }
+            if (showHiddenEntries) {
+                activeFilters.push('Showing Hidden');
+            } else if (hiddenCatIds.length > 0 || hiddenItemIds.length > 0) {
+                activeFilters.push('Hidden: ' + (hiddenCatIds.length + hiddenItemIds.length));
             }
             if (activeFilters.length > 0) {
                 filterBadgeEl.textContent = activeFilters.join(' | ');
@@ -5147,6 +6273,10 @@
         }
     }
     function enforceReadableColumnLayout() {
+        if (layoutEnforced) {
+            return;
+        }
+        layoutEnforced = true;
         document.body.classList.remove('compact-nav');
         if (modesColEl && modesColEl.style) {
             modesColEl.style.flex = '0 0 200px';
@@ -5260,6 +6390,17 @@
             } },
             { label: '📅 EPG Guide', fn: function() { openEpgModal(currentItems[itemIdx]); } },
             { label: '🔊 Audio / Subs', fn: function() { openTracksModal('audio'); } },
+            { label: '🚫 Hide / Unhide Item', fn: function() {
+                if (currentItems[itemIdx]) {
+                    toggleHideItem(currentItems[itemIdx]);
+                }
+            } },
+            { label: '📂 Hide / Unhide Cat', fn: function() {
+                if (currentCats[catIdx]) {
+                    toggleHideCategory(currentCats[catIdx]);
+                }
+            } },
+            { label: '👁 Show Hidden Toggle', fn: function() { toggleShowHiddenMode(); } },
             { label: '📐 Aspect Ratio', fn: function() { toggleAspectRatio(); } },
             { label: '⏱ Sleep Timer', fn: function() { cycleSleepTimer(); } },
             { label: '⇅ Sort', fn: function() {
@@ -5455,7 +6596,7 @@
         var targetCatPos = 0;
         for (var i = 0; i < currentCats.length; i++) {
             if (String(currentCats[i].id) === String(saved.catId)) {
-                var isAdult = Boolean(currentCats[i].censored) || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(String(currentCats[i].title || ''));
+                var isAdult = Boolean(currentCats[i].censored) || ADULT_RE.test(String(currentCats[i].title || ''));
                 if (!isAdult) {
                     targetCatPos = i;
                 }
@@ -5728,7 +6869,7 @@
             if (!cat) {
                 return;
             }
-            var isAdultCat = Boolean(cat.censored) || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(String(cat.title || ''));
+            var isAdultCat = Boolean(cat.censored) || ADULT_RE.test(String(cat.title || ''));
             if (isAdultCat && !window._parentalUnlocked) {
                 return;
             }
@@ -5747,7 +6888,7 @@
             renderUI();
             return;
         }
-        var isAdultCat = Boolean(cat.censored) || /adult|xxx|18\+|18\||for adults|erotic|porn/i.test(String(cat.title || ''));
+        var isAdultCat = Boolean(cat.censored) || ADULT_RE.test(String(cat.title || ''));
         if (isAdultCat && !window._parentalUnlocked) {
             openPinModal(function() {
                 activeCol = 'items';
@@ -5813,14 +6954,18 @@
                         vodLoading = false;
                         rawItems = res.items || [];
                         vodHasMore = Boolean(res.hasMore);
+                        var addedAny = false;
                         for (var n = 0; n < rawItems.length; n++) {
                             if (!channelByIdMap[String(rawItems[n].id)]) {
                                 allChannels.push(rawItems[n]);
+                                addedAny = true;
                             }
                         }
-                        rebuildGenreChannelCounts();
-                        if (catsListEl) {
-                            catsListEl._forceRebuild = true;
+                        if (addedAny) {
+                            rebuildGenreChannelCounts();
+                            if (catsListEl) {
+                                catsListEl._forceRebuild = true;
+                            }
                         }
                         applyColumnFilters();
                         renderUI();
@@ -6152,6 +7297,9 @@
         if (inpM3uUrlEl && typeof inpM3uUrlEl.value === 'string') {
             p.m3uUrl = inpM3uUrlEl.value.trim();
         }
+        if (inpEpgUrlEl && typeof inpEpgUrlEl.value === 'string') {
+            p.epgUrl = inpEpgUrlEl.value.trim();
+        }
     }
 
     var isRenderingProfileOptions = false;
@@ -6229,6 +7377,9 @@
         }
         if (inpM3uUrlEl) {
             inpM3uUrlEl.value = p.m3uUrl || '';
+        }
+        if (inpEpgUrlEl) {
+            inpEpgUrlEl.value = p.epgUrl || '';
         }
         updateM3uFileStatusText(p);
     }
@@ -6436,6 +7587,73 @@
         btnBackupImportEl.onclick = function() { importBackupJson(); };
     }
 
+    function stopLanRemoteSetupPolling() {
+        if (lanSetupPollTimer) {
+            clearInterval(lanSetupPollTimer);
+            lanSetupPollTimer = null;
+        }
+    }
+    function startLanRemoteSetupPolling() {
+        stopLanRemoteSetupPolling();
+        proxyFetch(api.proxyUrl + '/lan-info', { method: 'GET' }).then(function(r) {
+            return r.json();
+        }).then(function(info) {
+            var lanUrl = info && (info.url || info.setupUrl);
+            if (lanSetupUrlEl && lanUrl) {
+                lanSetupUrlEl.textContent = lanUrl;
+            }
+        }).catch(function() {});
+
+        lanSetupPollTimer = setInterval(function() {
+            if (!settingsOpen) {
+                stopLanRemoteSetupPolling();
+                return;
+            }
+            proxyFetch(api.proxyUrl + '/remote-setup?consume=1', { method: 'GET' }).then(function(r) {
+                return r.json();
+            }).then(function(data) {
+                var rawPending = data && data.pending;
+                var pushed = (rawPending && rawPending.profile) ? rawPending.profile : rawPending;
+                if (!pushed || !pushed.type) {
+                    return;
+                }
+                var targetProf = profiles[editingProfileIndex];
+                if (!targetProf) {
+                    return;
+                }
+                var pType = (pushed.type === 'xtream' || pushed.type === 'm3u') ? pushed.type : 'stalker';
+                targetProf.type = pType;
+                if (pushed.name) {
+                    targetProf.name = String(pushed.name).trim();
+                }
+                if (pushed.portal) {
+                    targetProf.portal = String(pushed.portal).trim();
+                }
+                if (pushed.mac) {
+                    targetProf.mac = String(pushed.mac).trim();
+                }
+                if (pushed.xtreamUrl) {
+                    targetProf.xtreamUrl = String(pushed.xtreamUrl).trim();
+                }
+                if (pushed.xtreamUser) {
+                    targetProf.xtreamUser = String(pushed.xtreamUser).trim();
+                }
+                if (pushed.xtreamPass) {
+                    targetProf.xtreamPass = String(pushed.xtreamPass).trim();
+                }
+                if (pushed.m3uUrl) {
+                    targetProf.m3uUrl = String(pushed.m3uUrl).trim();
+                }
+                if (pushed.epgUrl !== undefined) {
+                    targetProf.epgUrl = String(pushed.epgUrl || '').trim();
+                }
+                loadProfileIntoSettingsInputs(editingProfileIndex, true);
+                showToast('📱 Received Remote Setup from Phone/PC!');
+                saveSettingsAndBoot();
+            }).catch(function() {});
+        }, 2500);
+    }
+
     function openSettings() {
         loadProfiles();
         settingsOpen = true;
@@ -6453,8 +7671,10 @@
             settingsModal.classList.add('visible');
         }
         updateSettingsFocus();
+        startLanRemoteSetupPolling();
     }
     function closeSettings() {
+        stopLanRemoteSetupPolling();
         var focusedEl = getFocusedModalElement(settingsGrid, settingsRow, settingsCol);
         if (focusedEl && focusedEl.blur) {
             focusedEl.blur();
@@ -6494,6 +7714,7 @@
         prof.xtreamUser = (inpXtreamUserEl && inpXtreamUserEl.value.trim()) || '';
         prof.xtreamPass = (inpXtreamPassEl && inpXtreamPassEl.value.trim()) || '';
         prof.m3uUrl = (inpM3uUrlEl && inpM3uUrlEl.value.trim()) || '';
+        prof.epgUrl = (inpEpgUrlEl && inpEpgUrlEl.value.trim()) || '';
 
         if (pType === 'xtream') {
             if (!prof.xtreamUrl || !/^https?:\/\//i.test(prof.xtreamUrl)) {
@@ -6587,7 +7808,8 @@
             xtreamUser: '',
             xtreamPass: '',
             m3uUrl: '',
-            m3uFileName: ''
+            m3uFileName: '',
+            epgUrl: ''
         });
         renderProfileSelectOptions(true);
         loadProfileIntoSettingsInputs(profiles.length - 1, true);
@@ -6614,7 +7836,9 @@
                 var scopedPrefixes = [
                     'fav_live_', 'fav_vod_objs_', 'fav_series_objs_',
                     'rec_items_', 'rec_vod_', 'vod_resume_', 'vod_watched_',
-                    'last_live_', 'pinned_cats_live_', 'pinned_cats_vod_', 'pinned_cats_series_'
+                    'last_live_', 'pinned_cats_live_', 'pinned_cats_vod_', 'pinned_cats_series_',
+                    'hidden_cats_live_', 'hidden_cats_vod_', 'hidden_cats_series_',
+                    'hidden_items_live_', 'hidden_items_vod_', 'hidden_items_series_'
                 ];
                 for (var sp = 0; sp < scopedPrefixes.length; sp++) {
                     localStorage.removeItem(scopedPrefixes[sp] + deletedId);
@@ -6913,7 +8137,7 @@
         if (innerBox && !innerBox.querySelector('.modal-close-x')) {
             var closeX = document.createElement('div');
             closeX.className = 'modal-close-x';
-            closeX.textContent = '✕';
+            closeX.textContent = '×';
             closeX.title = 'Close (Back / Esc)';
             closeX.onclick = function(ev) {
                 ev.stopPropagation();
@@ -6942,7 +8166,7 @@
         }
 
         document.addEventListener('dblclick', function(ev) {
-            if (settingsOpen || searchOpen || filterOpen || epgModalOpen || pinModalOpen) {
+            if (settingsOpen || searchOpen || filterOpen || epgModalOpen || pinModalOpen || tracksModalOpen || miniZapOpen) {
                 return;
             }
             if (ev.target === document.body || ev.target === overlayEl) {
@@ -7029,6 +8253,15 @@
             var step = ev.deltaY > 0 ? 1 : -1;
             epgModalIdx = Math.max(0, Math.min(epgModalItems.length - 1, epgModalIdx + step));
             renderEpgModalList();
+        });
+        bindWheelSafe(epgGridRowsEl, function(ev) {
+            ev.preventDefault();
+            if (epgViewMode !== 'grid' || epgGridChannels.length === 0) {
+                return;
+            }
+            var step = ev.deltaY > 0 ? 1 : -1;
+            epgGridChIdx = Math.max(0, Math.min(epgGridChannels.length - 1, epgGridChIdx + step));
+            loadEpgGridVisibleChannels();
         });
         bindWheelSafe(searchResultsContainer, function(ev) {
             ev.preventDefault();
@@ -7125,7 +8358,7 @@
             var isRewind = code === 412 || key === 'MediaRewind';
             var isFastForward = code === 417 || key === 'MediaFastForward';
 
-            if (!imeActive && !isInputFocused && !searchOpen && !filterOpen && !settingsOpen && !pinModalOpen && !epgModalOpen) {
+            if (!imeActive && !isInputFocused && !searchOpen && !filterOpen && !settingsOpen && !pinModalOpen && !epgModalOpen && !tracksModalOpen && !miniZapOpen) {
                 if (key === 'm' || key === 'M') {
                     e.preventDefault();
                     toggleMute();
@@ -7209,6 +8442,32 @@
                 e.preventDefault();
                 if (isBack || isGuide) {
                     closeEpgModal();
+                } else if (isGreen) {
+                    toggleEpgModalViewMode();
+                } else if (epgViewMode === 'grid') {
+                    if (isUp) {
+                        epgGridChIdx = Math.max(0, epgGridChIdx - 1);
+                        loadEpgGridVisibleChannels();
+                    } else if (isDown) {
+                        epgGridChIdx = Math.min(Math.max(0, epgGridChannels.length - 1), epgGridChIdx + 1);
+                        loadEpgGridVisibleChannels();
+                    } else if (isLeft) {
+                        if (epgGridSlotIdx > 0) {
+                            epgGridSlotIdx--;
+                        } else {
+                            epgGridWindowStartSec = Math.max(0, (epgGridWindowStartSec || Math.floor(Date.now() / 1000)) - 1800);
+                        }
+                        renderEpgGridView();
+                    } else if (isRight) {
+                        if (epgGridSlotIdx < 5) {
+                            epgGridSlotIdx++;
+                        } else {
+                            epgGridWindowStartSec = (epgGridWindowStartSec || Math.floor(Date.now() / 1000)) + 1800;
+                        }
+                        renderEpgGridView();
+                    } else if (isEnter) {
+                        triggerSelectedEpgProgram();
+                    }
                 } else if (isUp) {
                     epgModalIdx = Math.max(0, epgModalIdx - 1);
                     renderEpgModalList();
@@ -7492,6 +8751,7 @@
             // 4b. Interactive Audio & Subtitle Track Picker Modal
             if (tracksModalOpen) {
                 e.preventDefault();
+                var curTrackRow = tracksModalItems[tracksModalIdx];
                 if (isBack) {
                     closeTracksModal();
                 } else if (isUp && tracksModalItems.length > 0) {
@@ -7501,9 +8761,19 @@
                     tracksModalIdx = (tracksModalIdx + 1) % tracksModalItems.length;
                     renderTracksModalList();
                 } else if (isLeft) {
-                    cycleSubtitleColor();
+                    if (curTrackRow && (curTrackRow.kind === 'delay' || curTrackRow.kind === 'delay_reset')) {
+                        adjustSubtitleDelay(-250);
+                        refreshTracksDelayLabels();
+                    } else {
+                        cycleSubtitleColor();
+                    }
                 } else if (isRight) {
-                    cycleSubtitleSize();
+                    if (curTrackRow && (curTrackRow.kind === 'delay' || curTrackRow.kind === 'delay_reset')) {
+                        adjustSubtitleDelay(250);
+                        refreshTracksDelayLabels();
+                    } else {
+                        cycleSubtitleSize();
+                    }
                 } else if (isEnter) {
                     activateSelectedTrackModalRow();
                 }
