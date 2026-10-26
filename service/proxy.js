@@ -7,6 +7,7 @@ var https = require('https');
 var url = require('url');
 var fs = require('fs');
 var zlib = require('zlib');
+var os = require('os');
 
 var server = null;
 var PROXY_PORT = 3001;
@@ -19,9 +20,65 @@ var lastPortalReferer = '';
 var lastActiveMac = '';
 var memoryBackupJson = '';
 var activeVideoUpReq = null;
+var pendingRemoteSetup = null;
 var MAG_UA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
 var streamTelemetryMap = {};
+var streamTelemetryKeys = [];
 var latestStreamTelemetryKey = '';
+
+function getLocalLanIp() {
+    try {
+        var nets = os.networkInterfaces ? os.networkInterfaces() : {};
+        var names = Object.keys(nets);
+        for (var i = 0; i < names.length; i++) {
+            var list = nets[names[i]] || [];
+            for (var j = 0; j < list.length; j++) {
+                var net = list[j];
+                var fam = net && net.family;
+                if ((fam === 'IPv4' || fam === 4) && !net.internal && net.address && net.address !== '127.0.0.1') {
+                    return net.address;
+                }
+            }
+        }
+    } catch (eIp) {}
+    return '127.0.0.1';
+}
+
+function buildRemoteSetupHtml(endpointUrl) {
+    return [
+        '<!DOCTYPE html><html><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width,initial-scale=1">',
+        '<title>SmartSTB Remote Setup</title>',
+        '<style>',
+        'body{font-family:system-ui,-apple-system,sans-serif;background:#0b1120;color:#f8fafc;margin:0;padding:20px;}',
+        '.card{max-width:480px;margin:0 auto;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;box-shadow:0 10px 25px rgba(0,0,0,0.5);}',
+        'h2{margin-top:0;color:#38bdf8;font-size:20px;}',
+        'label{display:block;font-size:13px;color:#94a3b8;margin-top:12px;margin-bottom:4px;font-weight:600;}',
+        'input,select{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#fff;font-size:15px;}',
+        'button{width:100%;margin-top:18px;padding:12px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:16px;font-weight:700;cursor:pointer;}',
+        '.msg{margin-top:12px;font-size:14px;text-align:center;}',
+        '</style></head><body><div class="card">',
+        '<h2>SmartSTB TV Remote Setup</h2>',
+        '<p style="font-size:13px;color:#cbd5e1;margin-top:0;">Push Portal, Xtream, or M3U credentials directly to your TV (' + String(endpointUrl || '') + ').</p>',
+        '<label>Profile Name</label><input id="name" placeholder="Living Room TV" value="Remote Profile">',
+        '<label>Provider Type</label><select id="type"><option value="stalker">Stalker MAC Portal</option><option value="xtream">Xtream Codes API</option><option value="m3u">M3U / M3U8 Playlist</option></select>',
+        '<label>Stalker Portal URL</label><input id="portal" placeholder="http://example.com/stalker_portal/c/">',
+        '<label>Stalker MAC Address</label><input id="mac" placeholder="00:1A:79:XX:XX:XX">',
+        '<label>Xtream Server URL</label><input id="xtreamUrl" placeholder="http://server.example.com:8080">',
+        '<label>Xtream Username</label><input id="xtreamUser" placeholder="username">',
+        '<label>Xtream Password</label><input id="xtreamPass" type="password" placeholder="password">',
+        '<label>M3U Playlist URL</label><input id="m3uUrl" placeholder="https://example.com/playlist.m3u8">',
+        '<label>Custom XMLTV EPG URL (Optional)</label><input id="epgUrl" placeholder="http://example.com/epg.xml.gz">',
+        '<button id="sendBtn" onclick="pushCfg()">Push to TV Now</button>',
+        '<div id="status" class="msg"></div>',
+        '</div><script>',
+        'function pushCfg(){',
+        'var payload={name:document.getElementById("name").value,type:document.getElementById("type").value,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value};',
+        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(d){document.getElementById("status").textContent=d.ok?"✅ Sent! Keep Settings open on your TV to auto-apply.":"❌ Error: "+(d.error||"Failed");});',
+        '}',
+        '</script></body></html>'
+    ].join('');
+}
 
 function getStreamKey(u) {
     return String(u || '').split('?')[0];
@@ -29,8 +86,18 @@ function getStreamKey(u) {
 
 function recordStreamTelemetry(key, u, data) {
     var now = Date.now();
+    if (latestStreamTelemetryKey && latestStreamTelemetryKey !== key && streamTelemetryMap[latestStreamTelemetryKey]) {
+        streamTelemetryMap[latestStreamTelemetryKey].active = false;
+    }
     var entry = streamTelemetryMap[key];
     if (!entry) {
+        if (streamTelemetryKeys.length >= 50) {
+            var oldestKey = streamTelemetryKeys.shift();
+            if (oldestKey) {
+                delete streamTelemetryMap[oldestKey];
+            }
+        }
+        streamTelemetryKeys.push(key);
         entry = {
             url: u,
             startTs: now,
@@ -45,6 +112,8 @@ function recordStreamTelemetry(key, u, data) {
             active: true
         };
         streamTelemetryMap[key] = entry;
+    } else {
+        entry.active = true;
     }
     latestStreamTelemetryKey = key;
     if (data) {
@@ -77,7 +146,9 @@ function computeStreamDiagnosticVerdict(entry) {
     if (!entry) {
         return {
             status: 'unknown',
+            source: 'unknown',
             label: 'NO ACTIVE STREAM',
+            summary: 'No stream has been opened yet.',
             reason: 'No stream has been opened yet.',
             recommendation: 'Select a Live TV channel, movie, or episode to start diagnostics.'
         };
@@ -108,34 +179,45 @@ function computeStreamDiagnosticVerdict(entry) {
         }
         return {
             status: 'provider_error',
+            source: 'provider',
             label: 'PROVIDER OFFLINE / ERROR',
+            summary: codeReason,
             reason: codeReason,
             recommendation: 'This error comes directly from your IPTV provider server, not the player.'
         };
     }
 
     if (entry.totalBytes === 0 && elapsedMs >= 3000) {
+        var idleReason = 'Connected to provider (' + (code ? 'HTTP ' + code : 'waiting') + '), but 0 bytes received after ' + (elapsedMs / 1000).toFixed(1) + 's. Event/VIP channel is likely off-air.';
         return {
             status: 'provider_error',
+            source: 'provider',
             label: 'PROVIDER IDLE (0 KB/s)',
-            reason: 'Connected to provider (' + (code ? 'HTTP ' + code : 'waiting') + '), but 0 bytes received after ' + (elapsedMs / 1000).toFixed(1) + 's. Event/VIP channel is likely off-air.',
+            summary: idleReason,
+            reason: idleReason,
             recommendation: 'Channel has no active broadcast feed on the provider right now.'
         };
     }
 
     if (elapsedMs >= 3500 && entry.kbps > 0 && entry.kbps < 350) {
+        var slowReason = 'Upstream provider is sending data at only ' + Math.round(entry.kbps / 8) + ' KB/s (' + entry.kbps + ' kbps), which is too slow for smooth HD/4K playback.';
         return {
             status: 'provider_slow',
+            source: 'provider',
             label: 'PROVIDER CONGESTION (' + Math.round(entry.kbps / 8) + ' KB/s)',
-            reason: 'Upstream provider is sending data at only ' + Math.round(entry.kbps / 8) + ' KB/s (' + entry.kbps + ' kbps), which is too slow for smooth HD/4K playback.',
+            summary: slowReason,
+            reason: slowReason,
             recommendation: 'Buffering is caused by slow upstream throughput from the IPTV provider server.'
         };
     }
 
+    var healthyReason = 'Receiving ' + Math.round(entry.kbps / 8) + ' KB/s (' + (entry.kbps / 1000).toFixed(1) + ' Mbps)' + (entry.ttfbMs ? ' • TTFB ' + entry.ttfbMs + 'ms' : '') + '.';
     return {
         status: 'healthy',
+        source: 'healthy',
         label: 'STREAM HEALTHY',
-        reason: 'Receiving ' + Math.round(entry.kbps / 8) + ' KB/s (' + (entry.kbps / 1000).toFixed(1) + ' Mbps)' + (entry.ttfbMs ? ' • TTFB ' + entry.ttfbMs + 'ms' : '') + '.',
+        summary: healthyReason,
+        reason: healthyReason,
         recommendation: 'Upstream provider connection and player pipeline are operating normally.'
     };
 }
@@ -346,6 +428,9 @@ function requestWithFallback(reqState, callback) {
         Cookie: mergedCookie,
         Connection: useFreshSocket ? 'close' : 'keep-alive'
     });
+    var isCatalogQuery = currentUrl.indexOf('get_all_channels') !== -1 ||
+                         currentUrl.indexOf('get_genres') !== -1 ||
+                         currentUrl.indexOf('get_categories') !== -1;
     var options = {
         hostname: target.hostname,
         port: target.port || (isHttps ? 443 : 80),
@@ -354,11 +439,11 @@ function requestWithFallback(reqState, callback) {
         headers: reqHeaders,
         agent: useFreshSocket ? false : (isHttps ? httpsAgent : httpAgent),
         rejectUnauthorized: false,
-        timeout: 12000
+        timeout: isCatalogQuery ? 35000 : 12000
     };
     var settled = false;
     function retryOrNextCandidate() {
-        if (settled) {
+        if (settled || reqState.aborted) {
             return;
         }
         settled = true;
@@ -370,7 +455,9 @@ function requestWithFallback(reqState, callback) {
                 idx: idx,
                 headers: headers,
                 redirectsLeft: redirectsLeft,
-                useFreshSocket: true
+                useFreshSocket: true,
+                aborted: reqState.aborted,
+                onAbort: reqState.onAbort
             }, callback);
             return;
         }
@@ -381,7 +468,9 @@ function requestWithFallback(reqState, callback) {
             idx: idx + 1,
             headers: headers,
             redirectsLeft: 3,
-            useFreshSocket: false
+            useFreshSocket: false,
+            aborted: reqState.aborted,
+            onAbort: reqState.onAbort
         }, callback);
     }
     var proxyReq = client.request(options, function(proxyRes) {
@@ -404,43 +493,73 @@ function requestWithFallback(reqState, callback) {
                 idx: idx,
                 headers: headers,
                 redirectsLeft: redirectsLeft - 1,
-                useFreshSocket: useFreshSocket
+                useFreshSocket: useFreshSocket,
+                aborted: reqState.aborted,
+                onAbort: reqState.onAbort
             }, callback);
             return;
         }
         var chunks = [];
+        var totalLen = 0;
         proxyRes.on('data', function(chunk) {
-            chunks.push(Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk));
+            var bufChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
+            totalLen += bufChunk.length;
+            if (totalLen <= 67108864) {
+                chunks.push(bufChunk);
+            }
         });
         proxyRes.on('end', function() {
-            if (settled) {
+            if (settled || reqState.aborted) {
+                chunks = [];
                 return;
             }
             var rawBuf = Buffer.concat(chunks);
+            chunks = [];
             decodeBufferByEncoding(rawBuf, proxyRes.headers['content-encoding'], function(decodedBuf) {
-                if (settled) {
+                rawBuf = null;
+                if (settled || reqState.aborted) {
                     return;
                 }
-                var body = (decodedBuf || rawBuf).toString('utf8');
-                var trimmed = (body || '').trim();
+                var finalBuf = decodedBuf || allocBufferUtf8('');
                 var isEpgOrWatchdog = currentUrl.indexOf('get_short_epg') !== -1 ||
                                       currentUrl.indexOf('get_epg_info') !== -1 ||
                                       currentUrl.indexOf('type=watchdog') !== -1;
-                if (status >= 200 && status < 300 && trimmed.length > 0) {
-                    if (/authorization\s+failed/i.test(trimmed)) {
-                        settled = true;
-                        callback(null, JSON.stringify({ error: 'AUTH_FAILED', message: 'Authorization failed' }));
-                        return;
-                    }
-                    try {
-                        JSON.parse(trimmed);
-                        settled = true;
-                        if (portalKey) {
-                            endpointCache[portalKey] = extractBaseEndpoint(currentUrl);
+                if (status >= 200 && status < 300 && finalBuf.length > 0) {
+                    if (finalBuf.length > 65536) {
+                        var headStr = finalBuf.slice(0, 512).toString('utf8').trim();
+                        if (/authorization\s+failed/i.test(headStr)) {
+                            settled = true;
+                            callback(null, JSON.stringify({ error: 'AUTH_FAILED', message: 'Authorization failed' }));
+                            return;
                         }
-                        callback(null, trimmed);
-                        return;
-                    } catch (ex) {}
+                        var firstCh = headStr.charAt(0);
+                        if (firstCh === '{' || firstCh === '[') {
+                            settled = true;
+                            if (portalKey) {
+                                endpointCache[portalKey] = extractBaseEndpoint(currentUrl);
+                            }
+                            callback(null, finalBuf);
+                            return;
+                        }
+                    } else {
+                        var trimmed = finalBuf.toString('utf8').trim();
+                        if (trimmed.length > 0) {
+                            if (/authorization\s+failed/i.test(trimmed)) {
+                                settled = true;
+                                callback(null, JSON.stringify({ error: 'AUTH_FAILED', message: 'Authorization failed' }));
+                                return;
+                            }
+                            try {
+                                JSON.parse(trimmed);
+                                settled = true;
+                                if (portalKey) {
+                                    endpointCache[portalKey] = extractBaseEndpoint(currentUrl);
+                                }
+                                callback(null, finalBuf);
+                                return;
+                            } catch (ex) {}
+                        }
+                    }
                 }
                 if (isEpgOrWatchdog) {
                     settled = true;
@@ -451,6 +570,15 @@ function requestWithFallback(reqState, callback) {
             });
         });
     });
+    if (typeof reqState.onAbort === 'function') {
+        reqState.onAbort(function() {
+            reqState.aborted = true;
+            settled = true;
+            try {
+                proxyReq.abort();
+            } catch (eAb) {}
+        });
+    }
     proxyReq.on('error', function() {
         retryOrNextCandidate();
     });
@@ -707,7 +835,7 @@ function startProxyServer(port) {
                 req.on('data', function(c) {
                     var buf = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
                     totalBytes += buf.length;
-                    if (totalBytes > 4718592) {
+                    if (totalBytes > 12582912) {
                         tooLarge = true;
                         catParts = [];
                         return;
@@ -731,14 +859,14 @@ function startProxyServer(port) {
                 return;
             }
             if (req.method === 'GET') {
-                fs.readFile(cacheFilePath, 'utf8', function(readErr, jsonStr) {
-                    if (readErr || !jsonStr) {
+                fs.readFile(cacheFilePath, function(readErr, rawBuf) {
+                    if (readErr || !rawBuf || rawBuf.length === 0) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'No catalog cache' }));
                         return;
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(jsonStr);
+                    res.end(rawBuf);
                 });
                 return;
             }
@@ -774,9 +902,59 @@ function startProxyServer(port) {
             return;
         }
 
-        if ((parsedUrl.pathname === '/xtream' || parsedUrl.pathname === '/m3u') && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
+        if (parsedUrl.pathname === '/lan-info') {
+            var detectedIp = getLocalLanIp();
+            var setupEndpoint = 'http://' + detectedIp + ':' + activeListenPort + '/setup';
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ ip: detectedIp, port: activeListenPort, url: setupEndpoint, setupUrl: setupEndpoint }));
+            return;
+        }
+
+        if (parsedUrl.pathname === '/setup' && req.method === 'GET') {
+            var hostHdr = req.headers.host || (getLocalLanIp() + ':' + activeListenPort);
+            var htmlBody = buildRemoteSetupHtml('http://' + hostHdr + '/setup');
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+            res.end(htmlBody);
+            return;
+        }
+
+        if (parsedUrl.pathname === '/remote-setup') {
+            if (req.method === 'POST') {
+                var rsParts = [];
+                req.on('data', function(chunk) {
+                    rsParts.push(chunk);
+                });
+                req.on('end', function() {
+                    try {
+                        var bodyText = Buffer.concat(rsParts).toString('utf8');
+                        var parsedCfg = JSON.parse(bodyText || '{}');
+                        pendingRemoteSetup = {
+                            ts: Date.now(),
+                            profile: parsedCfg
+                        };
+                        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                        res.end(JSON.stringify({ ok: true, ts: pendingRemoteSetup.ts }));
+                    } catch (eParse) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+                    }
+                });
+                return;
+            }
+            if (req.method === 'GET') {
+                var outSetup = pendingRemoteSetup;
+                if (parsedUrl.query && parsedUrl.query.consume === '1') {
+                    pendingRemoteSetup = null;
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({ pending: outSetup }));
+                return;
+            }
+        }
+
+        if ((parsedUrl.pathname === '/xtream' || parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv') && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
             var rawTargetUrl = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
-            var isM3uRoute = (parsedUrl.pathname === '/m3u');
+            var isTextRoute = (parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv');
             (function fetchRemoteWithRedirects(targetUrlStr, redirectsLeft) {
                 if (redirectsLeft <= 0) {
                     res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -803,7 +981,7 @@ function startProxyServer(port) {
                         'Host': parsedTarget.host
                     },
                     agent: isHttpsTarget ? httpsAgent : httpAgent,
-                    timeout: 20000,
+                    timeout: 35000,
                     rejectUnauthorized: false
                 }, function(rRes) {
                     if ([301, 302, 303, 307, 308].indexOf(rRes.statusCode) !== -1 && rRes.headers.location) {
@@ -828,16 +1006,35 @@ function startProxyServer(port) {
                     });
                     stream.on('end', function() {
                         var bodyBuf = Buffer.concat(rChunks);
+                        rChunks = [];
+                        if (bodyBuf.length >= 2 && bodyBuf[0] === 0x1f && bodyBuf[1] === 0x8b) {
+                            zlib.gunzip(bodyBuf, function(gzErr, unzippedBuf) {
+                                var finalBuf = (!gzErr && unzippedBuf) ? unzippedBuf : bodyBuf;
+                                bodyBuf = null;
+                                res.writeHead(rRes.statusCode || 200, {
+                                    'Content-Type': isTextRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
+                                    'Cache-Control': 'no-store'
+                                });
+                                res.end(finalBuf);
+                            });
+                            return;
+                        }
                         res.writeHead(rRes.statusCode || 200, {
-                            'Content-Type': isM3uRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
+                            'Content-Type': isTextRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
                             'Cache-Control': 'no-store'
                         });
                         res.end(bodyBuf);
                     });
                     stream.on('error', function(zErr) {
+                        rChunks = [];
                         res.writeHead(502, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: zErr.message }));
                     });
+                });
+                req.on('close', function() {
+                    try {
+                        rReq.abort();
+                    } catch (eClose) {}
                 });
                 rReq.on('error', function(eReq) {
                     res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -883,15 +1080,30 @@ function startProxyServer(port) {
             headers.Authorization = 'Bearer ' + safeDecodeURIComponent(rawToken).trim();
         }
         var candidates = getCandidateUrls(portal, targetSearch, mac);
-        requestWithFallback({
+        var activeAbortFn = null;
+        var reqStateObj = {
             portalKey: portalKey,
             mac: mac,
             candidates: candidates,
             idx: 0,
             headers: headers,
             redirectsLeft: 3,
-            useFreshSocket: false
-        }, function(err, result) {
+            useFreshSocket: false,
+            aborted: false,
+            onAbort: function(fn) {
+                activeAbortFn = fn;
+            }
+        };
+        req.on('close', function() {
+            reqStateObj.aborted = true;
+            if (typeof activeAbortFn === 'function') {
+                activeAbortFn();
+            }
+        });
+        requestWithFallback(reqStateObj, function(err, result) {
+            if (reqStateObj.aborted) {
+                return;
+            }
             if (err) {
                 res.writeHead(502, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: err.message }));
@@ -907,7 +1119,7 @@ function startProxyServer(port) {
             startProxyServer(FALLBACK_PORT);
         }
     });
-    server.listen(listenPort, '127.0.0.1', function() {
+    server.listen(listenPort, '0.0.0.0', function() {
         activeListenPort = listenPort;
         console.log('Stalker proxy listening on http://127.0.0.1:' + listenPort);
     });
