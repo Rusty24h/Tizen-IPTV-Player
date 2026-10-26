@@ -97,9 +97,10 @@
             <div id="tracks-list" class="col-list"></div>
             <div id="tracks-style-bar">
                 <span id="tracks-style-color">Color: White</span>
+                <span id="tracks-style-delay">Sync: 0ms</span>
                 <span id="tracks-style-size">Size: Normal (38px)</span>
             </div>
-            <div id="tracks-modal-hint">UP/DOWN: Select &bull; OK: Activate Track &bull; LEFT/RIGHT: Subtitle Style &bull; BACK: Close</div>
+            <div id="tracks-modal-hint">UP/DOWN: Select &bull; OK: Activate Track / Sync &bull; LEFT/RIGHT: Subtitle Style &bull; BACK: Close</div>
         </div>
     </div>
 
@@ -134,8 +135,8 @@
 
     <!-- Settings & Multi-Portal Profile Modal -->
     <div id="settings-modal" class="modal">
-        <div class="modal-box" style="width: 1040px; padding: 26px 32px;">
-            <h2 style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+        <div class="modal-box" style="width: 1040px; padding: 22px 32px;">
+            <h2 style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
                 <span>Portal &amp; Profile Settings</span>
                 <span id="settings-active-type-pill" style="font-size: 16px; padding: 4px 12px; border-radius: 999px; background: rgba(59, 130, 246, 0.22); border: 1px solid #3b82f6; color: #93c5fd;">Stalker MAC</span>
             </h2>
@@ -150,7 +151,7 @@
                         <input id="inp-profile-name" type="text" placeholder="Living Room IPTV" />
                     </div>
                 </div>
-                <label>Provider Type (Click Tab or Cycle with Enter)</label>
+                <label for="sel-provider-type">Provider Type (Click Tab or Cycle with Enter)</label>
                 <div class="provider-tabs">
                     <div id="tab-prov-stalker" class="provider-tab active" data-prov="stalker">📡 Stalker MAC Portal</div>
                     <div id="tab-prov-xtream" class="provider-tab" data-prov="xtream">🔑 Xtream Codes API</div>
@@ -196,7 +197,9 @@
                 </div>
             </div>
             <div class="settings-card">
-                <div class="modal-row">
+                <label for="inp-epg-url" style="margin-top:0;">Custom XMLTV EPG URL (Optional — Auto-Detected from M3U Header or Xtream)</label>
+                <input id="inp-epg-url" type="text" placeholder="http://example.com/epg.xml or .xml.gz" />
+                <div class="modal-row" style="margin-top:8px;">
                     <div>
                         <label for="sel-theme">UI Color Theme</label>
                         <select id="sel-theme">
@@ -210,6 +213,10 @@
                         <label for="inp-pin">Parental Control PIN (4 Digits)</label>
                         <input id="inp-pin" type="password" maxlength="4" placeholder="0000" />
                     </div>
+                </div>
+                <div id="lan-setup-banner" class="lan-setup-banner">
+                    <span>📱 <b>Phone / PC Remote Setup:</b> Open <u id="lan-setup-url">http://127.0.0.1:3001/setup</u> on your Wi-Fi to push URLs without typing</span>
+                    <span id="lan-setup-qr-badge" class="lan-setup-pill">LAN Ready</span>
                 </div>
             </div>
             <div class="btn-row">
@@ -252,14 +259,25 @@
     <!-- Full EPG Timeline & Catch-Up Archive Modal -->
     <div id="epg-modal" class="modal">
         <div class="modal-box wide">
-            <h2 id="epg-modal-title">Channel EPG Guide</h2>
+            <div class="epg-modal-header-row">
+                <h2 id="epg-modal-title" style="margin-bottom:0;">Channel EPG Guide</h2>
+                <div id="btn-epg-view-toggle" class="epg-view-toggle-btn">📅 Switch to 2D Multi-Channel Grid [GREEN]</div>
+            </div>
             <div id="epg-modal-body">
                 <div id="epg-modal-list" class="col-list"></div>
                 <div id="epg-modal-info">
                     <div id="epg-modal-prog-title">Select a program</div>
                     <div id="epg-modal-prog-time"></div>
                     <div id="epg-modal-desc">Program details and Catch-Up archive availability appear here.</div>
-                    <div id="epg-modal-hint">UP/DOWN: Select Program &bull; OK: Play Catch-Up / Switch to Live &bull; BACK: Close</div>
+                    <div id="epg-modal-hint">UP/DOWN: Select Program &bull; OK: Play Catch-Up / Switch to Live &bull; GREEN: 2D Grid &bull; BACK: Close</div>
+                </div>
+            </div>
+            <div id="epg-grid-container" class="epg-grid-container">
+                <div id="epg-grid-timeline" class="epg-grid-timeline"></div>
+                <div id="epg-grid-rows" class="epg-grid-rows"></div>
+                <div id="epg-grid-footer" class="epg-grid-footer">
+                    <div id="epg-grid-sel-title" class="epg-grid-sel-title">Select a channel &amp; time slot</div>
+                    <div id="epg-grid-sel-desc" class="epg-grid-sel-desc">Use UP/DOWN for channels, LEFT/RIGHT for time slots, OK to watch, GREEN for Single-Channel List.</div>
                 </div>
             </div>
         </div>
