@@ -25,6 +25,34 @@ var MAG_UA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, li
 var streamTelemetryMap = {};
 var streamTelemetryKeys = [];
 var latestStreamTelemetryKey = '';
+var activeRecordingSession = null;
+
+function stopActiveRecordingSession() {
+    if (!activeRecordingSession) {
+        return null;
+    }
+    var sess = activeRecordingSession;
+    activeRecordingSession = null;
+    sess.active = false;
+    sess.stoppedAt = Date.now();
+    if (sess.upReq) {
+        try {
+            sess.upReq.abort();
+        } catch (eRecAbt) {}
+        sess.upReq = null;
+    }
+    if (sess.fileStream) {
+        try {
+            sess.fileStream.end();
+        } catch (eRecEnd) {}
+        sess.fileStream = null;
+    }
+    return sess;
+}
+
+if (typeof process !== 'undefined' && process && typeof process.on === 'function') {
+    process.on('uncaughtException', function() {});
+}
 
 function getLocalLanIp() {
     try {
@@ -61,19 +89,27 @@ function buildRemoteSetupHtml(endpointUrl) {
         '<h2>SmartSTB TV Remote Setup</h2>',
         '<p style="font-size:13px;color:#cbd5e1;margin-top:0;">Push Portal, Xtream, or M3U credentials directly to your TV (' + String(endpointUrl || '') + ').</p>',
         '<label>Profile Name</label><input id="name" placeholder="Living Room TV" value="Remote Profile">',
-        '<label>Provider Type</label><select id="type"><option value="stalker">Stalker MAC Portal</option><option value="xtream">Xtream Codes API</option><option value="m3u">M3U / M3U8 Playlist</option></select>',
+        '<label>Provider Type</label><select id="type" onchange="syncType()"><option value="stalker">Stalker MAC Portal</option><option value="xtream">Xtream Codes API</option><option value="m3u">M3U / M3U8 Playlist</option></select>',
+        '<div id="grp-stalker">',
         '<label>Stalker Portal URL</label><input id="portal" placeholder="http://example.com/stalker_portal/c/">',
         '<label>Stalker MAC Address</label><input id="mac" placeholder="00:1A:79:XX:XX:XX">',
+        '</div>',
+        '<div id="grp-xtream" style="display:none">',
         '<label>Xtream Server URL</label><input id="xtreamUrl" placeholder="http://server.example.com:8080">',
         '<label>Xtream Username</label><input id="xtreamUser" placeholder="username">',
         '<label>Xtream Password</label><input id="xtreamPass" type="password" placeholder="password">',
+        '</div>',
+        '<div id="grp-m3u" style="display:none">',
         '<label>M3U Playlist URL</label><input id="m3uUrl" placeholder="https://example.com/playlist.m3u8">',
+        '</div>',
         '<label>Custom XMLTV EPG URL (Optional)</label><input id="epgUrl" placeholder="http://example.com/epg.xml.gz">',
+        '<label>EPG Time-Shift Offset (Hours)</label><select id="epgOffsetHours"><option value="-4">-4h</option><option value="-3">-3h</option><option value="-2">-2h</option><option value="-1">-1h</option><option value="0" selected>0h (Auto UTC)</option><option value="1">+1h</option><option value="2">+2h</option><option value="3">+3h</option><option value="4">+4h</option></select>',
         '<button id="sendBtn" onclick="pushCfg()">Push to TV Now</button>',
         '<div id="status" class="msg"></div>',
         '</div><script>',
+        'function syncType(){var t=document.getElementById("type").value;document.getElementById("grp-stalker").style.display=(t==="stalker"?"block":"none");document.getElementById("grp-xtream").style.display=(t==="xtream"?"block":"none");document.getElementById("grp-m3u").style.display=(t==="m3u"?"block":"none");}',
         'function pushCfg(){',
-        'var payload={name:document.getElementById("name").value,type:document.getElementById("type").value,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value};',
+        'var payload={name:document.getElementById("name").value,type:document.getElementById("type").value,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0};',
         'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(d){document.getElementById("status").textContent=d.ok?"✅ Sent! Keep Settings open on your TV to auto-apply.":"❌ Error: "+(d.error||"Failed");});',
         '}',
         '</script></body></html>'
@@ -81,7 +117,17 @@ function buildRemoteSetupHtml(endpointUrl) {
 }
 
 function getStreamKey(u) {
-    return String(u || '').split('?')[0];
+    var str = String(u || '').trim();
+    var idx = str.indexOf('/stream?url=');
+    if (idx !== -1) {
+        var encoded = str.substring(idx + 12).split('&')[0];
+        try {
+            str = decodeURIComponent(encoded);
+        } catch (eDec) {
+            str = encoded;
+        }
+    }
+    return str.split('?')[0];
 }
 
 function recordStreamTelemetry(key, u, data) {
@@ -104,6 +150,7 @@ function recordStreamTelemetry(key, u, data) {
             httpStatus: 0,
             ttfbMs: null,
             totalBytes: 0,
+            windowBytes: 0,
             kbps: 0,
             samples: [],
             errorText: '',
@@ -114,11 +161,25 @@ function recordStreamTelemetry(key, u, data) {
         streamTelemetryMap[key] = entry;
     } else {
         entry.active = true;
+        if (data && (data.reset || data.code === 0)) {
+            entry.url = u || entry.url;
+            entry.startTs = now;
+            entry.httpStatus = 0;
+            entry.ttfbMs = null;
+            entry.totalBytes = 0;
+            entry.windowBytes = 0;
+            entry.kbps = 0;
+            entry.samples = [];
+            entry.errorText = '';
+        }
     }
     latestStreamTelemetryKey = key;
     if (data) {
-        if (data.code) {
+        if (data.code !== undefined && data.code !== null && data.code > 0) {
             entry.httpStatus = data.code;
+            if (data.code >= 200 && data.code < 400) {
+                entry.errorText = '';
+            }
         }
         if (data.ttfb && !entry.ttfbMs) {
             entry.ttfbMs = data.ttfb;
@@ -127,17 +188,22 @@ function recordStreamTelemetry(key, u, data) {
             entry.errorText = data.err.message || String(data.err);
         }
         if (data.chunkLen) {
+            entry.errorText = '';
             entry.totalBytes += data.chunkLen;
-            entry.samples.push({ ts: now, bytes: data.chunkLen });
+            entry.windowBytes = (entry.windowBytes || 0) + data.chunkLen;
+            var sLen = entry.samples.length;
+            var lastSample = sLen > 0 ? entry.samples[sLen - 1] : null;
+            if (lastSample && (now - lastSample.ts) < 50) {
+                lastSample.bytes += data.chunkLen;
+            } else {
+                entry.samples.push({ ts: now, bytes: data.chunkLen });
+            }
             var cutoff = now - 2500;
             while (entry.samples.length > 0 && entry.samples[0].ts < cutoff) {
-                entry.samples.shift();
+                var removed = entry.samples.shift();
+                entry.windowBytes = Math.max(0, entry.windowBytes - removed.bytes);
             }
-            var sumBytes = 0;
-            for (var s = 0; s < entry.samples.length; s++) {
-                sumBytes += entry.samples[s].bytes;
-            }
-            entry.kbps = Math.round((sumBytes * 8) / 2.5);
+            entry.kbps = Math.round((entry.windowBytes * 8) / 2.5);
         }
     }
 }
@@ -157,9 +223,11 @@ function computeStreamDiagnosticVerdict(entry) {
     var elapsedMs = Math.max(0, now - entry.startTs);
     var cutoff = now - 2500;
     while (entry.samples.length > 0 && entry.samples[0].ts < cutoff) {
-        entry.samples.shift();
+        var expired = entry.samples.shift();
+        entry.windowBytes = Math.max(0, (entry.windowBytes || 0) - expired.bytes);
     }
     if (entry.samples.length === 0) {
+        entry.windowBytes = 0;
         entry.kbps = 0;
     }
 
@@ -277,12 +345,33 @@ function getCookieScopeKey(hostname, mac) {
     return cleanMac ? (hostname + '|' + cleanMac) : hostname;
 }
 
+function clearCookieScopeForPortal(rawPortal, mac) {
+    if (!rawPortal) {
+        return;
+    }
+    var pStr = String(rawPortal).trim();
+    if (!/^https?:\/\//i.test(pStr)) {
+        pStr = 'http://' + pStr;
+    }
+    try {
+        var parsed = url.parse(pStr);
+        if (parsed && parsed.hostname) {
+            var scopeKey = getCookieScopeKey(parsed.hostname, mac);
+            delete cookieJar[scopeKey];
+        }
+    } catch (eClearCookie) {}
+}
+
 function storeSetCookies(hostname, setCookieHeaders, mac) {
     if (!hostname || !setCookieHeaders) {
         return;
     }
     var scopeKey = getCookieScopeKey(hostname, mac);
     if (!cookieJar[scopeKey]) {
+        var jarKeys = Object.keys(cookieJar);
+        if (jarKeys.length > 80) {
+            delete cookieJar[jarKeys[0]];
+        }
         cookieJar[scopeKey] = {};
     }
     var list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
@@ -363,7 +452,12 @@ function getCandidateUrls(rawPortal, search, mac) {
         .replace(/\/stalker_portal\/c$/i, '')
         .replace(/\/stalker_portal$/i, '')
         .replace(/\/c$/i, '');
-    var defaults = [
+    var hasStalkerPortalPath = /\/stalker_portal(?:\/|$)/i.test(clean);
+    var defaults = hasStalkerPortalPath ? [
+        base + '/stalker_portal/server/load.php',
+        base + '/portal.php',
+        base + '/server/load.php'
+    ] : [
         base + '/portal.php',
         base + '/stalker_portal/server/load.php',
         base + '/server/load.php'
@@ -536,6 +630,10 @@ function requestWithFallback(reqState, callback) {
                         if (firstCh === '{' || firstCh === '[') {
                             settled = true;
                             if (portalKey) {
+                                var epKeys1 = Object.keys(endpointCache);
+                                if (!endpointCache[portalKey] && epKeys1.length >= 50) {
+                                    delete endpointCache[epKeys1[0]];
+                                }
                                 endpointCache[portalKey] = extractBaseEndpoint(currentUrl);
                             }
                             callback(null, finalBuf);
@@ -553,6 +651,10 @@ function requestWithFallback(reqState, callback) {
                                 JSON.parse(trimmed);
                                 settled = true;
                                 if (portalKey) {
+                                    var epKeys2 = Object.keys(endpointCache);
+                                    if (!endpointCache[portalKey] && epKeys2.length >= 50) {
+                                        delete endpointCache[epKeys2[0]];
+                                    }
                                     endpointCache[portalKey] = extractBaseEndpoint(currentUrl);
                                 }
                                 callback(null, finalBuf);
@@ -579,6 +681,13 @@ function requestWithFallback(reqState, callback) {
             } catch (eAb) {}
         });
     }
+    proxyReq.on('socket', function(sock) {
+        if (sock && typeof sock.setNoDelay === 'function') {
+            try {
+                sock.setNoDelay(true);
+            } catch (eNd) {}
+        }
+    });
     proxyReq.on('error', function() {
         retryOrNextCandidate();
     });
@@ -618,15 +727,142 @@ function rewriteM3u8Manifest(manifestText, baseStreamUrl) {
     return out.join('\n');
 }
 
-function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
+function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
+    var streamKey = originKey || getStreamKey(streamUrl);
+    if (redirectsLeft <= 0) {
+        doneCb(streamTelemetryMap[streamKey] || null);
+        return;
+    }
+    var target = url.parse(streamUrl);
+    if (!target || !target.hostname) {
+        doneCb(null);
+        return;
+    }
+    var reqStartTs = Date.now();
+    if (!originKey) {
+        recordStreamTelemetry(streamKey, streamUrl, { code: 0, reset: true });
+    }
+    var finished = false;
+    var probeTimer = null;
+    var upReq = null;
+
+    function finishProbe() {
+        if (finished) {
+            return;
+        }
+        finished = true;
+        if (probeTimer) {
+            clearTimeout(probeTimer);
+            probeTimer = null;
+        }
+        var entry = streamTelemetryMap[streamKey] || null;
+        if (entry) {
+            entry.active = false;
+            if (entry.totalBytes > 0) {
+                var streamDurSec = Math.max(0.25, (Date.now() - reqStartTs) / 1000);
+                entry.kbps = Math.max(entry.kbps || 0, Math.round((entry.totalBytes * 8) / streamDurSec));
+            }
+        }
+        doneCb(entry);
+    }
+
+    var isHttps = target.protocol === 'https:';
+    var client = isHttps ? https : http;
+    var mergedCookie = getHostCookieHeader(target.hostname, '', lastActiveMac);
+    var headers = {
+        'User-Agent': MAG_UA,
+        'Accept': '*/*',
+        'Connection': 'close',
+        'Host': target.host
+    };
+    if (mergedCookie) {
+        headers.Cookie = mergedCookie;
+    }
+    if (lastPortalReferer) {
+        headers.Referer = lastPortalReferer;
+    }
+
+    upReq = client.request({
+        hostname: target.hostname,
+        port: target.port || (isHttps ? 443 : 80),
+        path: target.path,
+        method: 'GET',
+        headers: headers,
+        timeout: 4500,
+        rejectUnauthorized: false
+    }, function(upRes) {
+        var ttfb = Date.now() - reqStartTs;
+        storeSetCookies(target.hostname, upRes.headers['set-cookie'], lastActiveMac);
+        if ([301, 302, 303, 307, 308].indexOf(upRes.statusCode) !== -1 && upRes.headers.location) {
+            upRes.resume();
+            if (probeTimer) {
+                clearTimeout(probeTimer);
+                probeTimer = null;
+            }
+            finished = true;
+            probeUpstreamStream(url.resolve(streamUrl, upRes.headers.location), redirectsLeft - 1, doneCb, streamKey);
+            return;
+        }
+        recordStreamTelemetry(streamKey, streamUrl, { code: upRes.statusCode, ttfb: ttfb });
+        if (upRes.statusCode >= 400) {
+            upRes.resume();
+            try {
+                upReq.abort();
+            } catch (eAb0) {}
+            finishProbe();
+            return;
+        }
+        probeTimer = setTimeout(function() {
+            try {
+                upReq.abort();
+            } catch (eAb1) {}
+            finishProbe();
+        }, 900);
+        upRes.on('data', function(chunk) {
+            var cLen = chunk ? chunk.length : 0;
+            recordStreamTelemetry(streamKey, streamUrl, { chunkLen: cLen });
+            var curEntry = streamTelemetryMap[streamKey];
+            if (curEntry && curEntry.totalBytes >= 262144) {
+                try {
+                    upReq.abort();
+                } catch (eAb2) {}
+                finishProbe();
+            }
+        });
+        upRes.on('end', function() {
+            finishProbe();
+        });
+        upRes.on('error', function(uErr) {
+            recordStreamTelemetry(streamKey, streamUrl, { err: uErr });
+            finishProbe();
+        });
+    });
+    upReq.on('timeout', function() {
+        recordStreamTelemetry(streamKey, streamUrl, { err: new Error('Stream probe timeout') });
+        try {
+            upReq.abort();
+        } catch (eTo) {}
+        finishProbe();
+    });
+    upReq.on('error', function(e) {
+        recordStreamTelemetry(streamKey, streamUrl, { err: e });
+        finishProbe();
+    });
+    upReq.end();
+}
+
+function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, originKey) {
     if (redirectsLeft <= 0) {
         clientRes.writeHead(502);
         clientRes.end();
         return;
     }
-    var streamKey = getStreamKey(streamUrl);
+    var streamKey = originKey || getStreamKey(streamUrl);
     var reqStartTs = Date.now();
-    recordStreamTelemetry(streamKey, streamUrl, { code: 0 });
+    var isSecondaryRange = Boolean(clientReq.headers && clientReq.headers.range && !/^bytes=0-/i.test(clientReq.headers.range));
+    if (!originKey && !isSecondaryRange) {
+        recordStreamTelemetry(streamKey, streamUrl, { code: 0, reset: true });
+    }
     var target = url.parse(streamUrl);
     if (!target.hostname) {
         clientRes.writeHead(400);
@@ -635,7 +871,7 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
     }
     var isHttps = target.protocol === 'https:';
     var client = isHttps ? https : http;
-    var mergedCookie = getHostCookieHeader(target.hostname, '');
+    var mergedCookie = getHostCookieHeader(target.hostname, '', lastActiveMac);
     var headers = {
         'User-Agent': MAG_UA,
         'Accept': '*/*',
@@ -651,12 +887,26 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
     if (clientReq.headers.range) {
         headers.Range = clientReq.headers.range;
     }
-    var isSegmentOrSubRequest = /\.ts(\?|$)|\.m4s(\?|$)|\.aac(\?|$)|\.vtt(\?|$)/i.test(target.path || '');
-    if (!isSegmentOrSubRequest && activeVideoUpReq) {
+    var isVodContainer = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(target.path || '') || /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(streamUrl || '');
+    var hasRangeHeader = Boolean(clientReq.headers && clientReq.headers.range);
+    var isSegmentOrSubRequest = /\.m4s(\?|$)|\.aac(\?|$)|\.vtt(\?|$)/i.test(target.path || '');
+    if (!originKey && !isSegmentOrSubRequest && !hasRangeHeader && !isVodContainer && activeVideoUpReq) {
         try {
             activeVideoUpReq.abort();
         } catch (eAbort) {}
         activeVideoUpReq = null;
+    }
+    clientRes.on('error', function() {});
+    var accumulatedBytes = 0;
+    var lastTelemetryFlushTs = Date.now();
+    var telemetryFlushTimer = null;
+    function flushAccumulatedBytes() {
+        if (accumulatedBytes > 0) {
+            var bytesToReport = accumulatedBytes;
+            accumulatedBytes = 0;
+            lastTelemetryFlushTs = Date.now();
+            recordStreamTelemetry(streamKey, streamUrl, { chunkLen: bytesToReport });
+        }
     }
     var upReq = client.request({
         hostname: target.hostname,
@@ -664,33 +914,50 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
         path: target.path,
         method: 'GET',
         headers: headers,
+        agent: isHttps ? httpsAgent : httpAgent,
+        timeout: 45000,
         rejectUnauthorized: false
     }, function(upRes) {
         var ttfb = Date.now() - reqStartTs;
-        recordStreamTelemetry(streamKey, streamUrl, { code: upRes.statusCode, ttfb: ttfb });
-        if (!isSegmentOrSubRequest) {
-            activeVideoUpReq = upReq;
-        }
-        storeSetCookies(target.hostname, upRes.headers['set-cookie']);
+        storeSetCookies(target.hostname, upRes.headers['set-cookie'], lastActiveMac);
         if ([301, 302, 303, 307, 308].indexOf(upRes.statusCode) !== -1 && upRes.headers.location) {
+            clientReq.removeListener('close', onClientClose);
             upRes.resume();
-            proxyVideoStream(url.resolve(streamUrl, upRes.headers.location), clientReq, clientRes, redirectsLeft - 1);
+            proxyVideoStream(url.resolve(streamUrl, upRes.headers.location), clientReq, clientRes, redirectsLeft - 1, streamKey);
             return;
         }
+        recordStreamTelemetry(streamKey, streamUrl, { code: upRes.statusCode, ttfb: ttfb });
+        if (!isSegmentOrSubRequest && !hasRangeHeader && !isVodContainer) {
+            activeVideoUpReq = upReq;
+        }
+        upRes.on('error', function(uErr) {
+            recordStreamTelemetry(streamKey, streamUrl, { err: uErr });
+            try {
+                clientRes.end();
+            } catch (eEnd) {}
+        });
         var contentType = String(upRes.headers['content-type'] || '').toLowerCase();
-        var isM3u8 = contentType.indexOf('mpegurl') !== -1 ||
-                     contentType.indexOf('m3u') !== -1 ||
-                     /\.m3u8(\?|$)/i.test(target.path || '');
+        var isTsPath = /\.ts(\?|$)/i.test(target.path || '');
+        var isM3u8 = !isTsPath && (
+            contentType.indexOf('mpegurl') !== -1 ||
+            contentType.indexOf('m3u') !== -1 ||
+            /\.m3u8(\?|$)/i.test(target.path || '')
+        );
 
         if (isM3u8 && (upRes.statusCode === 200 || upRes.statusCode === 206)) {
             var m3u8Chunks = [];
+            var m3u8Bytes = 0;
             upRes.on('data', function(chunk) {
                 var cBuf = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
                 recordStreamTelemetry(streamKey, streamUrl, { chunkLen: cBuf.length });
-                m3u8Chunks.push(cBuf);
+                m3u8Bytes += cBuf.length;
+                if (m3u8Bytes <= 2097152) {
+                    m3u8Chunks.push(cBuf);
+                }
             });
             upRes.on('end', function() {
                 var rawBuf = Buffer.concat(m3u8Chunks);
+                m3u8Chunks = [];
                 decodeBufferByEncoding(rawBuf, upRes.headers['content-encoding'], function(decodedBuf) {
                     var rawText = (decodedBuf || rawBuf).toString('utf8');
                     if (rawText.indexOf('#EXTM3U') !== -1) {
@@ -731,9 +998,51 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
 
         clientRes.writeHead(upRes.statusCode || 200, resHeaders);
         upRes.on('data', function(chunk) {
-            recordStreamTelemetry(streamKey, streamUrl, { chunkLen: chunk.length });
+            var len = chunk ? chunk.length : 0;
+            accumulatedBytes += len;
+            var now = Date.now();
+            if (now - lastTelemetryFlushTs >= 500) {
+                flushAccumulatedBytes();
+            } else if (!telemetryFlushTimer) {
+                telemetryFlushTimer = setTimeout(function() {
+                    telemetryFlushTimer = null;
+                    flushAccumulatedBytes();
+                }, 500);
+            }
+        });
+        upRes.on('end', function() {
+            if (telemetryFlushTimer) {
+                clearTimeout(telemetryFlushTimer);
+                telemetryFlushTimer = null;
+            }
+            flushAccumulatedBytes();
+        });
+        upRes.on('close', function() {
+            if (telemetryFlushTimer) {
+                clearTimeout(telemetryFlushTimer);
+                telemetryFlushTimer = null;
+            }
+            flushAccumulatedBytes();
         });
         upRes.pipe(clientRes);
+    });
+    upReq.on('socket', function(sock) {
+        if (sock && typeof sock.setNoDelay === 'function') {
+            try {
+                sock.setNoDelay(true);
+            } catch (eNd) {}
+        }
+        if (sock && typeof sock.setKeepAlive === 'function') {
+            try {
+                sock.setKeepAlive(true, 15000);
+            } catch (eKa) {}
+        }
+    });
+    upReq.on('timeout', function() {
+        recordStreamTelemetry(streamKey, streamUrl, { err: new Error('Stream upstream timeout') });
+        try {
+            upReq.abort();
+        } catch (eTo) {}
     });
     upReq.on('error', function(e) {
         recordStreamTelemetry(streamKey, streamUrl, { err: e });
@@ -742,9 +1051,23 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft) {
         }
         clientRes.end();
     });
-    clientReq.on('close', function() {
-        upReq.abort();
-    });
+    function onClientClose() {
+        if (telemetryFlushTimer) {
+            clearTimeout(telemetryFlushTimer);
+            telemetryFlushTimer = null;
+        }
+        flushAccumulatedBytes();
+        if (activeVideoUpReq === upReq) {
+            activeVideoUpReq = null;
+        }
+        if (!isSecondaryRange && streamTelemetryMap[streamKey]) {
+            streamTelemetryMap[streamKey].active = false;
+        }
+        try {
+            upReq.abort();
+        } catch (eCl) {}
+    }
+    clientReq.once('close', onClientClose);
     upReq.end();
 }
 
@@ -771,11 +1094,26 @@ function startProxyServer(port) {
         if (parsedUrl.pathname === '/backup') {
             if (req.method === 'POST') {
                 var bodyParts = [];
+                var backupBytes = 0;
+                var backupTooLarge = false;
                 req.on('data', function(c) {
-                    bodyParts.push(Buffer.isBuffer(c) ? c : allocBufferUtf8(c));
+                    var bChunk = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
+                    backupBytes += bChunk.length;
+                    if (backupBytes > 5242880) {
+                        backupTooLarge = true;
+                        bodyParts = [];
+                        return;
+                    }
+                    bodyParts.push(bChunk);
                 });
                 req.on('end', function() {
+                    if (backupTooLarge) {
+                        res.writeHead(413, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Backup payload too large' }));
+                        return;
+                    }
                     memoryBackupJson = Buffer.concat(bodyParts).toString('utf8');
+                    bodyParts = [];
                     try {
                         fs.writeFile(BACKUP_FILE_PATH, memoryBackupJson, 'utf8', function() {});
                     } catch (exWrite) {}
@@ -879,26 +1217,34 @@ function startProxyServer(port) {
         if (parsedUrl.pathname === '/stream-diag') {
             var hasQueryUrl = Boolean(parsedUrl.query && parsedUrl.query.url);
             var diagKey = hasQueryUrl ? getStreamKey(parsedUrl.query.url) : latestStreamTelemetryKey;
-            var tEntry = diagKey ? (streamTelemetryMap[diagKey] || null) : null;
-            var diagVerdict = computeStreamDiagnosticVerdict(tEntry);
-            var payload = {
-                url: tEntry ? tEntry.url : ((parsedUrl.query && parsedUrl.query.url) || ''),
-                httpStatus: tEntry ? tEntry.httpStatus : 0,
-                ttfbMs: tEntry ? tEntry.ttfbMs : null,
-                elapsedMs: tEntry ? Math.max(0, Date.now() - tEntry.startTs) : 0,
-                totalBytes: tEntry ? tEntry.totalBytes : 0,
-                kbps: tEntry ? tEntry.kbps : 0,
-                kBps: tEntry ? Math.round(tEntry.kbps / 8) : 0,
-                videoCodec: tEntry ? tEntry.videoCodec : '',
-                audioCodec: tEntry ? tEntry.audioCodec : '',
-                isTranscoding: false,
-                vTranscode: false,
-                hasFfmpeg: false,
-                active: tEntry ? tEntry.active : false,
-                verdict: diagVerdict
+            var existingEntry = diagKey ? (streamTelemetryMap[diagKey] || null) : null;
+            var wantsActiveProbe = Boolean(hasQueryUrl && parsedUrl.query.probe === '1' && (!existingEntry || !existingEntry.httpStatus || !existingEntry.active));
+            var sendDiagResponse = function(tEntry) {
+                var diagVerdict = computeStreamDiagnosticVerdict(tEntry);
+                var payload = {
+                    url: tEntry ? tEntry.url : ((parsedUrl.query && parsedUrl.query.url) || ''),
+                    httpStatus: tEntry ? tEntry.httpStatus : 0,
+                    ttfbMs: tEntry ? tEntry.ttfbMs : null,
+                    elapsedMs: tEntry ? Math.max(0, Date.now() - tEntry.startTs) : 0,
+                    totalBytes: tEntry ? tEntry.totalBytes : 0,
+                    kbps: tEntry ? tEntry.kbps : 0,
+                    kBps: tEntry ? Math.round(tEntry.kbps / 8) : 0,
+                    videoCodec: tEntry ? tEntry.videoCodec : '',
+                    audioCodec: tEntry ? tEntry.audioCodec : '',
+                    isTranscoding: false,
+                    vTranscode: false,
+                    hasFfmpeg: false,
+                    active: tEntry ? tEntry.active : false,
+                    verdict: diagVerdict
+                };
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify(payload));
             };
-            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify(payload));
+            if (wantsActiveProbe) {
+                probeUpstreamStream(parsedUrl.query.url, 3, sendDiagResponse);
+                return;
+            }
+            sendDiagResponse(existingEntry);
             return;
         }
 
@@ -921,12 +1267,27 @@ function startProxyServer(port) {
         if (parsedUrl.pathname === '/remote-setup') {
             if (req.method === 'POST') {
                 var rsParts = [];
+                var rsBytes = 0;
+                var rsTooLarge = false;
                 req.on('data', function(chunk) {
-                    rsParts.push(chunk);
+                    var rChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
+                    rsBytes += rChunk.length;
+                    if (rsBytes > 262144) {
+                        rsTooLarge = true;
+                        rsParts = [];
+                        return;
+                    }
+                    rsParts.push(rChunk);
                 });
                 req.on('end', function() {
+                    if (rsTooLarge) {
+                        res.writeHead(413, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Payload too large' }));
+                        return;
+                    }
                     try {
                         var bodyText = Buffer.concat(rsParts).toString('utf8');
+                        rsParts = [];
                         var parsedCfg = JSON.parse(bodyText || '{}');
                         pendingRemoteSetup = {
                             ts: Date.now(),
@@ -952,19 +1313,199 @@ function startProxyServer(port) {
             }
         }
 
+        if (parsedUrl.pathname === '/record') {
+            var recAction = String((parsedUrl.query && parsedUrl.query.action) || 'status').toLowerCase();
+            if (recAction === 'stop') {
+                var stoppedSess = stopActiveRecordingSession();
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({
+                    active: false,
+                    stopped: Boolean(stoppedSess),
+                    file: stoppedSess ? stoppedSess.filePath : '',
+                    bytes: stoppedSess ? stoppedSess.bytes : 0,
+                    elapsedSec: stoppedSess ? Math.max(1, Math.round((stoppedSess.stoppedAt - stoppedSess.startedAt) / 1000)) : 0
+                }));
+                return;
+            }
+            if (recAction === 'start' && parsedUrl.query && parsedUrl.query.url) {
+                stopActiveRecordingSession();
+                var recUrl = String(parsedUrl.query.url || '').trim();
+                var rawChName = String(parsedUrl.query.name || 'channel').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'channel';
+                var tmpDir = (os && typeof os.tmpdir === 'function') ? os.tmpdir() : '/tmp';
+                var recFilePath = tmpDir + '/smartstb_rec_' + rawChName + '_' + Date.now() + '.ts';
+                var parsedRecTarget = url.parse(recUrl);
+                if (!parsedRecTarget.hostname) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Invalid stream URL for recording' }));
+                    return;
+                }
+                var fStream = null;
+                try {
+                    fStream = fs.createWriteStream(recFilePath);
+                    fStream.on('error', function() {});
+                } catch (eFs) {
+                    fStream = null;
+                }
+                var newRecSess = {
+                    active: true,
+                    url: recUrl,
+                    name: rawChName,
+                    filePath: recFilePath,
+                    startedAt: Date.now(),
+                    stoppedAt: 0,
+                    bytes: 0,
+                    fileStream: fStream,
+                    upReq: null
+                };
+                activeRecordingSession = newRecSess;
+                var startRecordingUpstream = function(targetUrlStr, redirectsLeft) {
+                    if (!activeRecordingSession || activeRecordingSession !== newRecSess) {
+                        return;
+                    }
+                    var curRecTarget = url.parse(targetUrlStr);
+                    if (!curRecTarget.hostname) {
+                        stopActiveRecordingSession();
+                        return;
+                    }
+                    var isRecHttps = curRecTarget.protocol === 'https:';
+                    var recClient = isRecHttps ? https : http;
+                    var recHeaders = {
+                        'User-Agent': MAG_UA,
+                        'Accept': '*/*',
+                        'Connection': 'keep-alive',
+                        'Host': curRecTarget.host
+                    };
+                    var recCookie = getHostCookieHeader(curRecTarget.hostname, '', lastActiveMac);
+                    if (recCookie) {
+                        recHeaders.Cookie = recCookie;
+                    }
+                    if (lastPortalReferer) {
+                        recHeaders.Referer = lastPortalReferer;
+                    }
+                    var recUpReq = recClient.request({
+                        hostname: curRecTarget.hostname,
+                        port: curRecTarget.port || (isRecHttps ? 443 : 80),
+                        path: curRecTarget.path,
+                        method: 'GET',
+                        headers: recHeaders,
+                        timeout: 20000,
+                        rejectUnauthorized: false
+                    }, function(recRes) {
+                        if (recRes.headers && recRes.headers['set-cookie']) {
+                            storeSetCookies(curRecTarget.hostname, recRes.headers['set-cookie'], lastActiveMac);
+                        }
+                        if (recRes.statusCode >= 300 && recRes.statusCode < 400 && recRes.headers.location && redirectsLeft > 0) {
+                            var nextRecUrl = url.resolve(targetUrlStr, recRes.headers.location);
+                            recRes.resume();
+                            startRecordingUpstream(nextRecUrl, redirectsLeft - 1);
+                            return;
+                        }
+                        if (recRes.statusCode && recRes.statusCode >= 400) {
+                            recRes.resume();
+                            if (activeRecordingSession === newRecSess) {
+                                stopActiveRecordingSession();
+                            }
+                            return;
+                        }
+                        recRes.on('data', function(chunk) {
+                            if (!activeRecordingSession || activeRecordingSession !== newRecSess) {
+                                return;
+                            }
+                            var bChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
+                            newRecSess.bytes += bChunk.length;
+                            if (newRecSess.fileStream) {
+                                try {
+                                    newRecSess.fileStream.write(bChunk);
+                                } catch (eWr) {}
+                            }
+                            if (newRecSess.bytes >= 262144000 || (Date.now() - newRecSess.startedAt) >= 1800000) {
+                                stopActiveRecordingSession();
+                            }
+                        });
+                        recRes.on('end', function() {
+                            if (activeRecordingSession === newRecSess) {
+                                stopActiveRecordingSession();
+                            }
+                        });
+                        recRes.on('error', function() {
+                            if (activeRecordingSession === newRecSess) {
+                                stopActiveRecordingSession();
+                            }
+                        });
+                    });
+                    recUpReq.on('timeout', function() {
+                        try {
+                            recUpReq.abort();
+                        } catch (eRecTo) {}
+                        if (activeRecordingSession === newRecSess) {
+                            stopActiveRecordingSession();
+                        }
+                    });
+                    recUpReq.on('error', function() {
+                        if (activeRecordingSession === newRecSess) {
+                            stopActiveRecordingSession();
+                        }
+                    });
+                    recUpReq.end();
+                    newRecSess.upReq = recUpReq;
+                };
+                startRecordingUpstream(recUrl, 5);
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({
+                    active: true,
+                    file: recFilePath,
+                    bytes: 0,
+                    elapsedSec: 0
+                }));
+                return;
+            }
+            var curRec = activeRecordingSession;
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({
+                active: Boolean(curRec && curRec.active),
+                file: curRec ? curRec.filePath : '',
+                bytes: curRec ? curRec.bytes : 0,
+                elapsedSec: (curRec && curRec.active) ? Math.max(0, Math.round((Date.now() - curRec.startedAt) / 1000)) : 0
+            }));
+            return;
+        }
+
         if ((parsedUrl.pathname === '/xtream' || parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv') && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
             var rawTargetUrl = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
             var isTextRoute = (parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv');
+            var remoteDone = false;
+            var currentRemoteReq = null;
+            var sendRemoteError = function(statusCode, errMsg) {
+                if (remoteDone) {
+                    return;
+                }
+                remoteDone = true;
+                if (!res.headersSent) {
+                    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+                }
+                try {
+                    res.end(JSON.stringify({ error: String(errMsg || 'Proxy error') }));
+                } catch (eEnd) {}
+            };
+            req.on('close', function() {
+                remoteDone = true;
+                if (currentRemoteReq) {
+                    try {
+                        currentRemoteReq.abort();
+                    } catch (eClose) {}
+                }
+            });
             (function fetchRemoteWithRedirects(targetUrlStr, redirectsLeft) {
+                if (remoteDone) {
+                    return;
+                }
                 if (redirectsLeft <= 0) {
-                    res.writeHead(502, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Too many redirects' }));
+                    sendRemoteError(502, 'Too many redirects');
                     return;
                 }
                 var parsedTarget = url.parse(targetUrlStr);
-                if (!parsedTarget.hostname) {
-                    res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Invalid target URL' }));
+                if (!parsedTarget || !parsedTarget.hostname || (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:')) {
+                    sendRemoteError(400, 'Invalid target URL');
                     return;
                 }
                 var isHttpsTarget = parsedTarget.protocol === 'https:';
@@ -989,61 +1530,52 @@ function startProxyServer(port) {
                         fetchRemoteWithRedirects(url.resolve(targetUrlStr, rRes.headers.location), redirectsLeft - 1);
                         return;
                     }
-                    var stream = rRes;
-                    var enc = String(rRes.headers['content-encoding'] || '').toLowerCase();
-                    if (enc === 'gzip') {
-                        stream = rRes.pipe(zlib.createGunzip());
-                    } else if (enc === 'deflate') {
-                        stream = rRes.pipe(zlib.createInflate());
-                    }
                     var rChunks = [];
                     var totalLen = 0;
-                    stream.on('data', function(c) {
-                        totalLen += c.length;
+                    rRes.on('data', function(c) {
+                        var bufC = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
+                        totalLen += bufC.length;
                         if (totalLen <= 67108864) {
-                            rChunks.push(c);
+                            rChunks.push(bufC);
                         }
                     });
-                    stream.on('end', function() {
+                    rRes.on('end', function() {
+                        if (remoteDone) {
+                            rChunks = [];
+                            return;
+                        }
                         var bodyBuf = Buffer.concat(rChunks);
                         rChunks = [];
-                        if (bodyBuf.length >= 2 && bodyBuf[0] === 0x1f && bodyBuf[1] === 0x8b) {
-                            zlib.gunzip(bodyBuf, function(gzErr, unzippedBuf) {
-                                var finalBuf = (!gzErr && unzippedBuf) ? unzippedBuf : bodyBuf;
-                                bodyBuf = null;
+                        decodeBufferByEncoding(bodyBuf, rRes.headers['content-encoding'], function(decodedBuf) {
+                            var finalBuf = decodedBuf || bodyBuf;
+                            bodyBuf = null;
+                            if (remoteDone) {
+                                return;
+                            }
+                            remoteDone = true;
+                            if (!res.headersSent) {
                                 res.writeHead(rRes.statusCode || 200, {
                                     'Content-Type': isTextRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
                                     'Cache-Control': 'no-store'
                                 });
-                                res.end(finalBuf);
-                            });
-                            return;
-                        }
-                        res.writeHead(rRes.statusCode || 200, {
-                            'Content-Type': isTextRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
-                            'Cache-Control': 'no-store'
+                            }
+                            res.end(finalBuf);
                         });
-                        res.end(bodyBuf);
                     });
-                    stream.on('error', function(zErr) {
+                    rRes.on('error', function(zErr) {
                         rChunks = [];
-                        res.writeHead(502, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: zErr.message }));
+                        sendRemoteError(502, zErr ? zErr.message : 'Upstream response error');
                     });
                 });
-                req.on('close', function() {
-                    try {
-                        rReq.abort();
-                    } catch (eClose) {}
-                });
+                currentRemoteReq = rReq;
                 rReq.on('error', function(eReq) {
-                    res.writeHead(502, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: eReq.message }));
+                    sendRemoteError(502, eReq ? eReq.message : 'Upstream connection error');
                 });
                 rReq.on('timeout', function() {
-                    rReq.abort();
-                    res.writeHead(504, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Upstream timeout' }));
+                    sendRemoteError(504, 'Upstream timeout');
+                    try {
+                        rReq.abort();
+                    } catch (eTimeout) {}
                 });
                 rReq.end();
             })(rawTargetUrl, 5);
@@ -1079,6 +1611,10 @@ function startProxyServer(port) {
         if (rawToken) {
             headers.Authorization = 'Bearer ' + safeDecodeURIComponent(rawToken).trim();
         }
+        var isHandshakeReq = String(targetSearch || '').indexOf('action=handshake') !== -1;
+        if (isHandshakeReq) {
+            clearCookieScopeForPortal(portal, mac);
+        }
         var candidates = getCandidateUrls(portal, targetSearch, mac);
         var activeAbortFn = null;
         var reqStateObj = {
@@ -1088,7 +1624,7 @@ function startProxyServer(port) {
             idx: 0,
             headers: headers,
             redirectsLeft: 3,
-            useFreshSocket: false,
+            useFreshSocket: isHandshakeReq,
             aborted: false,
             onAbort: function(fn) {
                 activeAbortFn = fn;
@@ -1112,6 +1648,13 @@ function startProxyServer(port) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(result);
         });
+    });
+    server.on('connection', function(sock) {
+        if (sock && typeof sock.setNoDelay === 'function') {
+            try {
+                sock.setNoDelay(true);
+            } catch (eNd) {}
+        }
     });
     server.on('error', function(err) {
         if (err && err.code === 'EADDRINUSE' && listenPort === PROXY_PORT) {
