@@ -20,8 +20,10 @@ var lastPortalReferer = '';
 var lastActiveMac = '';
 var memoryBackupJson = '';
 var activeVideoUpReq = null;
+var activeVideoStreamKey = '';
 var pendingRemoteSetup = null;
 var MAG_UA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
+var VLC_UA = 'VLC/3.0.20 LibVLC/3.0.20';
 var streamTelemetryMap = {};
 var streamTelemetryKeys = [];
 var latestStreamTelemetryKey = '';
@@ -768,9 +770,13 @@ function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
 
     var isHttps = target.protocol === 'https:';
     var client = isHttps ? https : http;
+    var isProbeVod = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(target.path || '') ||
+        /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(streamUrl || '') ||
+        /\/(?:movie|series)\//i.test(target.path || '') ||
+        /\/(?:movie|series)\//i.test(streamUrl || '');
     var mergedCookie = getHostCookieHeader(target.hostname, '', lastActiveMac);
     var headers = {
-        'User-Agent': MAG_UA,
+        'User-Agent': isProbeVod ? VLC_UA : MAG_UA,
         'Accept': '*/*',
         'Connection': 'close',
         'Host': target.host
@@ -778,7 +784,7 @@ function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
     if (mergedCookie) {
         headers.Cookie = mergedCookie;
     }
-    if (lastPortalReferer) {
+    if (lastPortalReferer && !isProbeVod) {
         headers.Referer = lastPortalReferer;
     }
 
@@ -871,9 +877,11 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
     }
     var isHttps = target.protocol === 'https:';
     var client = isHttps ? https : http;
+    var isVodContainer = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(target.path || '') || /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(streamUrl || '');
+    var isVodStream = isVodContainer || /\/(?:movie|series)\//i.test(target.path || '') || /\/(?:movie|series)\//i.test(streamUrl || '');
     var mergedCookie = getHostCookieHeader(target.hostname, '', lastActiveMac);
     var headers = {
-        'User-Agent': MAG_UA,
+        'User-Agent': isVodStream ? VLC_UA : MAG_UA,
         'Accept': '*/*',
         'Connection': 'keep-alive',
         'Host': target.host
@@ -881,20 +889,21 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
     if (mergedCookie) {
         headers.Cookie = mergedCookie;
     }
-    if (lastPortalReferer) {
+    if (lastPortalReferer && !isVodStream) {
         headers.Referer = lastPortalReferer;
     }
     if (clientReq.headers.range) {
         headers.Range = clientReq.headers.range;
     }
-    var isVodContainer = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(target.path || '') || /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(streamUrl || '');
     var hasRangeHeader = Boolean(clientReq.headers && clientReq.headers.range);
     var isSegmentOrSubRequest = /\.m4s(\?|$)|\.aac(\?|$)|\.vtt(\?|$)/i.test(target.path || '');
-    if (!originKey && !isSegmentOrSubRequest && !hasRangeHeader && !isVodContainer && activeVideoUpReq) {
+    var isDifferentStream = Boolean(activeVideoStreamKey && activeVideoStreamKey !== streamKey);
+    if (!originKey && !isSegmentOrSubRequest && (isDifferentStream || (!hasRangeHeader && !isVodContainer)) && activeVideoUpReq) {
         try {
             activeVideoUpReq.abort();
         } catch (eAbort) {}
         activeVideoUpReq = null;
+        activeVideoStreamKey = '';
     }
     clientRes.on('error', function() {});
     var accumulatedBytes = 0;
@@ -927,8 +936,9 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
             return;
         }
         recordStreamTelemetry(streamKey, streamUrl, { code: upRes.statusCode, ttfb: ttfb });
-        if (!isSegmentOrSubRequest && !hasRangeHeader && !isVodContainer) {
+        if (!isSegmentOrSubRequest) {
             activeVideoUpReq = upReq;
+            activeVideoStreamKey = streamKey;
         }
         upRes.on('error', function(uErr) {
             recordStreamTelemetry(streamKey, streamUrl, { err: uErr });
@@ -955,6 +965,15 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
                     m3u8Chunks.push(cBuf);
                 }
             });
+            upRes.on('error', function() {
+                m3u8Chunks = [];
+                if (!clientRes.headersSent) {
+                    clientRes.writeHead(502);
+                }
+                try {
+                    clientRes.end();
+                } catch (eM3uErr) {}
+            });
             upRes.on('end', function() {
                 var rawBuf = Buffer.concat(m3u8Chunks);
                 m3u8Chunks = [];
@@ -963,18 +982,22 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
                     if (rawText.indexOf('#EXTM3U') !== -1) {
                         var rewritten = rewriteM3u8Manifest(rawText, streamUrl);
                         var outBuf = allocBufferUtf8(rewritten);
-                        clientRes.writeHead(200, {
-                            'Access-Control-Allow-Origin': '*',
-                            'Content-Type': 'application/vnd.apple.mpegurl',
-                            'Content-Length': outBuf.length,
-                            'Cache-Control': 'no-cache'
-                        });
+                        if (!clientRes.headersSent) {
+                            clientRes.writeHead(200, {
+                                'Access-Control-Allow-Origin': '*',
+                                'Content-Type': 'application/vnd.apple.mpegurl',
+                                'Content-Length': outBuf.length,
+                                'Cache-Control': 'no-cache'
+                            });
+                        }
                         clientRes.end(outBuf);
                     } else {
-                        clientRes.writeHead(upRes.statusCode || 200, {
-                            'Access-Control-Allow-Origin': '*',
-                            'Content-Type': upRes.headers['content-type'] || 'video/mp2t'
-                        });
+                        if (!clientRes.headersSent) {
+                            clientRes.writeHead(upRes.statusCode || 200, {
+                                'Access-Control-Allow-Origin': '*',
+                                'Content-Type': upRes.headers['content-type'] || 'video/mp2t'
+                            });
+                        }
                         clientRes.end(decodedBuf || rawBuf);
                     }
                 });
@@ -994,6 +1017,8 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         }
         if (upRes.headers['accept-ranges']) {
             resHeaders['Accept-Ranges'] = upRes.headers['accept-ranges'];
+        } else if (isVodStream) {
+            resHeaders['Accept-Ranges'] = 'bytes';
         }
 
         clientRes.writeHead(upRes.statusCode || 200, resHeaders);
@@ -1043,6 +1068,12 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         try {
             upReq.abort();
         } catch (eTo) {}
+        if (!clientRes.headersSent) {
+            clientRes.writeHead(504);
+        }
+        try {
+            clientRes.end();
+        } catch (eToEnd) {}
     });
     upReq.on('error', function(e) {
         recordStreamTelemetry(streamKey, streamUrl, { err: e });
@@ -1059,6 +1090,7 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         flushAccumulatedBytes();
         if (activeVideoUpReq === upReq) {
             activeVideoUpReq = null;
+            activeVideoStreamKey = '';
         }
         if (!isSecondaryRange && streamTelemetryMap[streamKey]) {
             streamTelemetryMap[streamKey].active = false;
@@ -1096,6 +1128,9 @@ function startProxyServer(port) {
                 var bodyParts = [];
                 var backupBytes = 0;
                 var backupTooLarge = false;
+                req.on('error', function() {
+                    bodyParts = [];
+                });
                 req.on('data', function(c) {
                     var bChunk = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
                     backupBytes += bChunk.length;
@@ -1170,6 +1205,9 @@ function startProxyServer(port) {
                 var catParts = [];
                 var totalBytes = 0;
                 var tooLarge = false;
+                req.on('error', function() {
+                    catParts = [];
+                });
                 req.on('data', function(c) {
                     var buf = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
                     totalBytes += buf.length;
@@ -1269,6 +1307,9 @@ function startProxyServer(port) {
                 var rsParts = [];
                 var rsBytes = 0;
                 var rsTooLarge = false;
+                req.on('error', function() {
+                    rsParts = [];
+                });
                 req.on('data', function(chunk) {
                     var rChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
                     rsBytes += rChunk.length;
@@ -1369,8 +1410,10 @@ function startProxyServer(port) {
                     }
                     var isRecHttps = curRecTarget.protocol === 'https:';
                     var recClient = isRecHttps ? https : http;
+                    var isRecVod = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(curRecTarget.path || '') ||
+                        /\/(?:movie|series)\//i.test(curRecTarget.path || '');
                     var recHeaders = {
-                        'User-Agent': MAG_UA,
+                        'User-Agent': isRecVod ? VLC_UA : MAG_UA,
                         'Accept': '*/*',
                         'Connection': 'keep-alive',
                         'Host': curRecTarget.host
@@ -1379,7 +1422,7 @@ function startProxyServer(port) {
                     if (recCookie) {
                         recHeaders.Cookie = recCookie;
                     }
-                    if (lastPortalReferer) {
+                    if (lastPortalReferer && !isRecVod) {
                         recHeaders.Referer = lastPortalReferer;
                     }
                     var recUpReq = recClient.request({
@@ -1516,7 +1559,7 @@ function startProxyServer(port) {
                     path: parsedTarget.path,
                     method: 'GET',
                     headers: {
-                        'User-Agent': MAG_UA,
+                        'User-Agent': isTextRoute ? VLC_UA : MAG_UA,
                         'Accept': '*/*',
                         'Accept-Encoding': 'gzip, deflate',
                         'Host': parsedTarget.host
