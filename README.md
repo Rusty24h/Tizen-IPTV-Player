@@ -1,13 +1,13 @@
 # IPTV Player for Samsung Tizen Smart TVs
 
-[![Tizen OS](https://img.shields.io/badge/Tizen%20OS-4.0%20to%209.0%2B-0083D6?logo=tizen&logoColor=white)](https://developer.samsung.com/smarttv)
-[![Engine](https://img.shields.io/badge/Player-Hardware%20AVPlay%20%2B%20FFmpeg%20MSE-blueviolet)](#key-features)
+[![Resolution](https://img.shields.io/badge/Viewport-1080p%20FHD%20%2F%204K%20UHD-success)](#hardware-accelerated-video-playback-avplay)
+[![Engine](https://img.shields.io/badge/Player-Hardware%20AVPlay-blueviolet)](#key-features)
 [![Protocol](https://img.shields.io/badge/Providers-Stalker%20MAC%20%7C%20Xtream%20API%20%7C%20M3U8-blue)](#multi-provider-architecture--profile-system)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A high-performance, hardware-accelerated IPTV client engineered specifically for **Samsung Smart TVs running Tizen OS** (Tizen 4.0+ through 9.0+, model years 2018 to present)
+A high-performance, hardware-accelerated IPTV client engineered specifically for **Samsung Smart TVs running Tizen OS** (Tizen 4.0+ through 9.0+, model years 2018 to present).
 
-Designed as a modern, lightweight, and customizable replacement for legacy set-top box middleware, it provides a native **10-foot remote-controlled television interface** with unified **Multi-Provider Architecture** (**Stalker / Ministra MAC Portals**, **Xtream Codes API**, and **M3U / M3U8 Playlists + Local File Import**), progressive instant category boot, seamless EPG timelines, catch-up TV archives, multi-season VOD series management, multi-audio/subtitle track switching, real-time stream diagnostics, and a built-in local background streaming proxy service.
+Designed as a modern, lightweight, and customizable replacement for legacy set-top box middleware, it provides a native **10-foot remote-controlled television interface** with unified **Multi-Provider Architecture** (**Stalker / Ministra MAC Portals**, **Xtream Codes API**, and **M3U / M3U8 Playlists + Local File Import**), progressive instant category boot, non-blocking large-portal ingestion (5,000–25,000+ channels & 900+ categories), seamless 24h & 2D grid EPG timelines, catch-up TV archives, multi-season VOD series management, multi-audio/subtitle track switching, real-time stream diagnostics, and a built-in local background streaming proxy service.
 
 ---
 
@@ -23,7 +23,7 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
    - [Phase 3: Generate Samsung Certificates (Author & Distributor)](#phase-3-generate-samsung-certificates-author--distributor)
    - [Phase 4: Connect Tizen Studio to your Samsung TV](#phase-4-connect-tizen-studio-to-your-samsung-tv)
    - [Phase 5: Build and Deploy the `.wgt` Package](#phase-5-build-and-deploy-the-wgt-package)
-6. [Remote Control & PC Keyboard Mapping](#remote-control--pc-keyboard-mapping)
+6. [Samsung Remote Control Key Mapping](#samsung-remote-control-key-mapping)
 7. [Initial Setup & Multi-Provider Configuration](#initial-setup--multi-provider-configuration)
 8. [License](#license)
 
@@ -31,17 +31,25 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
 
 ## What's New (Latest Added Features)
 
+- **🚀 Extreme Large-Portal Engine (5,000–25,000+ Channels & 900+ Categories)**:
+  - **Chunked Non-Blocking Ingestion**: Time-sliced catalog indexing, chunked async M3U (`parseM3uPlaylistCatalogAsync`) and XMLTV (`parseXmltvDocumentAsync`) parsers, and O(1) category lookup maps prevent Tizen WebView watchdog freezes on massive portals.
 - **🌐 Multi-Provider Architecture**: Full native support for **Stalker / Ministra MAC Portals**, **Xtream Codes API** (`player_api.php` with username/password authentication), and **M3U / M3U8 Playlists** (remote URL or local `.m3u` / `.m3u8` file import with automatic Live TV, Movies, and Series `SxxExx` classification).
 - **⚡ Progressive Instant Category Boot**: Categories (`get_genres` / `get_live_categories`) fetch and render within ~200ms on launch while the full channel catalog loads asynchronously in the background—allowing immediate remote navigation without waiting for thousands of channels to finish downloading.
-- **🔄 Fast Channel Zapping & Auto-Reconnect on Provider EOF**:
+- **🔄 Fast Channel Zapping, Multi-Link Failover & Auto-Reconnect**:
   - Defers background `get_short_epg` requests during channel switches so `create_link` never collides with EPG polling on single-session Stalker portals.
-  - Automatically refreshes expired playback links when a stream fails to connect on first tune.
+  - Automatic multi-link failover across backup server URLs (`cmds[]`) when an upstream server link fails.
   - Automatically reconnects Live TV streams in fullscreen when the provider drops the connection or sends an unexpected `onstreamcompleted` (EOF) after extended viewing—without kicking you back to the channel list.
-- **🔊 Enhanced Audio & Subtitle Track Engine**:
+- **🔊 Enhanced Audio, Subtitle Timing Offset & Per-Channel Memory**:
   - Late-PID audio track discovery across both `onbufferingcomplete` and `oncurrentplaytime` with compatibility across Tizen 4.0–9.0 firmware (`extra_info` JSON & raw key-value formats).
-  - Direct **Red Button** (cycle audio tracks) and **Blue Button** (cycle subtitles) during fullscreen playback, plus an interactive **Audio & Subtitles Modal** (`🔊 Audio / Subs` in Quick Actions) with live subtitle color (`White`, `Yellow`, `Cyan`, `Green`) and size (`Small`, `Normal`, `Large`, `Extra Large`) controls.
-- **📊 Real-Time Provider vs. App Buffering Diagnostics (`/stream-diag`)**: Live OSD diagnostic badge distinguishes between provider-side stream stalls (HTTP `403`/`458` token limit, 0 KB/s idle feed) and local network throughput (`KB/s`).
-- **▶ Continue Watching & Watched Badges (`✓`)**: Virtual **▶ Continue Watching** category in Movies & Series with inline progress bars on partially watched items and `✓` badges on completed episodes/movies.
+  - Persistent per-channel/item memory for selected audio track, subtitle track, and aspect ratio (`cfg_item_media_prefs`), plus live `±250ms` subtitle sync timing offset (`webapis.avplay.setSubtitlePosition`).
+- **🎨 10-Foot Broadcast UI/UX Overhaul & 6 Color Themes**:
+  - **3-Column VOD & Series Poster Grid**: Toggle between a 3×3 poster card grid (with IMDb rating badges, favorite stars, and resume progress bars) and the classic 1D list view.
+  - **Live Video Glass Backdrop (`playing-live`)**: Semi-transparent glass columns let live TV continue playing visibly behind the channel guide while browsing.
+  - **OSD Broadcast Station Deck & Inline EPG Progress Bars**: Station logo box, channel number pill, remaining time (`-24m left`), and subtle inline progress bars on live channel rows.
+  - **6 Hardware-Safe Color Themes**: Choose between **Classic Blue**, **Royal Purple**, **Cyber Cyan**, **Emerald Green**, **Crimson Red**, and **Gold Amber**.
+- **📅 Dual-Mode EPG (Single-Channel List + 2D Multi-Channel Timeline Grid) & XMLTV Engine**:
+  - Toggle between the classic 24-hour single-channel program schedule and an interactive **2D Multi-Channel EPG Grid** with **Green** button, complete with custom XMLTV URL support, automatic `url-tvg` / `x-tvg-url` discovery, and a dedicated **Up Next** horizontal card strip in the channel preview panel.
+- **📱 Phone / LAN Remote Companion Setup**: Built-in `http://<TV-LAN-IP>:3001/setup` web portal served by `service/proxy.js` lets you paste long Portal, Xtream, M3U, and XMLTV URLs directly from your phone or laptop browser to the TV.
 
 ---
 
@@ -49,36 +57,32 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
 
 ### 🌐 Multi-Provider Architecture & Profile System
 - **3 Native Provider Engines**:
-  - **Stalker / Ministra MAC Portal**: Full MAG250 handshake, token refresh, genres, VOD, Series, EPG, and `tv_archive` Catch-Up.
-  - **Xtream Codes API**: Native `player_api.php` integration for Live streams, VOD movies, multi-season Series info (`get_series_info`), and short EPG.
-  - **M3U / M3U8 Playlist & Local File Upload**: Parses `#EXTINF` attributes (`tvg-logo`, `group-title`, `tvg-id`), automatically groups categories, and clusters episodic series patterns (`S01E01` / `1x01`) into navigable seasons and episodes.
-- **Multi-Portal Profile Manager**: Store unlimited IPTV profiles across different provider types and switch between them instantaneously with zero memory leaks.
+  - **Stalker / Ministra MAC Portal**: Full MAG250 handshake, token refresh, genres, VOD, Series, EPG, automatic `get_profile` + `account_info` (`get_main_info`) account expiration badge, and `tv_archive` Catch-Up.
+  - **Xtream Codes API**: Native `player_api.php` integration for Live streams, VOD movies, multi-season Series info (`get_series_info`), account expiration telemetry, and short/XMLTV EPG.
+  - **M3U / M3U8 Playlist & Local File Upload**: Parses `#EXTINF` attributes (`tvg-logo`, `group-title`, `tvg-id`, `url-tvg`), automatically groups categories, and clusters episodic series patterns (`S01E01` / `1x01`) into navigable seasons and episodes.
+- **Multi-Portal Profile Manager & One-Key Quick Switch**: Store unlimited IPTV profiles across different provider types and switch between them instantaneously with the **Blue** button on the left Main Menu rail (`#col-modes`) or inside Settings.
 - **Strict Per-Profile Isolation**: Favorites, watch history, resume timestamps, continue watching items, pinned categories, and MAC-scoped proxy cookies are strictly isolated per profile.
 - **JSON Backup & Restore**: Export and import your complete profile collection, favorites, and app preferences to TV storage, local proxy `/backup`, or a downloadable `.json` file.
 
 ### 📺 4-Column 1080p Broadcast Interface
 - **Optimized 10-Foot UI**: Smooth 60 FPS remote navigation across **Main Menu** (Modes), **Categories**, **Channels / Items**, and **Details & EPG**.
 - **Progressive Category Loading**: Immediately populates and focuses the Categories column on cold start while channels stream into memory in the background.
-- **Virtual 12-Row Sliding Window**: Effortlessly scrolls playlists with **10,000+ channels** without DOM bloat, sluggishness, or memory leaks on low-memory TV chipsets.
 - **Pinned Categories (`📌`)**: Press the **Yellow** button on any category to pin/unpin it to the top of your category list.
-- **Quick Action Bar**: Press `Right` from any item to access instant shortcuts (`▶ Play / Fullscreen`, `★ Favorite`, `📅 EPG Guide`, `🔊 Audio / Subs`, `📐 Aspect Ratio`, `⏱ Sleep Timer`, `⇅ Sort`, `⧩ Filter`, `🔄 Refresh`, and `🗑 Clear History`).
-- **Multiple Color Themes**: Select between **Classic Blue**, **Emerald Green**, **Crimson Red**, and **Gold Amber** accents.
+- **Context-Aware Quick Action Bar**: Press `Right` from any item to access primary shortcuts (`▶ Play / Fullscreen`, `★ Favorite`, `📅 EPG Guide`, `🔊 Audio / Subs`, `🔄 Refresh`) and expand `⋯ More Tools` for power-user actions (`▦ Grid / List View`, `📐 Aspect Ratio`, `⏱ Sleep Timer`, `⇅ Sort`, `⧩ Filter`, `🩺 Test Stream`, `🔴 Record`, and more).
+- **6 Color Themes**: Select between **Classic Blue**, **Royal Purple**, **Cyber Cyan**, **Emerald Green**, **Crimson Red**, and **Gold Amber** accents.
 
 ### 🚀 Hardware-Accelerated Video Playback (`AVPlay`)
 - **Native Samsung Media Pipeline**: Directly taps into Samsung's hardware decoder engine (`webapis.avplay`) for zero-buffer MPEG-TS, HLS, MP4, and MKV streaming.
+- **VLC User-Agent VOD & Multi-CDN Compatibility**: Automatically configures `VLC/3.0.20 LibVLC/3.0.20` and HTTP byte-range headers for VOD Movies and Series.
 - **Full Hardware Audio Support**: Built-in firmware decoding of **Dolby Digital (`AC-3`)**, **Dolby Digital Plus (`E-AC-3`)**, **DTS**, **AAC**, and **MP2**.
-- **Uninterrupted Live TV Resilience**: Automatic token re-authentication on initial link failure and automatic fullscreen reconnection if the provider drops a live stream mid-broadcast.
+- **Uninterrupted Live TV Resilience**: Automatic token re-authentication on initial link failure, multi-server backup link failover, and automatic fullscreen reconnection if the provider drops a live stream mid-broadcast.
 - **Real-Time Stream Telemetry & Diagnostics**: Live OSD displays resolution badges (`4K UHD`, `1080p FHD`, `720p HD`), frame rate (`FPS`), active audio/video codecs, and live proxy download speed (`KB/s`).
 - **Aspect Ratio Control**: Instant switching between **Original Aspect (Letterbox)** and **16:9 Fullscreen Stretch** via the Green button or Quick Actions.
 
-### 📅 24-Hour EPG & Catch-Up TV Archive
-- **Full Electronic Program Guide**: Press `GUIDE` on any channel to inspect a full 24-hour visual schedule.
+### 📅 24-Hour EPG, 2D Grid & Catch-Up TV Archive
+- **Full Electronic Program Guide**: Press `GUIDE` on any channel to inspect its 24-hour schedule or press **Green** to switch to the **2D Multi-Channel EPG Grid**.
 - **One-Touch Catch-Up Archive**: Past broadcasts flagged with the `⏱` badge can be replayed instantly through Stalker `tv_archive` or Xtream timeshift linking.
 - **Live Progress & What's Next**: Live EPG progress indicator bar and real-time "Now / Next" indicators on both the OSD banner and channel rows.
-
-### ⚡ Fullscreen Quick Channel Zapper (Mini-Zap Drawer)
-- **Overlay Drawer**: While watching live TV in fullscreen, press `ENTER` to bring up a transparent left-side drawer displaying the active category's channel list.
-- **Fast Channel Surfing**: Switch channels immediately without interrupting fullscreen playback or navigating back through the full 4-column menu.
 
 ### 🎬 VOD Movies & Multi-Season Series
 - **Rich Metadata**: High-resolution posters, IMDb ratings, release years, synopsis, director, and cast details.
@@ -88,11 +92,11 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
 
 ### 🔊 Audio & Subtitle Track Control
 - **Multi-Audio Switching**: Cycle audio language tracks directly with the **Red** button in fullscreen or select tracks from the interactive **Audio & Subtitles Modal** (`#tracks-modal`).
-- **Clean Outline Subtitles**: Rendered with high-contrast broadcast outline shadows and **zero dark background box**, keeping the video clear and unobstructed.
+- **Clean Outline Subtitles & Timing Sync**: Rendered with high-contrast broadcast outline shadows, **zero dark background box**, and adjustable `±250ms` subtitle timing offset.
 - **Customization on the Fly**: Toggle between **White**, **Yellow**, **Cyan**, and **Green** colors and **Small**, **Normal**, **Large**, or **Extra-Large** font sizes directly from the remote.
 
 ### 🔒 Parental Control & Sleep Timer
-- **4-Digit PIN Protection**: Lock adult and sensitive categories behind a PIN prompt (`0000` by default, customizable in Settings).
+- **4-Digit PIN Protection**: Lock adult and sensitive categories (`censored=1` or `+18`/`Adult`/`XXX`) behind a PIN prompt (`0000` by default, customizable in Settings).
 - **Sleep Timer (`🌙`)**: Schedule automatic playback termination after 15, 30, 60, 90, or 120 minutes with an active top-bar indicator.
 
 ---
@@ -118,6 +122,7 @@ The embedded background service runs locally on the TV at `http://127.0.0.1:3001
 - Per-MAC isolated cookie jar management and Stalker token refresh.
 - Seamless MPEG-TS and HLS manifest rewriting for direct AVPlay hardware consumption.
 - Real-time stream throughput and upstream HTTP status telemetry via `/stream-diag`.
+- Phone / LAN remote configuration web interface at `/setup`.
 
 ---
 
@@ -125,7 +130,7 @@ The embedded background service runs locally on the TV at `http://127.0.0.1:3001
 
 Before installing the app on your Samsung Smart TV, ensure you have:
 1. **Samsung Smart TV** running Tizen OS 4.0 or newer (Manufactured from 2018 onwards).
-2. **PC / Mac / Linux** on the **same local Wi-Fi or Ethernet network** as your TV.
+2. **Computer (Windows / macOS / Linux)** on the **same local Wi-Fi or Ethernet network** as your TV (for Tizen Studio deployment).
 3. **Samsung Remote Control** (Standard IR remote with numeric keypad or Smart Remote).
 4. **Active IPTV Subscription**:
    - **Stalker Portal URL** + activated **MAC Address** (`00:1A:79:XX:XX:XX`), **OR**
@@ -220,19 +225,19 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
 
 ---
 
-## Remote Control & PC Keyboard Mapping
+## Samsung Remote Control Key Mapping
 
-| Remote Button | PC Key | Action in Overlay (Menu) | Action in Fullscreen Playback |
+| Remote Button | Simulator Key | Action in Overlay (Menu) | Action in Fullscreen Playback |
 | :--- | :---: | :--- | :--- |
 | **UP / DOWN** | `↑` / `↓` | Navigate list items & Settings inputs vertically | Channel Zapping / Page Up/Down |
 | **LEFT / RIGHT** | `←` / `→` | Switch column / Step out of series | Seek -30s / +30s (VOD & Catch-Up) |
-| **ENTER / OK** | `Enter` | Select category / Play item / Quick action | Open **Mini-Zap Drawer** (Live TV) |
+| **ENTER / OK** | `Enter` | Select category / Play & Auto-Hide Overlay / Quick action | Open **Mini-Zap Drawer** (Live TV) |
 | **RETURN / BACK**| `Esc` / `Backspace` | Step back / Close modal / Hide overlay | Bring up Main 4-Column Guide |
 | **RED BUTTON** | `R` | Cycle Sort Order (`Added`, `A-Z`, `Z-A`) | **Cycle Audio Tracks** |
-| **GREEN BUTTON**| `G` | Open **Global Search Modal** | **Toggle Aspect Ratio** (Fit / Stretch) |
+| **GREEN BUTTON**| `G` | Open **Global Search** / Toggle **2D EPG Grid** | **Toggle Aspect Ratio** (Fit / Stretch) |
 | **YELLOW BUTTON**| `Y` | Toggle Favorite / **Pin Category (`📌`)** | **Toggle Favorite** on active stream |
-| **BLUE BUTTON** | `B` | Open **Column Filter Modal** | **Cycle Subtitles** (On / Off / Tracks) |
-| **GUIDE / INFO**| `E` / `I` | Open 24h EPG Schedule Modal | Show Stream Telemetry & OSD Bar |
+| **BLUE BUTTON** | `B` | **Quick-Switch Portal** (on Main Menu) / **Column Filter** (on Cats/Items) | **Cycle Subtitles** (On / Off / Tracks) |
+| **GUIDE / INFO**| `E` / `I` | Open 24h & 2D Grid EPG Schedule Modal | Show Stream Telemetry & OSD Bar |
 | **NUMBERS (0-9)**| `0` - `9` | Direct Channel Number Input | Direct Channel Jump (`0` = Previous Ch) |
 | **PLAY / PAUSE** | `Space` | Toggle Play / Pause | Toggle Play / Pause |
 | **CH UP / DOWN** | `PgUp` / `PgDn`| Jump 10 items | Channel Zap / Scrub +/-10 minutes |
@@ -242,7 +247,7 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
 ## Initial Setup & Multi-Provider Configuration
 
 1. When launched for the first time (or by selecting **Settings** in the Main Menu), the app opens the **Portal & Profile Settings** modal.
-2. Select your **Provider Type**:
+2. Select your **Provider Type** (or open `http://<TV-LAN-IP>:3001/setup` from your phone to push credentials over Wi-Fi):
    - **Stalker MAC**:
      - **Stalker Portal URL**: E.g., `http://portal.example.com/c/` or `http://provider.tv:8080/stalker_portal/c/`
      - **MAC Address**: Enter your registered MAG MAC address (e.g., `00:1A:79:A4:B2:C9`).
@@ -250,8 +255,8 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
      - **Server URL**: E.g., `http://line.provider.tv:8080`
      - **Username & Password**: Enter your Xtream Codes account credentials.
    - **M3U Playlist**:
-     - **M3U URL**: Enter a remote `.m3u` or `.m3u8` URL, **or** click **📁 Load Local M3U File** to import a playlist directly from disk.
-3. Choose your preferred **UI Color Theme** and optional **4-Digit Parental PIN** (default: `0000`).
+     - **M3U URL**: Enter a remote `.m3u` or `.m3u8` URL, **or** click **📂 Upload Local .M3U / .M3U8** to import a playlist directly.
+3. *(Optional)* Enter a custom **XMLTV EPG URL** (`.xml` or `.xml.gz`), choose your preferred **UI Color Theme**, and set a **4-Digit Parental PIN** (default: `0000`).
 4. Click **Save & Connect**.
 5. The app immediately fetches and displays your Live TV categories while loading the full channel list in the background.
 
