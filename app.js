@@ -3148,6 +3148,7 @@
                     user: encodeURIComponent(String(activeProf.xtreamUser || '').trim()),
                     pass: encodeURIComponent(String(activeProf.xtreamPass || '').trim())
                 };
+                var xVodEpoch = this.sessionEpoch || 0;
                 this.xtreamVodPromise = this.xtreamRequest('get_vod_streams').then(function(rows) {
                     var arr = Array.isArray(rows) ? rows : [];
                     return processArrayInChunks(arr, 1500, function(m) {
@@ -3176,11 +3177,15 @@
                         };
                     });
                 }).then(function(items) {
-                    self.xtreamVodPromise = null;
-                    self.xtreamVodStreamsCache = { profileId: activeProf.id, items: items };
+                    if (self.sessionEpoch === xVodEpoch) {
+                        self.xtreamVodPromise = null;
+                        self.xtreamVodStreamsCache = { profileId: activeProf.id, items: items };
+                    }
                     return items;
                 }).catch(function(err) {
-                    self.xtreamVodPromise = null;
+                    if (self.sessionEpoch === xVodEpoch) {
+                        self.xtreamVodPromise = null;
+                    }
                     throw err;
                 });
             }
@@ -3358,6 +3363,7 @@
                 return Promise.resolve(filterAndPaginateLocalList(this.xtreamSeriesCache.items, categoryId, page, searchQuery, sortBy));
             }
             if (!this.xtreamSeriesPromise) {
+                var xSerEpoch = this.sessionEpoch || 0;
                 this.xtreamSeriesPromise = this.xtreamRequest('get_series').then(function(rows) {
                     var arr = Array.isArray(rows) ? rows : [];
                     return processArrayInChunks(arr, 1500, function(s) {
@@ -3384,11 +3390,15 @@
                         };
                     });
                 }).then(function(items) {
-                    self.xtreamSeriesPromise = null;
-                    self.xtreamSeriesCache = { profileId: activeProf.id, items: items };
+                    if (self.sessionEpoch === xSerEpoch) {
+                        self.xtreamSeriesPromise = null;
+                        self.xtreamSeriesCache = { profileId: activeProf.id, items: items };
+                    }
                     return items;
                 }).catch(function(err) {
-                    self.xtreamSeriesPromise = null;
+                    if (self.sessionEpoch === xSerEpoch) {
+                        self.xtreamSeriesPromise = null;
+                    }
                     throw err;
                 });
             }
@@ -3875,7 +3885,7 @@
             if (self.token) {
                 params.token = self.token;
             }
-            return self.request(params);
+            return self.request(params, Boolean(item.isVod || item.isEpisode));
         }).then(function(res) {
             var returnedCmd = (res && res.cmd) ? res.cmd : (res && res.url ? res.url : '');
             var resolved = extractStreamUrl(returnedCmd, portalBase);
@@ -4059,8 +4069,26 @@
         favLookupCache[modeId] = map;
         return map;
     }
-    function isFavItem(item) {
+    function unwrapFavoriteItem(item) {
         if (!item) {
+            return null;
+        }
+        if (item.isCatchup && item.channelRef) {
+            return item.channelRef;
+        }
+        if (item.isSeason || item.isEpisode) {
+            if (item.parentSeries) {
+                return item.parentSeries;
+            }
+            if (seriesStack.length > 0 && seriesStack[0] && seriesStack[0].parentSeries) {
+                return seriesStack[0].parentSeries;
+            }
+        }
+        return item;
+    }
+    function isFavItem(item) {
+        item = unwrapFavoriteItem(item);
+        if (!item || item.isSeason || item.isEpisode) {
             return false;
         }
         var modeId = item.isSeries ? 'series' : (item.isVod ? 'vod' : 'live');
@@ -4068,6 +4096,7 @@
         return Boolean(map[String(item.id)]);
     }
     function toggleFavorite(item) {
+        item = unwrapFavoriteItem(item);
         if (!item || item.isSeason || item.isEpisode) {
             return;
         }
@@ -4389,7 +4418,11 @@
             if (targetCh) {
                 showToast('⏰ Auto-Tuning Reminder: ' + triggered.progName + ' (' + triggered.chName + ')');
                 showOSD(targetCh.name, '⏰ REMINDER AUTO-TUNE', triggered.progName, '');
+                if (window._parentalUnlocked || !isAdultContentItem(targetCh)) {
+                    setOverlayVisible(false);
+                }
                 playItem(targetCh);
+                syncLiveChannelCursorOnZap(targetCh);
             }
         }
     }
@@ -4614,6 +4647,9 @@
         showToast('⏱ Watch History Cleared');
     }
     function pushRecentItem(item) {
+        if (item && item.isCatchup && item.channelRef) {
+            item = item.channelRef;
+        }
         if (!item || item.isSeason) {
             return;
         }
@@ -4990,6 +5026,7 @@
                 clearInterval(sleepTimerInterval);
                 sleepTimerInterval = null;
                 sleepTimerMinutes = 0;
+                currentPlayingItem = null;
                 stopPlayback();
                 showToast('⏱ Sleep Timer reached — Stopping playback');
                 try {
@@ -5128,7 +5165,7 @@
                     method: 'GET'
                 }).catch(function() {});
             }
-            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id) + '&action=delete', {
+            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProf.id) + '&action=delete&mac=' + encodeURIComponent(activeProf.mac || ''), {
                 method: 'GET'
             }).catch(function() {});
         }
@@ -5506,20 +5543,24 @@
         if (curIsVod !== entryIsVod) {
             return false;
         }
+        if (currentPlayingItem.isCatchup && currentPlayingItem.channelRef && !entryIsVod) {
+            return String(currentPlayingItem.channelRef.id) === String(entry.id);
+        }
         return String(currentPlayingItem.id) === String(entry.id);
     }
 
-    function syncPlayingRowIndicators() {
-        if (!itemsListEl || !itemsListEl.children) {
+    function syncContainerPlayingIndicators(containerEl) {
+        if (!containerEl || !containerEl.children) {
             return;
         }
-        var children = itemsListEl.children;
+        var children = containerEl.children;
         for (var i = 0; i < children.length; i++) {
             var node = children[i];
             if (!node || !node._entryRef) {
                 continue;
             }
             var playing = isCurrentlyPlayingEntry(node._entryRef);
+            node._isPlay = playing;
             if (node.classList) {
                 if (playing) {
                     node.classList.add('playing');
@@ -5537,6 +5578,11 @@
         }
     }
 
+    function syncPlayingRowIndicators() {
+        syncContainerPlayingIndicators(itemsListEl);
+        syncContainerPlayingIndicators(miniZapListEl);
+    }
+
     function stopPlayback() {
         isPlaybackHealthy = false;
         document.body.classList.remove('playing-live');
@@ -5547,6 +5593,10 @@
         if (seekDebounceTimer) {
             clearTimeout(seekDebounceTimer);
             seekDebounceTimer = null;
+        }
+        if (zapTimeout) {
+            clearTimeout(zapTimeout);
+            zapTimeout = null;
         }
         if (typeof webapis !== 'undefined' && webapis.avplay) {
             var avState = 'NONE';
@@ -5632,11 +5682,14 @@
         for (var i = 0; i < currentItems.length; i++) {
             if (currentItems[i] && String(currentItems[i].id) === String(nextEp.id)) {
                 itemIdx = i;
-                renderItems();
-                updatePreviewPanel();
                 break;
             }
         }
+        if (itemsListEl) {
+            itemsListEl._forceRebuild = true;
+        }
+        renderItems();
+        updatePreviewPanel();
         showToast('⏭ Auto-Playing: ' + nextEp.name);
         playItem(nextEp);
     }
@@ -5847,10 +5900,10 @@
             }
             webapis.avplay.open(streamUrl);
             try {
-                webapis.avplay.setStreamingProperty(
-                    'USER_AGENT',
-                    'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'
-                );
+                var streamUserAgent = (isPlayingVod || api.getProviderType() !== 'stalker') ?
+                    'VLC/3.0.20 LibVLC/3.0.20' :
+                    'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
+                webapis.avplay.setStreamingProperty('USER_AGENT', streamUserAgent);
             } catch (eUa) {}
             try {
                 if (webapis.productinfo && typeof webapis.productinfo.isUdPanelSupported === 'function' && webapis.productinfo.isUdPanelSupported()) {
@@ -5869,14 +5922,14 @@
                 webapis.avplay.setDisplayMethod(currentAspect);
             } catch (eAspect) {}
             try {
-                var initBufSec = (isPlayingVod || isPlayingCatchup) ? 15 : 1;
-                var resumeBufSec = (isPlayingVod || isPlayingCatchup) ? 25 : 2;
+                var initBufSec = (isPlayingVod || isPlayingCatchup) ? 3 : 1;
+                var resumeBufSec = (isPlayingVod || isPlayingCatchup) ? 6 : 2;
                 if (bufferModePref === 'balanced') {
-                    initBufSec = (isPlayingVod || isPlayingCatchup) ? 15 : 2;
-                    resumeBufSec = (isPlayingVod || isPlayingCatchup) ? 25 : 4;
+                    initBufSec = (isPlayingVod || isPlayingCatchup) ? 4 : 2;
+                    resumeBufSec = (isPlayingVod || isPlayingCatchup) ? 8 : 4;
                 } else if (bufferModePref === 'stable') {
-                    initBufSec = (isPlayingVod || isPlayingCatchup) ? 20 : 4;
-                    resumeBufSec = (isPlayingVod || isPlayingCatchup) ? 35 : 6;
+                    initBufSec = (isPlayingVod || isPlayingCatchup) ? 6 : 4;
+                    resumeBufSec = (isPlayingVod || isPlayingCatchup) ? 12 : 6;
                 }
                 webapis.avplay.setBufferingParam('PLAYER_BUFFER_FOR_PLAY', 'PLAYER_BUFFER_SIZE_IN_SECOND', initBufSec);
                 webapis.avplay.setBufferingParam('PLAYER_BUFFER_FOR_RESUME', 'PLAYER_BUFFER_SIZE_IN_SECOND', resumeBufSec);
@@ -6019,6 +6072,7 @@
                     if (nextEp) {
                         advanceToNextEpisode(nextEp);
                     } else {
+                        currentPlayingItem = null;
                         stopPlayback();
                         setOverlayVisible(true);
                     }
@@ -6052,9 +6106,13 @@
                 } catch (eSubInit) {}
                 webapis.avplay.play();
                 isPaused = false;
-                refreshTrackLists();
-                syncInitialActiveTracks();
-                applySavedTrackPrefsForCurrentItem();
+                if (!hasSyncedTracksOnBuffer) {
+                    hasSyncedTracksOnBuffer = true;
+                    refreshTrackLists();
+                    syncInitialActiveTracks();
+                    applySavedTrackPrefsForCurrentItem();
+                    updateOsdStreamTelemetry();
+                }
                 if (isPlayingVod || isPlayingCatchup) {
                     try {
                         vodDurationMs = Number(webapis.avplay.getDuration()) || 0;
@@ -6195,10 +6253,16 @@
             return;
         }
         if (!window._parentalUnlocked && isAdultContentItem(item)) {
+            if (!currentPlayingItem && !uiVisible) {
+                setOverlayVisible(true);
+            }
             openPinModal(function() {
                 playItem(item);
             });
             return;
+        }
+        if (item.isVod || item.isEpisode || userInteractedSinceBoot) {
+            setOverlayVisible(false);
         }
         if (currentPlayingItem && !currentPlayingItem.isVod && !currentPlayingItem.isCatchup && !item.isVod &&
             String(currentPlayingItem.id) !== String(item.id)) {
@@ -6212,6 +6276,7 @@
         api.abortShortEpg();
         stopPlayback();
         currentPlayingItem = item;
+        syncPlayingRowIndicators();
         isPlaybackHealthy = false;
         hasActivePlaybackError = false;
         isPlayingVod = Boolean(item.isVod || item.isEpisode);
@@ -6287,11 +6352,15 @@
             return;
         }
         if (!window._parentalUnlocked && isAdultContentItem(channel)) {
+            if (!currentPlayingItem && !uiVisible) {
+                setOverlayVisible(true);
+            }
             openPinModal(function() {
                 playCatchupProgram(channel, epgProg);
             });
             return;
         }
+        setOverlayVisible(false);
         var mySession = ++playSessionId;
         stopPlayback();
         var catchupItem = {
@@ -6304,6 +6373,7 @@
             epgProgRef: epgProg
         };
         currentPlayingItem = catchupItem;
+        syncPlayingRowIndicators();
         isPlaybackHealthy = false;
         hasActivePlaybackError = false;
         isPlayingVod = false;
@@ -6333,6 +6403,7 @@
             var cleanArchiveUrl = String(url || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim();
             catchupItem.cmd = cleanArchiveUrl;
             setOverlayVisible(false);
+            pushRecentItem(channel);
             playUrl(cleanArchiveUrl, catchupItem, mySession);
         }).catch(function(err) {
             if (mySession !== playSessionId) {
@@ -6928,11 +6999,20 @@
                 var nextLinkNum = currentPlayingItem._cmdIdx + 1;
                 showToast('🔄 Switching to Server Link ' + nextLinkNum + '/' + currentPlayingItem.cmds.length);
                 var linkSession = ++playSessionId;
+                stopPlayback();
+                retryCount = 0;
+                playbackStartedAt = 0;
+                hasActivePlaybackError = false;
+                showOSD(formatOsdTitle(currentPlayingItem), 'CONNECTING LINK ' + nextLinkNum + '/' + currentPlayingItem.cmds.length + '...');
                 api.resolveStream(currentPlayingItem, false).then(function(u) {
                     if (linkSession === playSessionId) {
                         playUrl(String(u || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim(), currentPlayingItem, linkSession);
                     }
-                }).catch(function() {});
+                }).catch(function(err) {
+                    if (linkSession === playSessionId) {
+                        handlePlaybackErrorOrRetry(currentPlayingItem, '', (err && err.message) || 'LINK_ERROR', linkSession);
+                    }
+                });
             }
             return;
         }
@@ -7017,7 +7097,7 @@
             return;
         }
         var baseIdx = (zapList === currentItems) ? itemIdx : 0;
-        if (zapList !== currentItems && currentPlayingItem) {
+        if (currentPlayingItem) {
             for (var i = 0; i < zapList.length; i++) {
                 if (String(zapList[i].id) === String(currentPlayingItem.id)) {
                     baseIdx = i;
@@ -7040,6 +7120,7 @@
         }
         zapTimeout = setTimeout(function() {
             playItem(targetCh);
+            syncLiveChannelCursorOnZap(targetCh);
         }, 80);
     }
 
@@ -7051,10 +7132,13 @@
         }
         miniZapOpen = true;
         miniZapIdx = (zapList === currentItems) ? itemIdx : 0;
-        if (zapList !== currentItems && currentPlayingItem) {
+        if (currentPlayingItem) {
             for (var i = 0; i < zapList.length; i++) {
                 if (String(zapList[i].id) === String(currentPlayingItem.id)) {
                     miniZapIdx = i;
+                    if (zapList === currentItems) {
+                        itemIdx = i;
+                    }
                     break;
                 }
             }
@@ -7086,9 +7170,9 @@
             miniZapSubEl.textContent = (miniZapIdx + 1) + ' / ' + zapList.length;
         }
         renderList(miniZapListEl, zapList, miniZapIdx, function(ch) {
-            var isNowPlaying = currentPlayingItem && String(currentPlayingItem.id) === String(ch.id);
-            return (isNowPlaying ? '▶ ' : '') + (ch.num ? (ch.num + '. ') : '') + ch.name;
+            return (ch.num ? (ch.num + '. ') : '') + ch.name;
         }, 11);
+        syncContainerPlayingIndicators(miniZapListEl);
     }
 
     function cycleAudioTrack() {
@@ -7333,8 +7417,11 @@
                 ev.stopPropagation();
                 if (epgGridChIdx === rowIdx) {
                     closeEpgModal();
-                    setOverlayVisible(false);
+                    if (window._parentalUnlocked || !isAdultContentItem(chRef)) {
+                        setOverlayVisible(false);
+                    }
                     playItem(chRef);
+                    syncLiveChannelCursorOnZap(chRef);
                 } else {
                     epgGridChIdx = rowIdx;
                     epgModalChannel = chRef;
@@ -7356,11 +7443,15 @@
                 }
                 if (progRef.isNow) {
                     closeEpgModal();
-                    setOverlayVisible(false);
+                    if (window._parentalUnlocked || !isAdultContentItem(chRef)) {
+                        setOverlayVisible(false);
+                    }
                     playItem(chRef);
+                    syncLiveChannelCursorOnZap(chRef);
                 } else if (progRef.isPast && chRef.archive) {
                     closeEpgModal();
                     playCatchupProgram(chRef, progRef);
+                    syncLiveChannelCursorOnZap(chRef);
                 } else if (!progRef.isPast && !progRef.isNow) {
                     toggleProgramReminder(chRef, progRef);
                 } else {
@@ -7686,17 +7777,24 @@
             var gProg = getProgramForChannelAtSlot(ch.id, slot.startSec, slot.endSec);
             if (!gProg || gProg.isNow) {
                 closeEpgModal();
-                setOverlayVisible(false);
+                if (window._parentalUnlocked || !isAdultContentItem(ch)) {
+                    setOverlayVisible(false);
+                }
                 playItem(ch);
+                syncLiveChannelCursorOnZap(ch);
             } else if (gProg.isPast && ch.archive) {
                 closeEpgModal();
                 playCatchupProgram(ch, gProg);
+                syncLiveChannelCursorOnZap(ch);
             } else if (!gProg.isPast && !gProg.isNow) {
                 toggleProgramReminder(ch, gProg);
             } else {
                 closeEpgModal();
-                setOverlayVisible(false);
+                if (window._parentalUnlocked || !isAdultContentItem(ch)) {
+                    setOverlayVisible(false);
+                }
                 playItem(ch);
+                syncLiveChannelCursorOnZap(ch);
             }
             return;
         }
@@ -7704,11 +7802,15 @@
         if (prog && epgModalChannel) {
             if (prog.isNow) {
                 closeEpgModal();
-                setOverlayVisible(false);
+                if (window._parentalUnlocked || !isAdultContentItem(epgModalChannel)) {
+                    setOverlayVisible(false);
+                }
                 playItem(epgModalChannel);
+                syncLiveChannelCursorOnZap(epgModalChannel);
             } else if (prog.isPast && epgModalChannel.archive) {
                 closeEpgModal();
                 playCatchupProgram(epgModalChannel, prog);
+                syncLiveChannelCursorOnZap(epgModalChannel);
             } else if (!prog.isPast && !prog.isNow) {
                 toggleProgramReminder(epgModalChannel, prog);
             } else {
@@ -7769,6 +7871,9 @@
         }
         if (pinModalEl) {
             pinModalEl.classList.remove('visible');
+        }
+        if (!currentPlayingItem && !uiVisible) {
+            setOverlayVisible(true);
         }
         if (activeCol !== 'items' && activeCol !== 'info' && activeCol !== 'modes') {
             activeCol = 'cats';
@@ -7852,6 +7957,10 @@
         }
         if (uiVisible) {
             overlayEl.classList.remove('hidden');
+            if (isPosterGridActive() && itemsListEl) {
+                itemsListEl._forceRebuild = true;
+                renderItems();
+            }
         } else {
             overlayEl.classList.add('hidden');
         }
@@ -7881,6 +7990,9 @@
         } else if (currentPlayingItem && String(currentPlayingItem.id) === String(sel.id) && isPlaybackHealthy && !hasActivePlaybackError) {
             setOverlayVisible(false);
         } else {
+            if (window._parentalUnlocked || !isAdultContentItem(sel)) {
+                setOverlayVisible(false);
+            }
             playItem(sel);
         }
     }
@@ -7951,7 +8063,8 @@
     function createListItemRow(container, entry, rowIndex, selectedIdx, labelFn) {
         var row = document.createElement('div');
         var isRowSelected = (rowIndex === selectedIdx);
-        var isRowPlaying = (container === itemsListEl) && isCurrentlyPlayingEntry(entry);
+        var isPlayableList = (container === itemsListEl || container === miniZapListEl);
+        var isRowPlaying = isPlayableList && isCurrentlyPlayingEntry(entry);
         row.className = 'item' + (isRowSelected ? ' selected' : '') + (isRowPlaying ? ' playing' : '');
         row._rowIndex = rowIndex;
         row._isSel = isRowSelected;
@@ -7959,7 +8072,7 @@
         row._entryRef = entry || null;
         row._entryId = (entry && entry.id !== undefined && entry.id !== null) ? String(entry.id) : '';
 
-        if (container === itemsListEl && entry && !entry.isSeason) {
+        if (isPlayableList && entry && !entry.isSeason) {
             var playBadge = document.createElement('span');
             playBadge.className = 'item-play-badge' + (isRowPlaying ? ' visible' : '');
             playBadge.textContent = '▶';
@@ -8120,6 +8233,7 @@
 
         row.onclick = function(ev) {
             ev.stopPropagation();
+            userInteractedSinceBoot = true;
             var rIdx = typeof row._rowIndex === 'number' ? row._rowIndex : rowIndex;
             if (container === modesListEl) {
                 activeCol = 'modes';
@@ -8139,14 +8253,13 @@
             } else if (container === itemsListEl) {
                 activeCol = 'items';
                 updateColumnFocusClasses();
-                if (itemIdx === rIdx) {
-                    activateCurrentItemSelection();
-                } else {
+                if (itemIdx !== rIdx) {
                     itemIdx = rIdx;
                     renderItems();
                     updatePreviewPanel();
                     loadMoreCatalogIfNeeded();
                 }
+                activateCurrentItemSelection();
             } else if (container === epgModalList) {
                 if (epgModalIdx === rIdx) {
                     triggerSelectedEpgProgram();
@@ -8167,14 +8280,22 @@
                         if (chosen.epgProg && !chosen.epgProg.isNow && !chosen.epgProg.isPast) {
                             toggleProgramReminder(chosen.channelRef, chosen.epgProg);
                         } else if (chosen.channelRef) {
-                            setOverlayVisible(false);
+                            if (window._parentalUnlocked || !isAdultContentItem(chosen.channelRef)) {
+                                setOverlayVisible(false);
+                            }
                             playItem(chosen.channelRef);
+                            syncLiveChannelCursorOnZap(chosen.channelRef);
                         }
                     } else if (chosen.isSeries) {
                         jumpToSeriesFromSearch(chosen);
                     } else {
-                        setOverlayVisible(false);
+                        if (window._parentalUnlocked || !isAdultContentItem(chosen)) {
+                            setOverlayVisible(false);
+                        }
                         playItem(chosen);
+                        if (!chosen.isVod && !chosen.isSeries) {
+                            syncLiveChannelCursorOnZap(chosen);
+                        }
                     }
                 }
             } else if (container === tracksListEl) {
@@ -8185,12 +8306,14 @@
                 miniZapIdx = rIdx;
                 var zapClickList = getLiveZapList();
                 if (zapClickList[miniZapIdx]) {
+                    var zapTargetCh = zapClickList[miniZapIdx];
                     if (zapClickList === currentItems) {
                         itemIdx = miniZapIdx;
                         renderItems();
                     }
                     closeMiniZapDrawer();
-                    playItem(zapClickList[miniZapIdx]);
+                    playItem(zapTargetCh);
+                    syncLiveChannelCursorOnZap(zapTargetCh);
                 }
             }
         };
@@ -8215,12 +8338,13 @@
 
     function syncRenderedListSelection(container, start, selectedIdx) {
         var children = container.children;
+        var isPlayableList = (container === itemsListEl || container === miniZapListEl);
         for (var c = 0; c < children.length; c++) {
             var actualIdx = start + c;
             var node = children[c];
             node._rowIndex = actualIdx;
             var isSel = (actualIdx === selectedIdx);
-            var isPlay = (container === itemsListEl && node._entryRef) ? isCurrentlyPlayingEntry(node._entryRef) : false;
+            var isPlay = (isPlayableList && node._entryRef) ? isCurrentlyPlayingEntry(node._entryRef) : false;
             if (node._isSel === isSel && node._isPlay === isPlay) {
                 continue;
             }
@@ -8232,7 +8356,7 @@
                 } else {
                     node.classList.remove('selected');
                 }
-                if (container === itemsListEl) {
+                if (isPlayableList) {
                     if (isPlay) {
                         node.classList.add('playing');
                     } else {
@@ -8537,10 +8661,13 @@
     }
     function createPosterCardNode(entry, index, selectedIdx) {
         var card = document.createElement('div');
-        card.className = 'poster-card' + (index === selectedIdx ? ' selected' : '');
+        var isCardPlaying = isCurrentlyPlayingEntry(entry);
+        card.className = 'poster-card' + (index === selectedIdx ? ' selected' : '') + (isCardPlaying ? ' playing' : '');
+        card._entryRef = entry || null;
         card.setAttribute('data-index', String(index));
         card.onclick = function(e) {
             e.stopPropagation();
+            userInteractedSinceBoot = true;
             itemIdx = index;
             renderUI();
             activateCurrentItemSelection();
@@ -8581,7 +8708,7 @@
         }
 
         var watched = isItemWatched(entry.id);
-        if (isFavItem(entry)) {
+        if (!entry.isSeason && !entry.isEpisode && isFavItem(entry)) {
             var favBadge = document.createElement('div');
             favBadge.className = 'poster-badge-fav';
             favBadge.textContent = '★';
@@ -8672,6 +8799,11 @@
                     children[c].classList.add('selected');
                 } else {
                     children[c].classList.remove('selected');
+                }
+                if (isCurrentlyPlayingEntry(children[c]._entryRef)) {
+                    children[c].classList.add('playing');
+                } else {
+                    children[c].classList.remove('playing');
                 }
             }
             return;
@@ -8770,9 +8902,10 @@
         }
         var hints = [];
         if (epgModalOpen) {
-            hints.push({ key: '▲▼', desc: 'Navigate' });
-            hints.push({ key: 'OK', desc: 'Play / Catch-Up' });
-            hints.push({ key: 'YELLOW', desc: 'Remind' });
+            hints.push({ key: '▲▼◀▶', desc: 'Navigate' });
+            hints.push({ key: 'OK', desc: 'Watch / Catch-Up / Remind' });
+            hints.push({ key: 'GREEN', desc: 'Grid / List' });
+            hints.push({ key: 'YELLOW', desc: 'EPG Offset' });
             hints.push({ key: 'BACK', desc: 'Close' });
         } else if (searchOpen) {
             hints.push({ key: '▲▼◀▶', desc: 'Navigate' });
@@ -8808,7 +8941,7 @@
                 hints.push({ key: '▶', desc: 'Actions' });
             } else {
                 hints.push({ key: 'YELLOW', desc: 'Favorite' });
-                hints.push({ key: 'GREEN', desc: 'Audio/Subs' });
+                hints.push({ key: 'GREEN', desc: 'Search' });
                 hints.push({ key: '▶', desc: 'Actions' });
             }
         } else if (activeCol === 'info') {
@@ -10131,7 +10264,8 @@
         });
     }
     function buildEpisodeItemFromSeason(seasonObj, epEntry, idx) {
-        var parentId = (seasonObj && seasonObj.parentSeries && seasonObj.parentSeries.id) ? String(seasonObj.parentSeries.id) : 'ser';
+        var parentSeriesObj = (seasonObj && seasonObj.parentSeries) ? seasonObj.parentSeries : null;
+        var parentId = (parentSeriesObj && parentSeriesObj.id) ? String(parentSeriesObj.id) : 'ser';
         var sId = seasonObj && seasonObj.id !== undefined ? String(seasonObj.id) : '1';
         if (epEntry && typeof epEntry === 'object' && epEntry.isEpisode) {
             if (!epEntry.seasonId) {
@@ -10139,6 +10273,9 @@
             }
             if (!epEntry.seriesId) {
                 epEntry.seriesId = parentId;
+            }
+            if (!epEntry.parentSeries && parentSeriesObj) {
+                epEntry.parentSeries = parentSeriesObj;
             }
             return epEntry;
         }
@@ -10152,6 +10289,7 @@
             seriesNum: epNum,
             seasonId: sId,
             seriesId: parentId,
+            parentSeries: parentSeriesObj,
             isEpisode: true,
             isVod: true,
             isSeries: true,
@@ -10181,6 +10319,7 @@
                 }
                 activeSeriesSeasons = Array.isArray(seasons) ? seasons.slice() : [];
                 seriesStack.push({
+                    parentSeries: item,
                     rawItems: rawItems.slice(),
                     itemIdx: itemIdx,
                     itemFilterText: itemFilterText,
@@ -11104,7 +11243,7 @@
                     method: 'GET'
                 }).catch(function() {});
             }
-            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProfileId) + '&action=delete', {
+            proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent(activeProfileId) + '&action=delete&mac=' + encodeURIComponent((curProf && curProf.mac) || ''), {
                 method: 'GET'
             }).catch(function() {});
         }
@@ -11125,6 +11264,48 @@
         if (warmPreloadTimer) {
             clearTimeout(warmPreloadTimer);
             warmPreloadTimer = null;
+        }
+        if (catHoverTimer) {
+            clearTimeout(catHoverTimer);
+            catHoverTimer = null;
+        }
+        if (previewEpgTimeout) {
+            clearTimeout(previewEpgTimeout);
+            previewEpgTimeout = null;
+        }
+        if (previewDebounceTimer) {
+            clearTimeout(previewDebounceTimer);
+            previewDebounceTimer = null;
+        }
+        if (posterLoadTimer) {
+            clearTimeout(posterLoadTimer);
+            posterLoadTimer = null;
+        }
+        if (numTimeout) {
+            clearTimeout(numTimeout);
+            numTimeout = null;
+            numBuffer = '';
+            if (numOsdEl) {
+                numOsdEl.classList.remove('visible');
+            }
+        }
+        if (searchOpen) {
+            closeSearch();
+        }
+        if (filterOpen) {
+            closeFilterModal();
+        }
+        if (epgModalOpen) {
+            closeEpgModal();
+        }
+        if (pinModalOpen) {
+            closePinModal();
+        }
+        if (tracksModalOpen) {
+            closeTracksModal();
+        }
+        if (miniZapOpen) {
+            closeMiniZapDrawer();
         }
         invalidateFavCaches();
         api.resetProviderCaches();
@@ -11406,11 +11587,20 @@
                 }
             }, 20);
         }
-        if (vodCats.length === 0) {
-            api.fetchVodCategories().then(function(cats) { vodCats = cats || []; }).catch(function() {});
+        var searchProfId = activeProfileId;
+        if (vodCats.length <= 5) {
+            api.fetchVodCategories().then(function(cats) {
+                if (activeProfileId === searchProfId && Array.isArray(cats) && cats.length > 5 && vodCats.length <= 5) {
+                    vodCats = cats;
+                }
+            }).catch(function() {});
         }
-        if (seriesCats.length === 0) {
-            api.fetchSeriesCategories().then(function(cats) { seriesCats = cats || []; }).catch(function() {});
+        if (seriesCats.length <= 5) {
+            api.fetchSeriesCategories().then(function(cats) {
+                if (activeProfileId === searchProfId && Array.isArray(cats) && cats.length > 5 && seriesCats.length <= 5) {
+                    seriesCats = cats;
+                }
+            }).catch(function() {});
         }
     }
     function closeSearch() {
@@ -11967,6 +12157,22 @@
         });
     }
 
+    function syncLiveChannelCursorOnZap(targetCh) {
+        if (!targetCh || getActiveContentModeId() !== 'live') {
+            return;
+        }
+        for (var i = 0; i < currentItems.length; i++) {
+            if (currentItems[i] && String(currentItems[i].id) === String(targetCh.id)) {
+                itemIdx = i;
+                renderItems();
+                if (uiVisible) {
+                    updatePreviewPanel();
+                }
+                break;
+            }
+        }
+    }
+
     function handleNumInput(digit) {
         if (digit === 0 && numBuffer === '') {
             if (previousLiveChannel) {
@@ -11974,6 +12180,7 @@
                     closeMiniZapDrawer();
                 }
                 playItem(previousLiveChannel);
+                syncLiveChannelCursorOnZap(previousLiveChannel);
             }
             return;
         }
@@ -12000,6 +12207,7 @@
                     closeMiniZapDrawer();
                 }
                 playItem(fastMatch);
+                syncLiveChannelCursorOnZap(fastMatch);
                 return;
             }
             for (var i = 0; i < allChannels.length; i++) {
@@ -12008,6 +12216,7 @@
                         closeMiniZapDrawer();
                     }
                     playItem(allChannels[i]);
+                    syncLiveChannelCursorOnZap(allChannels[i]);
                     break;
                 }
             }
@@ -12227,6 +12436,9 @@
                         renderModes();
                         updateColumnFocusClasses();
                         updateSettingsFocus();
+                    } else if (isBlue) {
+                        closeSettings();
+                        cycleActivePortalProfile();
                     } else if (isEnter) {
                         if (modes[modeIdx] && modes[modeIdx].id === 'settings') {
                             activeCol = 'settings';
@@ -12528,14 +12740,22 @@
                             if (chosen.epgProg && !chosen.epgProg.isNow && !chosen.epgProg.isPast) {
                                 toggleProgramReminder(chosen.channelRef, chosen.epgProg);
                             } else if (chosen.channelRef) {
-                                setOverlayVisible(false);
+                                if (window._parentalUnlocked || !isAdultContentItem(chosen.channelRef)) {
+                                    setOverlayVisible(false);
+                                }
                                 playItem(chosen.channelRef);
+                                syncLiveChannelCursorOnZap(chosen.channelRef);
                             }
                         } else if (chosen.isSeries) {
                             jumpToSeriesFromSearch(chosen);
                         } else {
-                            setOverlayVisible(false);
+                            if (window._parentalUnlocked || !isAdultContentItem(chosen)) {
+                                setOverlayVisible(false);
+                            }
                             playItem(chosen);
+                            if (!chosen.isVod && !chosen.isSeries) {
+                                syncLiveChannelCursorOnZap(chosen);
+                            }
                         }
                     }
                 }
@@ -12662,12 +12882,14 @@
                     miniZapIdx = (miniZapIdx + 1) % activeZapList.length;
                     renderMiniZapList();
                 } else if (isEnter && activeZapList[miniZapIdx]) {
+                    var selectedZapCh = activeZapList[miniZapIdx];
                     if (activeZapList === currentItems) {
                         itemIdx = miniZapIdx;
                         renderItems();
                     }
                     closeMiniZapDrawer();
-                    playItem(activeZapList[miniZapIdx]);
+                    playItem(selectedZapCh);
+                    syncLiveChannelCursorOnZap(selectedZapCh);
                 }
                 return;
             }
@@ -12686,8 +12908,17 @@
             }
             if (isStop && currentPlayingItem) {
                 e.preventDefault();
+                if (isPlayingVod && currentPlayingItem.id && vodCurrentMs > 15000 && vodDurationMs > 0) {
+                    saveResumeTime(currentPlayingItem.id, vodCurrentMs / 1000, vodDurationMs / 1000);
+                }
+                currentPlayingItem = null;
+                isPlayingVod = false;
+                isPlayingCatchup = false;
+                isPaused = false;
                 stopPlayback();
                 setOverlayVisible(true);
+                renderItems();
+                updatePreviewPanel();
                 return;
             }
             if (isRewind && (isPlayingVod || isPlayingCatchup)) {
@@ -12798,7 +13029,11 @@
                 return;
             }
             if (isBlue) {
-                openFilterModal(activeCol === 'cats' ? 'cats' : 'items');
+                if (activeCol === 'modes') {
+                    cycleActivePortalProfile();
+                } else {
+                    openFilterModal(activeCol === 'cats' ? 'cats' : 'items');
+                }
                 return;
             }
             if (isLeft) {
