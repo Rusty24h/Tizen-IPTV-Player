@@ -941,6 +941,11 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
             activeVideoStreamKey = streamKey;
         }
         upRes.on('error', function(uErr) {
+            if (telemetryFlushTimer) {
+                clearTimeout(telemetryFlushTimer);
+                telemetryFlushTimer = null;
+            }
+            flushAccumulatedBytes();
             recordStreamTelemetry(streamKey, streamUrl, { err: uErr });
             try {
                 clientRes.end();
