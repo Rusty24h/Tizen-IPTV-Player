@@ -350,7 +350,6 @@ body {
 }
 .item-num-pill {
     font-family: Consolas, "Courier New", monospace;
-    font-variant-numeric: tabular-nums;
     min-width: 46px;
     text-align: center;
     font-size: 17px;
@@ -748,7 +747,6 @@ body {
 .osd-ch-num {
     display: none;
     font-family: Consolas, "Courier New", monospace;
-    font-variant-numeric: tabular-nums;
     font-size: 24px;
     font-weight: 800;
     color: #93c5fd;
