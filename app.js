@@ -699,7 +699,14 @@
         showSubtitleCueNow(cleaned, adjustedDur);
     }
 
+    var lastIndexedChannelsRef = null;
+    var lastIndexedChannelsLen = -1;
     function rebuildGenreChannelCounts() {
+        if (lastIndexedChannelsRef === allChannels && lastIndexedChannelsLen === allChannels.length) {
+            return;
+        }
+        lastIndexedChannelsRef = allChannels;
+        lastIndexedChannelsLen = allChannels.length;
         var counts = { '*': allChannels.length };
         var byGenre = {};
         var byId = {};
@@ -1005,39 +1012,110 @@
         return base + '/series/' + user + '/' + pass + '/' + id + '.' + (cleanExt || 'mp4');
     }
 
+    var xtreamB64DecodeCache = {};
+    var xtreamB64DecodeCount = 0;
     function decodeXtreamBase64Text(input) {
         var str = String(input || '').trim();
         if (!str || str.indexOf(' ') !== -1 || str.length < 4 || (str.length % 4) !== 0) {
             return str;
         }
+        if (xtreamB64DecodeCache[str] !== undefined) {
+            return xtreamB64DecodeCache[str];
+        }
         if (!/^[A-Za-z0-9+\/]+={0,2}$/.test(str)) {
             return str;
         }
+        var result = str;
         try {
             var raw = window.atob(str);
-            var hexPct = '';
-            for (var i = 0; i < raw.length; i++) {
-                var hex = raw.charCodeAt(i).toString(16);
-                hexPct += '%' + (hex.length < 2 ? '0' : '') + hex;
-            }
             var out = '';
-            try {
-                out = decodeURIComponent(hexPct);
-            } catch (eUtf) {
-                return str;
-            }
-            if (!out || /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\uFFFD]/.test(out)) {
-                return str;
-            }
-            if (str.indexOf('=') === -1 && /^[A-Za-z]+$/.test(str)) {
-                if (!/^[A-Za-z0-9 .,:;'?!()\-&\u00A0-\uFFFF]+$/.test(out)) {
-                    return str;
+            var i = 0;
+            var len = raw.length;
+            var validUtf8 = true;
+            while (i < len) {
+                var b1 = raw.charCodeAt(i++) % 256;
+                if (b1 < 128) {
+                    if ((b1 < 32 && b1 !== 9 && b1 !== 10 && b1 !== 13) || b1 === 127) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    out += String.fromCharCode(b1);
+                } else if (b1 >= 192 && b1 < 224) {
+                    if (i >= len) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    var b2 = raw.charCodeAt(i++) % 256;
+                    if (b2 < 128 || b2 >= 192) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    var cp2 = ((b1 - 192) * 64) + (b2 - 128);
+                    if (cp2 < 128 || (cp2 >= 128 && cp2 <= 159)) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    out += String.fromCharCode(cp2);
+                } else if (b1 >= 224 && b1 < 240) {
+                    if (i + 1 >= len) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    var b3a = raw.charCodeAt(i++) % 256;
+                    var b3b = raw.charCodeAt(i++) % 256;
+                    if (b3a < 128 || b3a >= 192 || b3b < 128 || b3b >= 192) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    var cp3 = ((b1 - 224) * 4096) + ((b3a - 128) * 64) + (b3b - 128);
+                    if (cp3 < 2048 || (cp3 >= 0xD800 && cp3 <= 0xDFFF) || cp3 === 0xFFFD) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    out += String.fromCharCode(cp3);
+                } else if (b1 >= 240 && b1 < 248) {
+                    if (i + 2 >= len) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    var b4a = raw.charCodeAt(i++) % 256;
+                    var b4b = raw.charCodeAt(i++) % 256;
+                    var b4c = raw.charCodeAt(i++) % 256;
+                    if (b4a < 128 || b4a >= 192 || b4b < 128 || b4b >= 192 || b4c < 128 || b4c >= 192) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    var cp4 = ((b1 - 240) * 262144) + ((b4a - 128) * 4096) + ((b4b - 128) * 64) + (b4c - 128);
+                    if (cp4 < 0x10000 || cp4 > 0x10FFFF) {
+                        validUtf8 = false;
+                        break;
+                    }
+                    cp4 -= 0x10000;
+                    out += String.fromCharCode(0xD800 + Math.floor(cp4 / 1024), 0xDC00 + (cp4 % 1024));
+                } else {
+                    validUtf8 = false;
+                    break;
                 }
             }
-            return out;
+            if (validUtf8 && out) {
+                if (str.indexOf('=') === -1 && /^[A-Za-z]+$/.test(str)) {
+                    if (/^[A-Za-z0-9 .,:;'?!()\-&\u00A0-\uFFFF]+$/.test(out)) {
+                        result = out;
+                    }
+                } else {
+                    result = out;
+                }
+            }
         } catch (ex) {
-            return str;
+            result = str;
         }
+        if (xtreamB64DecodeCount >= 1000) {
+            xtreamB64DecodeCache = {};
+            xtreamB64DecodeCount = 0;
+        }
+        xtreamB64DecodeCache[str] = result;
+        xtreamB64DecodeCount++;
+        return result;
     }
 
     function parseM3uAttributesMap(attrLine) {
@@ -1179,6 +1257,8 @@
                             cmd: streamUrl,
                             desc: seriesTitle + ' — Season ' + seasonNum,
                             poster: logo || grp.seriesItem.poster || '',
+                            genreId: sCatId,
+                            censored: isCensored ? 1 : 0,
                             episodes: [],
                             parentSeries: grp.seriesItem,
                             isSeason: true,
@@ -1204,6 +1284,7 @@
                         seriesNum: resolvedEpNum,
                         seasonId: sKey,
                         seriesId: grp.seriesItem.id,
+                        parentSeries: grp.seriesItem,
                         censored: isCensored ? 1 : 0,
                         isEpisode: true,
                         isVod: true,
@@ -2659,22 +2740,33 @@
                         rebuildGenreChannelCounts();
                         if (getActiveContentModeId() === 'live') {
                             rawCats = liveGenres;
-                            var freshMap = {};
-                            for (var i = 0; i < allChannels.length; i++) {
-                                freshMap[String(allChannels[i].id)] = allChannels[i];
-                            }
-                            for (var j = 0; j < rawItems.length; j++) {
-                                var updated = freshMap[String(rawItems[j].id)];
-                                if (updated) {
-                                    rawItems[j].cmd = updated.cmd;
-                                    rawItems[j].useTmpLink = updated.useTmpLink;
-                                    if (updated.cmds && Array.isArray(updated.cmds)) {
-                                        rawItems[j].cmds = updated.cmds;
+                            catsFilterMemo = null;
+                            var activeLiveCat = currentCats[catIdx];
+                            var activeLiveCatId = activeLiveCat ? String(activeLiveCat.id) : '*';
+                            if (activeLiveCatId === '*') {
+                                rawItems = allChannels;
+                            } else if (genreChannelsMap[activeLiveCatId]) {
+                                rawItems = genreChannelsMap[activeLiveCatId];
+                            } else {
+                                var freshMap = {};
+                                for (var i = 0; i < allChannels.length; i++) {
+                                    freshMap[String(allChannels[i].id)] = allChannels[i];
+                                }
+                                for (var j = 0; j < rawItems.length; j++) {
+                                    var updated = freshMap[String(rawItems[j].id)];
+                                    if (updated) {
+                                        rawItems[j].cmd = updated.cmd;
+                                        rawItems[j].useTmpLink = updated.useTmpLink;
+                                        if (updated.cmds && Array.isArray(updated.cmds)) {
+                                            rawItems[j].cmds = updated.cmds;
+                                        }
                                     }
                                 }
                             }
+                            itemsFilterMemo = null;
                             applyColumnFilters();
                             renderCats();
+                            renderItems();
                         }
                     }
                 }).catch(function() {});
@@ -3518,11 +3610,14 @@
                             cmd: buildXtreamDirectStreamUrl(xAuthSeries, 'series', ep.id, ext),
                             directUrl: true,
                             useTmpLink: 0,
+                            genreId: seriesItem.genreId || '*',
+                            censored: seriesItem.censored ? 1 : 0,
                             desc: String((ep.info && ep.info.plot) || seriesItem.desc || ''),
                             poster: String((ep.info && ep.info.movie_image) || seriesItem.poster || ''),
                             seriesNum: epNum,
                             seasonId: String(sKey),
                             seriesId: String(seriesItem.id),
+                            parentSeries: seriesItem,
                             isEpisode: true,
                             isVod: true,
                             isSeries: true,
@@ -3535,6 +3630,8 @@
                         cmd: '',
                         desc: String(seriesItem.desc || ''),
                         poster: String(seriesItem.poster || ''),
+                        genreId: seriesItem.genreId || '*',
+                        censored: seriesItem.censored ? 1 : 0,
                         episodes: builtEpisodes,
                         parentSeries: seriesItem,
                         isSeason: true,
@@ -3569,6 +3666,8 @@
                     cmd: String(row.cmd || seriesItem.cmd || ''),
                     desc: String(row.description || seriesItem.desc || ''),
                     poster: String(row.screenshot_uri || seriesItem.poster || ''),
+                    genreId: seriesItem.genreId || '*',
+                    censored: seriesItem.censored ? 1 : 0,
                     episodes: epArray,
                     parentSeries: seriesItem,
                     isSeason: true,
@@ -4033,6 +4132,8 @@
         }
         return getScopedJsonWithLegacyFallback(baseKey, []);
     }
+    var catsFilterMemo = null;
+    var itemsFilterMemo = null;
     function invalidateFavCaches() {
         favLiveCache = null;
         favVodCache = null;
@@ -4046,6 +4147,8 @@
         hiddenCatsMapCache = {};
         hiddenItemsCache = {};
         hiddenItemsMapCache = {};
+        catsFilterMemo = null;
+        itemsFilterMemo = null;
         channelPrefsCache = null;
         recLiveCache = null;
         recVodCache = null;
@@ -4352,6 +4455,9 @@
             if (epgViewMode === 'grid') {
                 renderEpgGridView();
             } else {
+                if (epgModalList) {
+                    epgModalList._forceRebuild = true;
+                }
                 renderEpgModalList();
             }
         }
@@ -4673,6 +4779,7 @@
             poster: item.poster || item.logo || '',
             logo: item.logo || '',
             archive: item.archive || 0,
+            genreId: item.genreId || '*',
             censored: item.censored || 0,
             isVod: Boolean(item.isVod),
             isSeries: Boolean(item.isSeries),
@@ -4692,6 +4799,8 @@
                 cmd: item.nextEpSnapshot.cmd,
                 directUrl: Boolean(item.nextEpSnapshot.directUrl),
                 useTmpLink: item.nextEpSnapshot.useTmpLink || 0,
+                genreId: item.nextEpSnapshot.genreId || item.genreId || '*',
+                censored: item.nextEpSnapshot.censored || item.censored || 0,
                 desc: item.nextEpSnapshot.desc || '',
                 poster: item.nextEpSnapshot.poster || '',
                 seriesNum: item.nextEpSnapshot.seriesNum,
@@ -4819,6 +4928,7 @@
         }
         pinnedCatsCache[mId] = pinned;
         pinnedCatsMapCache[mId] = null;
+        catsFilterMemo = null;
         safeSetStorage(getProfileScopedKey('pinned_cats_' + mId), JSON.stringify(pinned));
         applyColumnFilters();
         for (var c = 0; c < currentCats.length; c++) {
@@ -4882,6 +4992,8 @@
         }
         hiddenCatsCache[mId] = hidden;
         hiddenCatsMapCache[mId] = null;
+        catsFilterMemo = null;
+        itemsFilterMemo = null;
         safeSetStorage(getProfileScopedKey('hidden_cats_' + mId), JSON.stringify(hidden));
         applyColumnFilters();
         if (catsListEl) {
@@ -4941,6 +5053,7 @@
         }
         hiddenItemsCache[mId] = hidden;
         hiddenItemsMapCache[mId] = null;
+        itemsFilterMemo = null;
         safeSetStorage(getProfileScopedKey('hidden_items_' + mId), JSON.stringify(hidden));
         applyColumnFilters();
         if (itemsListEl) {
@@ -4950,6 +5063,8 @@
     }
     function toggleShowHiddenMode() {
         showHiddenEntries = !showHiddenEntries;
+        catsFilterMemo = null;
+        itemsFilterMemo = null;
         showToast(showHiddenEntries ? '👁 Showing Hidden Categories & Channels' : '🚫 Hiding Filtered Categories & Channels');
         applyColumnFilters();
         if (catsListEl) {
@@ -5025,9 +5140,15 @@
             if (remMs <= 0) {
                 clearInterval(sleepTimerInterval);
                 sleepTimerInterval = null;
+                if (isPlayingVod && currentPlayingItem && currentPlayingItem.id && vodCurrentMs > 15000 && vodDurationMs > 0) {
+                    saveResumeTime(currentPlayingItem.id, vodCurrentMs / 1000, vodDurationMs / 1000);
+                }
                 sleepTimerMinutes = 0;
                 currentPlayingItem = null;
                 stopPlayback();
+                isPlayingVod = false;
+                isPlayingCatchup = false;
+                isPaused = false;
                 showToast('⏱ Sleep Timer reached — Stopping playback');
                 try {
                     if (typeof tizen !== 'undefined' && tizen.application) {
@@ -5076,6 +5197,9 @@
             map[key] = { pos: newPos, dur: Math.floor(durationSec), ts: Date.now() };
         }
         vodResumeCache = map;
+        if (catsListEl) {
+            catsListEl._forceRebuild = true;
+        }
         if (itemsListEl) {
             itemsListEl._forceRebuild = true;
         }
@@ -5101,6 +5225,9 @@
         var map = getWatchedMap();
         map[String(itemId)] = Date.now();
         watchedLookupCache = map;
+        if (catsListEl) {
+            catsListEl._forceRebuild = true;
+        }
         if (itemsListEl) {
             itemsListEl._forceRebuild = true;
         }
@@ -6068,6 +6195,9 @@
                             saveResumeTime(item.id, vodDurationMs / 1000, vodDurationMs / 1000);
                         }
                     }
+                    isPlayingVod = false;
+                    isPlayingCatchup = false;
+                    isPaused = false;
                     var nextEp = item && item.isEpisode ? findNextEpisode(item) : null;
                     if (nextEp) {
                         advanceToNextEpisode(nextEp);
@@ -6286,7 +6416,11 @@
         vodCurrentMs = 0;
         retryCount = 0;
         playbackStartedAt = 0;
-        item._cmdIdx = 0;
+        if (item._keepCmdIdx) {
+            delete item._keepCmdIdx;
+        } else {
+            item._cmdIdx = 0;
+        }
         item._altFormatIdx = 0;
         audioTracks = [];
         textTracks = [];
@@ -6994,12 +7128,27 @@
         }
         if (entry.kind === 'backup_link') {
             closeTracksModal();
+            if (!currentPlayingItem && currentItems[itemIdx] && Array.isArray(currentItems[itemIdx].cmds) && currentItems[itemIdx].cmds.length > 1) {
+                var selLinkItem = currentItems[itemIdx];
+                selLinkItem._cmdIdx = ((selLinkItem._cmdIdx || 0) + 1) % selLinkItem.cmds.length;
+                selLinkItem._keepCmdIdx = true;
+                showToast('🔄 Switching to Server Link ' + (selLinkItem._cmdIdx + 1) + '/' + selLinkItem.cmds.length);
+                playItem(selLinkItem);
+                return;
+            }
             if (currentPlayingItem && Array.isArray(currentPlayingItem.cmds) && currentPlayingItem.cmds.length > 1) {
                 currentPlayingItem._cmdIdx = ((currentPlayingItem._cmdIdx || 0) + 1) % currentPlayingItem.cmds.length;
                 var nextLinkNum = currentPlayingItem._cmdIdx + 1;
                 showToast('🔄 Switching to Server Link ' + nextLinkNum + '/' + currentPlayingItem.cmds.length);
                 var linkSession = ++playSessionId;
                 stopPlayback();
+                isPaused = false;
+                currentPlaybackSpeed = 1;
+                audioTracks = [];
+                textTracks = [];
+                audioIdx = 0;
+                textIdx = -1;
+                hasAppliedSavedTrackPrefs = false;
                 retryCount = 0;
                 playbackStartedAt = 0;
                 hasActivePlaybackError = false;
@@ -7078,17 +7227,41 @@
         };
     }
 
+    function filterAllowedLiveChannels(list) {
+        if (!Array.isArray(list) || list.length === 0) {
+            return [];
+        }
+        if (window._parentalUnlocked && showHiddenEntries) {
+            return list;
+        }
+        var out = null;
+        for (var i = 0; i < list.length; i++) {
+            var ch = list[i];
+            var disallow = !ch || ch.isVod || ch.isSeries || ch.isSeason ||
+                (!window._parentalUnlocked && isAdultContentItem(ch)) ||
+                (!showHiddenEntries && (isHiddenItem('live', ch.id) || (ch.genreId && isHiddenCategory('live', ch.genreId))));
+            if (disallow) {
+                if (!out) {
+                    out = list.slice(0, i);
+                }
+            } else if (out) {
+                out.push(ch);
+            }
+        }
+        return out || list;
+    }
+
     function getLiveZapList() {
         var isLiveModeActive = modes[modeIdx] && modes[modeIdx].id === 'live' &&
             currentItems.length > 0 && currentItems[0] && !currentItems[0].isVod && !currentItems[0].isSeries && !currentItems[0].isSeason;
         if (isLiveModeActive) {
-            return currentItems;
+            return filterAllowedLiveChannels(currentItems);
         }
         if (currentPlayingItem && currentPlayingItem.genreId && genreChannelsMap[String(currentPlayingItem.genreId)] &&
             genreChannelsMap[String(currentPlayingItem.genreId)].length > 0) {
-            return genreChannelsMap[String(currentPlayingItem.genreId)];
+            return filterAllowedLiveChannels(genreChannelsMap[String(currentPlayingItem.genreId)]);
         }
-        return allChannels;
+        return filterAllowedLiveChannels(allChannels);
     }
 
     function stepFullscreenLiveChannel(delta) {
@@ -7611,6 +7784,10 @@
             });
         }
     }
+    function getFilteredEpgChannelPool() {
+        var rawPool = (getActiveContentModeId() === 'live' && currentItems.length > 0) ? currentItems : allChannels;
+        return filterAllowedLiveChannels(rawPool);
+    }
     function toggleEpgModalViewMode() {
         if (!epgModalOpen) {
             return;
@@ -7618,7 +7795,7 @@
         epgViewMode = (epgViewMode === 'grid') ? 'list' : 'grid';
         syncEpgModalViewModeUI();
         if (epgViewMode === 'grid') {
-            var listSource = (getActiveContentModeId() === 'live' && currentItems.length > 0) ? currentItems : allChannels;
+            var listSource = getFilteredEpgChannelPool();
             epgGridChannels = listSource.slice(0, 200);
             epgGridChIdx = 0;
             if (epgModalChannel) {
@@ -7690,7 +7867,7 @@
         }
         updateContextualHelpBar();
         if (epgViewMode === 'grid') {
-            var listSource = (getActiveContentModeId() === 'live' && currentItems.length > 0) ? currentItems : allChannels;
+            var listSource = getFilteredEpgChannelPool();
             epgGridChannels = listSource.slice(0, 200);
             epgGridChIdx = 0;
             for (var c = 0; c < epgGridChannels.length; c++) {
@@ -7730,6 +7907,9 @@
                     break;
                 }
             }
+            if (epgModalList) {
+                epgModalList._forceRebuild = true;
+            }
             renderEpgModalList();
         }).catch(function() {
             if (!epgModalOpen || !epgModalChannel || String(epgModalChannel.id) !== String(baseCh.id)) {
@@ -7749,7 +7929,7 @@
         updateContextualHelpBar();
     }
     function stepEpgModalChannel(delta) {
-        var pool = (getActiveContentModeId() === 'live' && currentItems.length > 0) ? currentItems : allChannels;
+        var pool = getFilteredEpgChannelPool();
         if (!pool || pool.length <= 1 || !epgModalChannel) {
             return;
         }
@@ -7822,9 +8002,6 @@
     function renderEpgModalList() {
         if (!epgModalList) {
             return;
-        }
-        if (epgModalList) {
-            epgModalList._forceRebuild = true;
         }
         renderList(epgModalList, epgModalItems, epgModalIdx, function(p) {
             var prefix = '';
@@ -7960,6 +8137,12 @@
             if (isPosterGridActive() && itemsListEl) {
                 itemsListEl._forceRebuild = true;
                 renderItems();
+            } else if (itemsListEl && itemsListEl._forceRebuild) {
+                renderItems();
+            }
+            if (catsListEl && catsListEl._forceRebuild) {
+                renderCats();
+                updatePreviewPanel();
             }
         } else {
             overlayEl.classList.add('hidden');
@@ -8010,15 +8193,29 @@
         }
         var winCount = endIdx - startIdx;
         if (totalLen <= winCount || totalLen <= 0) {
-            thumb.style.opacity = '0';
+            if (thumb._lastOpacity !== '0') {
+                thumb.style.opacity = '0';
+                thumb._lastOpacity = '0';
+            }
             return;
         }
         var thumbHeightPct = Math.max(8, Math.min(82, (winCount / totalLen) * 85));
         var maxScrollStart = Math.max(1, totalLen - winCount);
         var thumbTopPct = 8 + Math.min(84 - thumbHeightPct, (startIdx / maxScrollStart) * (84 - thumbHeightPct));
-        thumb.style.top = thumbTopPct.toFixed(1) + '%';
-        thumb.style.height = thumbHeightPct.toFixed(1) + '%';
-        thumb.style.opacity = '0.65';
+        var topStr = thumbTopPct.toFixed(1) + '%';
+        var heightStr = thumbHeightPct.toFixed(1) + '%';
+        if (thumb._lastTop !== topStr) {
+            thumb.style.top = topStr;
+            thumb._lastTop = topStr;
+        }
+        if (thumb._lastHeight !== heightStr) {
+            thumb.style.height = heightStr;
+            thumb._lastHeight = heightStr;
+        }
+        if (thumb._lastOpacity !== '0.65') {
+            thumb.style.opacity = '0.65';
+            thumb._lastOpacity = '0.65';
+        }
     }
 
     function getChannelStationMonogram(name) {
@@ -8503,73 +8700,134 @@
 
     function applyColumnFilters() {
         var curModeId = getActiveContentModeId();
+        var pinnedIds = getPinnedCatIds(curModeId);
         var pinnedLookup = getPinnedCatMap(curModeId);
         var hiddenCatIds = getHiddenCatIds(curModeId);
         var hiddenCatLookup = getHiddenCatMap(curModeId);
         var hiddenItemIds = getHiddenItemIds(curModeId);
         var hiddenItemLookup = getHiddenItemMap(curModeId);
-        var builtInCats = [];
-        var pinnedCats = [];
-        var regularCats = [];
-        for (var r = 0; r < rawCats.length; r++) {
-            var rc = rawCats[r];
-            if (!rc) {
-                continue;
-            }
-            var rcIdStr = String(rc.id);
-            var isBuiltIn = (rcIdStr === '*' || rcIdStr === 'new' || rcIdStr === 'cont' || rcIdStr === 'fav' || rcIdStr === 'rec');
-            if (!isBuiltIn && !showHiddenEntries && hiddenCatLookup[rcIdStr]) {
-                continue;
-            }
-            if (isBuiltIn) {
-                builtInCats.push(rc);
-            } else if (pinnedLookup[rcIdStr]) {
-                pinnedCats.push(rc);
-            } else {
-                regularCats.push(rc);
-            }
-        }
-        var orderedRawCats = builtInCats.concat(pinnedCats).concat(regularCats);
         var cFilter = (catFilterText || '').toLowerCase().trim();
-        if (cFilter) {
-            currentCats = orderedRawCats.filter(function(c) {
-                return getCatLowerTitle(c).indexOf(cFilter) !== -1;
-            });
-        } else {
-            currentCats = orderedRawCats;
-        }
-        var baseItems = rawItems;
-        var hasHiddenFilter = !showHiddenEntries && (hiddenItemIds.length > 0 || hiddenCatIds.length > 0);
-        if (hasHiddenFilter) {
-            baseItems = [];
-            for (var bi = 0; bi < rawItems.length; bi++) {
-                var itemCandidate = rawItems[bi];
-                if (!itemCandidate) {
-                    continue;
-                }
-                if (hiddenItemLookup[String(itemCandidate.id)]) {
-                    continue;
-                }
-                if (itemCandidate.genreId && hiddenCatLookup[String(itemCandidate.genreId)]) {
-                    continue;
-                }
-                baseItems.push(itemCandidate);
-            }
-        }
         var iFilter = (itemFilterText || '').toLowerCase().trim();
-        if (iFilter) {
-            currentItems = baseItems.filter(function(it) {
-                return getItemLowerName(it).indexOf(iFilter) !== -1;
-            });
-        } else if (currentSort !== 'added') {
-            currentItems = baseItems.slice();
+
+        if (catsFilterMemo &&
+            catsFilterMemo.rawRef === rawCats &&
+            catsFilterMemo.rawLen === rawCats.length &&
+            catsFilterMemo.modeId === curModeId &&
+            catsFilterMemo.cFilter === cFilter &&
+            catsFilterMemo.showHidden === showHiddenEntries &&
+            catsFilterMemo.pinnedRef === pinnedIds &&
+            catsFilterMemo.pinnedLen === pinnedIds.length &&
+            catsFilterMemo.hiddenCatsRef === hiddenCatIds &&
+            catsFilterMemo.hiddenCatsLen === hiddenCatIds.length) {
+            currentCats = catsFilterMemo.result;
         } else {
-            currentItems = baseItems;
+            var builtInCats = [];
+            var pinnedCats = [];
+            var regularCats = [];
+            for (var r = 0; r < rawCats.length; r++) {
+                var rc = rawCats[r];
+                if (!rc) {
+                    continue;
+                }
+                var rcIdStr = String(rc.id);
+                var isBuiltIn = (rcIdStr === '*' || rcIdStr === 'new' || rcIdStr === 'cont' || rcIdStr === 'fav' || rcIdStr === 'rec');
+                if (!isBuiltIn && !showHiddenEntries && hiddenCatLookup[rcIdStr]) {
+                    continue;
+                }
+                if (isBuiltIn) {
+                    builtInCats.push(rc);
+                } else if (pinnedLookup[rcIdStr]) {
+                    pinnedCats.push(rc);
+                } else {
+                    regularCats.push(rc);
+                }
+            }
+            var orderedRawCats = builtInCats.concat(pinnedCats).concat(regularCats);
+            if (cFilter) {
+                currentCats = orderedRawCats.filter(function(c) {
+                    return getCatLowerTitle(c).indexOf(cFilter) !== -1;
+                });
+            } else {
+                currentCats = orderedRawCats;
+            }
+            catsFilterMemo = {
+                rawRef: rawCats,
+                rawLen: rawCats.length,
+                modeId: curModeId,
+                cFilter: cFilter,
+                showHidden: showHiddenEntries,
+                pinnedRef: pinnedIds,
+                pinnedLen: pinnedIds.length,
+                hiddenCatsRef: hiddenCatIds,
+                hiddenCatsLen: hiddenCatIds.length,
+                result: currentCats
+            };
         }
-        if (currentSort === 'title_asc') {
-            currentItems.sort(compareItemsByNameAsc);
-        } else if (currentSort === 'title_desc') {
-            currentItems.sort(compareItemsByNameDesc);
+
+        var firstRawItem = rawItems.length > 0 ? rawItems[0] : null;
+        var lastRawItem = rawItems.length > 0 ? rawItems[rawItems.length - 1] : null;
+        if (itemsFilterMemo &&
+            itemsFilterMemo.rawRef === rawItems &&
+            itemsFilterMemo.rawLen === rawItems.length &&
+            itemsFilterMemo.firstItem === firstRawItem &&
+            itemsFilterMemo.lastItem === lastRawItem &&
+            itemsFilterMemo.modeId === curModeId &&
+            itemsFilterMemo.iFilter === iFilter &&
+            itemsFilterMemo.sort === currentSort &&
+            itemsFilterMemo.showHidden === showHiddenEntries &&
+            itemsFilterMemo.hiddenItemsRef === hiddenItemIds &&
+            itemsFilterMemo.hiddenItemsLen === hiddenItemIds.length &&
+            itemsFilterMemo.hiddenCatsRef === hiddenCatIds &&
+            itemsFilterMemo.hiddenCatsLen === hiddenCatIds.length) {
+            currentItems = itemsFilterMemo.result;
+        } else {
+            var baseItems = rawItems;
+            var hasHiddenFilter = !showHiddenEntries && (hiddenItemIds.length > 0 || hiddenCatIds.length > 0);
+            if (hasHiddenFilter) {
+                baseItems = [];
+                for (var bi = 0; bi < rawItems.length; bi++) {
+                    var itemCandidate = rawItems[bi];
+                    if (!itemCandidate) {
+                        continue;
+                    }
+                    if (hiddenItemLookup[String(itemCandidate.id)]) {
+                        continue;
+                    }
+                    if (itemCandidate.genreId && hiddenCatLookup[String(itemCandidate.genreId)]) {
+                        continue;
+                    }
+                    baseItems.push(itemCandidate);
+                }
+            }
+            if (iFilter) {
+                currentItems = baseItems.filter(function(it) {
+                    return getItemLowerName(it).indexOf(iFilter) !== -1;
+                });
+            } else if (currentSort !== 'added') {
+                currentItems = baseItems.slice();
+            } else {
+                currentItems = baseItems;
+            }
+            if (currentSort === 'title_asc') {
+                currentItems.sort(compareItemsByNameAsc);
+            } else if (currentSort === 'title_desc') {
+                currentItems.sort(compareItemsByNameDesc);
+            }
+            itemsFilterMemo = {
+                rawRef: rawItems,
+                rawLen: rawItems.length,
+                firstItem: firstRawItem,
+                lastItem: lastRawItem,
+                modeId: curModeId,
+                iFilter: iFilter,
+                sort: currentSort,
+                showHidden: showHiddenEntries,
+                hiddenItemsRef: hiddenItemIds,
+                hiddenItemsLen: hiddenItemIds.length,
+                hiddenCatsRef: hiddenCatIds,
+                hiddenCatsLen: hiddenCatIds.length,
+                result: currentItems
+            };
         }
         if (catIdx >= currentCats.length) {
             catIdx = Math.max(0, currentCats.length - 1);
@@ -8664,11 +8922,12 @@
         var isCardPlaying = isCurrentlyPlayingEntry(entry);
         card.className = 'poster-card' + (index === selectedIdx ? ' selected' : '') + (isCardPlaying ? ' playing' : '');
         card._entryRef = entry || null;
+        card._cardIndex = index;
         card.setAttribute('data-index', String(index));
         card.onclick = function(e) {
             e.stopPropagation();
             userInteractedSinceBoot = true;
-            itemIdx = index;
+            itemIdx = typeof card._cardIndex === 'number' ? card._cardIndex : index;
             renderUI();
             activateCurrentItemSelection();
         };
@@ -8758,6 +9017,26 @@
         return card;
     }
 
+    function syncPosterGridSelection(container, start, selectedIdx) {
+        var children = container.children;
+        for (var c = 0; c < children.length; c++) {
+            var actualIdx = start + c;
+            var cardNode = children[c];
+            cardNode._cardIndex = actualIdx;
+            cardNode.setAttribute('data-index', String(actualIdx));
+            if (actualIdx === selectedIdx) {
+                cardNode.classList.add('selected');
+            } else {
+                cardNode.classList.remove('selected');
+            }
+            if (isCurrentlyPlayingEntry(cardNode._entryRef)) {
+                cardNode.classList.add('playing');
+            } else {
+                cardNode.classList.remove('playing');
+            }
+        }
+    }
+
     function renderPosterGrid(container, items, selectedIdx) {
         if (!container) {
             return;
@@ -8782,6 +9061,8 @@
         var firstId = list[start] ? (list[start].id || list[start].name) : '';
         var lastId = list[end - 1] ? (list[end - 1].id || list[end - 1].name) : '';
         var children = container.children;
+        var isPosterCardsReady = children && children.length === (end - start) &&
+            children[0] && children[0].classList && children[0].classList.contains('poster-card');
         var sameWindow = !container._forceRebuild &&
             container._gridRef === list &&
             container._gridLen === list.length &&
@@ -8789,23 +9070,54 @@
             container._gridEnd === end &&
             container._gridFirstId === firstId &&
             container._gridLastId === lastId &&
-            children && children.length === (end - start) &&
-            children[0] && children[0].classList && children[0].classList.contains('poster-card');
+            isPosterCardsReady;
 
         if (sameWindow) {
-            for (var c = 0; c < children.length; c++) {
-                var actualIdx = start + c;
-                if (actualIdx === selectedIdx) {
-                    children[c].classList.add('selected');
-                } else {
-                    children[c].classList.remove('selected');
+            syncPosterGridSelection(container, start, selectedIdx);
+            return;
+        }
+
+        var canShiftGridRow = !container._forceRebuild &&
+            container._gridRef === list &&
+            container._gridLen === list.length &&
+            typeof container._gridStart === 'number' &&
+            typeof container._gridEnd === 'number' &&
+            (end - start) === win &&
+            (container._gridEnd - container._gridStart) === win &&
+            Math.abs(start - container._gridStart) === 3 &&
+            isPosterCardsReady;
+
+        if (canShiftGridRow) {
+            var s;
+            if (start === container._gridStart + 3) {
+                for (s = 0; s < 3; s++) {
+                    if (container.firstElementChild) {
+                        container.removeChild(container.firstElementChild);
+                    }
                 }
-                if (isCurrentlyPlayingEntry(children[c]._entryRef)) {
-                    children[c].classList.add('playing');
-                } else {
-                    children[c].classList.remove('playing');
+                for (s = end - 3; s < end; s++) {
+                    if (list[s]) {
+                        container.appendChild(createPosterCardNode(list[s], s, selectedIdx));
+                    }
+                }
+            } else if (start === container._gridStart - 3) {
+                for (s = 0; s < 3; s++) {
+                    if (container.lastElementChild) {
+                        container.removeChild(container.lastElementChild);
+                    }
+                }
+                var anchorCard = container.firstElementChild;
+                for (s = start; s < start + 3; s++) {
+                    if (list[s]) {
+                        container.insertBefore(createPosterCardNode(list[s], s, selectedIdx), anchorCard);
+                    }
                 }
             }
+            container._gridStart = start;
+            container._gridEnd = end;
+            container._gridFirstId = firstId;
+            container._gridLastId = lastId;
+            syncPosterGridSelection(container, start, selectedIdx);
             return;
         }
 
@@ -9666,6 +9978,9 @@
                 applyColumnFilters();
                 if (!tryAutoResumeLastLiveChannel()) {
                     selectCategory(0, true);
+                    if (currentPlayingItem && !currentPlayingItem.isVod && !currentPlayingItem.isSeries) {
+                        syncLiveChannelCursorOnZap(currentPlayingItem.isCatchup && currentPlayingItem.channelRef ? currentPlayingItem.channelRef : currentPlayingItem);
+                    }
                 }
                 scheduleWarmPreloadVodAndSeries();
                 return;
@@ -9707,6 +10022,9 @@
                     renderCats();
                     if (!tryAutoResumeLastLiveChannel()) {
                         selectCategory(catIdx, true);
+                        if (currentPlayingItem && !currentPlayingItem.isVod && !currentPlayingItem.isSeries) {
+                            syncLiveChannelCursorOnZap(currentPlayingItem.isCatchup && currentPlayingItem.channelRef ? currentPlayingItem.channelRef : currentPlayingItem);
+                        }
                     }
                 }
                 scheduleWarmPreloadVodAndSeries();
@@ -10267,6 +10585,8 @@
         var parentSeriesObj = (seasonObj && seasonObj.parentSeries) ? seasonObj.parentSeries : null;
         var parentId = (parentSeriesObj && parentSeriesObj.id) ? String(parentSeriesObj.id) : 'ser';
         var sId = seasonObj && seasonObj.id !== undefined ? String(seasonObj.id) : '1';
+        var inheritedGenreId = (seasonObj && seasonObj.genreId) || (parentSeriesObj && parentSeriesObj.genreId) || '*';
+        var inheritedCensored = ((seasonObj && seasonObj.censored) || (parentSeriesObj && parentSeriesObj.censored)) ? 1 : 0;
         if (epEntry && typeof epEntry === 'object' && epEntry.isEpisode) {
             if (!epEntry.seasonId) {
                 epEntry.seasonId = sId;
@@ -10277,6 +10597,12 @@
             if (!epEntry.parentSeries && parentSeriesObj) {
                 epEntry.parentSeries = parentSeriesObj;
             }
+            if (!epEntry.genreId && inheritedGenreId) {
+                epEntry.genreId = inheritedGenreId;
+            }
+            if (!epEntry.censored && inheritedCensored) {
+                epEntry.censored = 1;
+            }
             return epEntry;
         }
         var epNum = (epEntry !== undefined && epEntry !== null) ? epEntry : (idx + 1);
@@ -10286,6 +10612,8 @@
             cmd: seasonObj.cmd,
             desc: seasonObj.desc,
             poster: seasonObj.poster,
+            genreId: inheritedGenreId,
+            censored: inheritedCensored,
             seriesNum: epNum,
             seasonId: sId,
             seriesId: parentId,
@@ -10328,6 +10656,10 @@
                 itemFilterText = '';
                 rawItems = seasons;
                 itemIdx = 0;
+                itemsFilterMemo = null;
+                if (itemsListEl) {
+                    itemsListEl._forceRebuild = true;
+                }
                 if (itemsHeaderEl) {
                     itemsHeaderEl.textContent = item.name + ' — Seasons';
                 }
@@ -10413,6 +10745,10 @@
                 targetEpIdx = Math.min(episodes.length - 1, lastWatchedIdx + 1);
             }
             itemIdx = targetEpIdx;
+            itemsFilterMemo = null;
+            if (itemsListEl) {
+                itemsListEl._forceRebuild = true;
+            }
             if (itemsHeaderEl) {
                 itemsHeaderEl.textContent = item.name + ' — Episodes';
             }
@@ -10425,9 +10761,16 @@
             return false;
         }
         var prev = seriesStack.pop();
+        if (seriesStack.length === 0) {
+            activeSeriesSeasons = [];
+        }
         rawItems = prev.rawItems;
         itemIdx = prev.itemIdx;
         itemFilterText = prev.itemFilterText || '';
+        itemsFilterMemo = null;
+        if (itemsListEl) {
+            itemsListEl._forceRebuild = true;
+        }
         if (itemsHeaderEl) {
             itemsHeaderEl.textContent = prev.header;
         }
@@ -11464,8 +11807,13 @@
         if (selThemeEl) {
             applyTheme(selThemeEl.value);
         }
-        if (inpPinEl && inpPinEl.value.trim().length === 4) {
+        if (inpPinEl && inpPinEl.value.trim().length > 0) {
             var newPin = inpPinEl.value.trim();
+            if (!/^\d{4}$/.test(newPin)) {
+                showOSD('Validation Error', 'Parental PIN must be 4 numeric digits (0-9) for TV remote entry');
+                showToast('⚠ Parental PIN must be 4 digits (0-9)');
+                return;
+            }
             safeSetStorage('cfg_pin', newPin);
             api.parentalPin = newPin;
         }
@@ -11620,12 +11968,19 @@
     function matchCategoryList(categoryArray, q, labelPrefix, targetModeIdx) {
         var list = Array.isArray(categoryArray) ? categoryArray : [];
         var matches = [];
+        var modeId = targetModeIdx === 2 ? 'series' : (targetModeIdx === 1 ? 'vod' : 'live');
         for (var i = 0; i < list.length; i++) {
             var c = list[i];
             if (!c || c.id === '*' || c.id === 'new' || c.id === 'cont' || c.id === 'fav' || c.id === 'rec') {
                 continue;
             }
             var title = String(c.title || '');
+            if (!window._parentalUnlocked && (Boolean(c.censored) || ADULT_RE.test(title))) {
+                continue;
+            }
+            if (!showHiddenEntries && isHiddenCategory(modeId, c.id)) {
+                continue;
+            }
             if (getCatLowerTitle(c).indexOf(q) !== -1) {
                 matches.push({
                     id: 'cat_' + targetModeIdx + '_' + c.id,
@@ -11669,10 +12024,16 @@
             if (!ch) {
                 continue;
             }
+            if (!window._parentalUnlocked && isAdultContentItem(ch)) {
+                continue;
+            }
+            if (!showHiddenEntries && (isHiddenItem('live', ch.id) || (ch.genreId && isHiddenCategory('live', ch.genreId)))) {
+                continue;
+            }
             if (liveMatches.length < 30 && (getItemLowerName(ch).indexOf(q) !== -1 || String(ch.num || '') === q)) {
                 liveMatches.push(ch);
             }
-            if (hasAnyCachedEpg && epgProgMatches.length < 15 && (window._parentalUnlocked || !isAdultContentItem(ch))) {
+            if (hasAnyCachedEpg && epgProgMatches.length < 15) {
                 var chKey = String(ch.id);
                 var cachedShort = shortEpgCache[chKey];
                 var normProgs = (cachedShort && Array.isArray(cachedShort.list) && cachedShort.list.length > 0) ?
@@ -11711,8 +12072,36 @@
             if (!searchOpen || mySeq !== searchSeq) {
                 return;
             }
-            var vodMatches = (res[0] || []).slice(0, 20);
-            var seriesMatches = (res[1] || []).slice(0, 20);
+            var rawVodRes = Array.isArray(res[0]) ? res[0] : [];
+            var rawSeriesRes = Array.isArray(res[1]) ? res[1] : [];
+            var vodMatches = [];
+            for (var v = 0; v < rawVodRes.length && vodMatches.length < 20; v++) {
+                var vItem = rawVodRes[v];
+                if (!vItem) {
+                    continue;
+                }
+                if (!window._parentalUnlocked && isAdultContentItem(vItem)) {
+                    continue;
+                }
+                if (!showHiddenEntries && (isHiddenItem('vod', vItem.id) || (vItem.genreId && isHiddenCategory('vod', vItem.genreId)))) {
+                    continue;
+                }
+                vodMatches.push(vItem);
+            }
+            var seriesMatches = [];
+            for (var s = 0; s < rawSeriesRes.length && seriesMatches.length < 20; s++) {
+                var sItem = rawSeriesRes[s];
+                if (!sItem) {
+                    continue;
+                }
+                if (!window._parentalUnlocked && isAdultContentItem(sItem)) {
+                    continue;
+                }
+                if (!showHiddenEntries && (isHiddenItem('series', sItem.id) || (sItem.genreId && isHiddenCategory('series', sItem.genreId)))) {
+                    continue;
+                }
+                seriesMatches.push(sItem);
+            }
             searchResults = allCatMatches.concat(epgProgMatches).concat(liveMatches).concat(vodMatches).concat(seriesMatches);
             if (searchIdx >= searchResults.length) {
                 searchIdx = 0;
