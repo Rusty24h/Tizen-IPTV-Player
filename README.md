@@ -42,9 +42,6 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
 - **🔵 Smart Context-Aware Blue Button (Quick-Switch Portal vs. Column Filter)**:
   - Pressing the **Blue Button** (`B`) while focused on the far-left **Main Menu** rail (`#col-modes`) immediately **quick-switches to the next configured IPTV Portal Profile** (`cycleActivePortalProfile()`).
   - Pressing the **Blue Button** while focused on the **Categories** or **Channels / Items** columns opens the **Column Filter Modal** to filter categories or channels on the fly.
-- **🎬 Strong 8K & Multi-CDN VOD / Series Anti-Buffering Pipeline**:
-  - Uses a VLC-compatible streaming identity (`VLC/3.0.20 LibVLC/3.0.20`) for VOD Movies, Series episodes, and non-Stalker streams across `AVPlay` and `service/proxy.js` (including stream probes and recordings), preventing CDN throttling and frame skipping on providers like Strong 8K.
-  - Strips stale Stalker portal `Referer` headers on VOD CDN nodes, advertises `Accept-Ranges: bytes` for smooth container seeking, and eliminates redundant re-handshakes during `create_link` VOD/Series fallback.
 - **⚡ 60 FPS Performance & Memory Optimizations**:
   - **3-Column Poster Grid Row-Shift DOM Recycling**: Scrolling a single row in the 3×3 VOD/Series poster grid recycles 6 of 9 card DOM nodes in-place and only updates the 3 newly entering cards.
   - **Memoized Column Filtering & Zero-Exception Base64 UTF-8 Decoder**: Memoizes filtered/sorted category and item arrays (`catsFilterMemo` / `itemsFilterMemo`) and decodes Xtream Base64 EPG titles using a pure arithmetic UTF-8 state machine with bounded caching.
