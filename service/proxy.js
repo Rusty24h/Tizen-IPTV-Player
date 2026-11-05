@@ -301,7 +301,7 @@ if (https.globalAgent) {
 
 // Persistent Keep-Alive agents with high socket concurrency so 4K streams never block API requests
 var httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8 });
-var httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8, rejectUnauthorized: false });
+var httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8 });
 
 function allocBufferUtf8(str) {
     var text = String(str || '');
@@ -516,6 +516,20 @@ function requestWithFallback(reqState, callback) {
     }
     var currentUrl = candidates[idx];
     var target = url.parse(currentUrl);
+    if (!target || !target.hostname || !isSafeUpstreamHost(target.hostname)) {
+        requestWithFallback({
+            portalKey: portalKey,
+            mac: mac,
+            candidates: candidates,
+            idx: idx + 1,
+            headers: headers,
+            redirectsLeft: 3,
+            useFreshSocket: false,
+            aborted: reqState.aborted,
+            onAbort: reqState.onAbort
+        }, callback);
+        return;
+    }
     var isHttps = target.protocol === 'https:';
     var client = isHttps ? https : http;
     var mergedCookie = getHostCookieHeader(target.hostname, headers.Cookie || '', mac);
@@ -534,7 +548,6 @@ function requestWithFallback(reqState, callback) {
         method: 'GET',
         headers: reqHeaders,
         agent: useFreshSocket ? false : (isHttps ? httpsAgent : httpAgent),
-        rejectUnauthorized: false,
         timeout: isCatalogQuery ? 35000 : 12000
     };
     var settled = false;
@@ -736,7 +749,7 @@ function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
         return;
     }
     var target = url.parse(streamUrl);
-    if (!target || !target.hostname) {
+    if (!target || !target.hostname || !isSafeUpstreamHost(target.hostname)) {
         doneCb(null);
         return;
     }
@@ -794,8 +807,7 @@ function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
         path: target.path,
         method: 'GET',
         headers: headers,
-        timeout: 4500,
-        rejectUnauthorized: false
+        timeout: 4500
     }, function(upRes) {
         var ttfb = Date.now() - reqStartTs;
         storeSetCookies(target.hostname, upRes.headers['set-cookie'], lastActiveMac);
@@ -870,7 +882,7 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         recordStreamTelemetry(streamKey, streamUrl, { code: 0, reset: true });
     }
     var target = url.parse(streamUrl);
-    if (!target.hostname) {
+    if (!target.hostname || !isSafeUpstreamHost(target.hostname)) {
         clientRes.writeHead(400);
         clientRes.end('Invalid stream URL');
         return;
@@ -924,8 +936,7 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         method: 'GET',
         headers: headers,
         agent: isHttps ? httpsAgent : httpAgent,
-        timeout: 45000,
-        rejectUnauthorized: false
+        timeout: 45000
     }, function(upRes) {
         var ttfb = Date.now() - reqStartTs;
         storeSetCookies(target.hostname, upRes.headers['set-cookie'], lastActiveMac);
@@ -1108,6 +1119,22 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
     upReq.end();
 }
 
+function isLoopbackAddress(addr) {
+    var s = String(addr || '');
+    return s === '127.0.0.1' || s === '::1' || s === '::ffff:127.0.0.1';
+}
+
+function isSafeUpstreamHost(hostname) {
+    var h = String(hostname || '').toLowerCase().trim();
+    if (!h || h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0' || h === '169.254.169.254') {
+        return false;
+    }
+    if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h) || /^172\.(?:1[6-9]|2\d|3[01])\./.test(h)) {
+        return false;
+    }
+    return true;
+}
+
 function startProxyServer(port) {
     if (server) {
         return server;
@@ -1122,12 +1149,20 @@ function startProxyServer(port) {
             res.end();
             return;
         }
+        var parsedUrl = url.parse(req.url, true);
+        var clientIp = (req.socket && req.socket.remoteAddress) || (req.connection && req.connection.remoteAddress) || '';
+        var isLanSetupRoute = (parsedUrl.pathname === '/setup' && req.method === 'GET') ||
+                              (parsedUrl.pathname === '/remote-setup' && req.method === 'POST');
+        if (!isLoopbackAddress(clientIp) && !isLanSetupRoute) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Forbidden: Local TV access only' }));
+            return;
+        }
         if (req.url === '/health' || req.url === '/ping' || req.headers['x-stalker-ping'] === '1') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ status: 'ok', port: activeListenPort, cachedPortals: Object.keys(endpointCache).length }));
             return;
         }
-        var parsedUrl = url.parse(req.url, true);
         if (parsedUrl.pathname === '/backup') {
             if (req.method === 'POST') {
                 var bodyParts = [];
@@ -1380,7 +1415,7 @@ function startProxyServer(port) {
                 var tmpDir = (os && typeof os.tmpdir === 'function') ? os.tmpdir() : '/tmp';
                 var recFilePath = tmpDir + '/smartstb_rec_' + rawChName + '_' + Date.now() + '.ts';
                 var parsedRecTarget = url.parse(recUrl);
-                if (!parsedRecTarget.hostname) {
+                if (!parsedRecTarget.hostname || !isSafeUpstreamHost(parsedRecTarget.hostname)) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid stream URL for recording' }));
                     return;
@@ -1409,7 +1444,7 @@ function startProxyServer(port) {
                         return;
                     }
                     var curRecTarget = url.parse(targetUrlStr);
-                    if (!curRecTarget.hostname) {
+                    if (!curRecTarget.hostname || !isSafeUpstreamHost(curRecTarget.hostname)) {
                         stopActiveRecordingSession();
                         return;
                     }
@@ -1436,8 +1471,7 @@ function startProxyServer(port) {
                         path: curRecTarget.path,
                         method: 'GET',
                         headers: recHeaders,
-                        timeout: 20000,
-                        rejectUnauthorized: false
+                        timeout: 20000
                     }, function(recRes) {
                         if (recRes.headers && recRes.headers['set-cookie']) {
                             storeSetCookies(curRecTarget.hostname, recRes.headers['set-cookie'], lastActiveMac);
@@ -1552,7 +1586,7 @@ function startProxyServer(port) {
                     return;
                 }
                 var parsedTarget = url.parse(targetUrlStr);
-                if (!parsedTarget || !parsedTarget.hostname || (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:')) {
+                if (!parsedTarget || !parsedTarget.hostname || !isSafeUpstreamHost(parsedTarget.hostname) || (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:')) {
                     sendRemoteError(400, 'Invalid target URL');
                     return;
                 }
@@ -1570,8 +1604,7 @@ function startProxyServer(port) {
                         'Host': parsedTarget.host
                     },
                     agent: isHttpsTarget ? httpsAgent : httpAgent,
-                    timeout: 35000,
-                    rejectUnauthorized: false
+                    timeout: 35000
                 }, function(rRes) {
                     if ([301, 302, 303, 307, 308].indexOf(rRes.statusCode) !== -1 && rRes.headers.location) {
                         rRes.resume();
