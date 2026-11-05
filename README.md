@@ -1,5 +1,6 @@
 # IPTV Player for Samsung Tizen Smart TVs
 
+[![Apps2Samsung](https://img.shields.io/badge/Apps2Samsung-Community%20Package-0083D6?logo=samsung&logoColor=white)](https://github.com/Apps2Samsung/tizen-community-packages)
 [![Engine](https://img.shields.io/badge/Player-Hardware%20AVPlay-blueviolet)](#key-features)
 [![Protocol](https://img.shields.io/badge/Providers-Stalker%20MAC%20%7C%20Xtream%20API%20%7C%20M3U8-blue)](#multi-provider-architecture--profile-system)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -17,11 +18,13 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
 3. [Project Architecture & File Layout](#project-architecture--file-layout)
 4. [Prerequisites](#prerequisites)
 5. [Step-by-Step Installation on Samsung Tizen TV](#step-by-step-installation-on-samsung-tizen-tv)
-   - [Phase 1: Enable Developer Mode on your Samsung TV](#phase-1-enable-developer-mode-on-your-samsung-tv)
-   - [Phase 2: Install Tizen Studio & TV Extension](#phase-2-install-tizen-studio--tv-extension)
-   - [Phase 3: Generate Samsung Certificates (Author & Distributor)](#phase-3-generate-samsung-certificates-author--distributor)
-   - [Phase 4: Connect Tizen Studio to your Samsung TV](#phase-4-connect-tizen-studio-to-your-samsung-tv)
-   - [Phase 5: Build and Deploy the `.wgt` Package](#phase-5-build-and-deploy-the-wgt-package)
+   - [Method 1: One-Click Install via Apps2Samsung (Recommended)](#method-1-one-click-install-via-apps2samsung-recommended)
+   - [Method 2: Manual Build & Install via Tizen Studio](#method-2-manual-build--install-via-tizen-studio)
+     - [Phase 1: Enable Developer Mode on your Samsung TV](#phase-1-enable-developer-mode-on-your-samsung-tv)
+     - [Phase 2: Install Tizen Studio & TV Extension](#phase-2-install-tizen-studio--tv-extension)
+     - [Phase 3: Generate Samsung Certificates (Author & Distributor)](#phase-3-generate-samsung-certificates-author--distributor)
+     - [Phase 4: Connect Tizen Studio to your Samsung TV](#phase-4-connect-tizen-studio-to-your-samsung-tv)
+     - [Phase 5: Build and Deploy the `.wgt` Package](#phase-5-build-and-deploy-the-wgt-package)
 6. [Samsung Remote Control Key Mapping](#samsung-remote-control-key-mapping)
 7. [Initial Setup & Multi-Provider Configuration](#initial-setup--multi-provider-configuration)
 8. [License](#license)
@@ -30,19 +33,36 @@ Designed as a modern, lightweight, and customizable replacement for legacy set-t
 
 ## What's New (Latest Added Features)
 
+- **📦 Official Apps2Samsung Community Package & Security Hardening**:
+  - **One-Click TV Deployment**: Officially listed in **[Apps2Samsung Community Packages](https://github.com/Apps2Samsung/tizen-community-packages)** (`iptv` category) for effortless installation without setting up the full Tizen Studio SDK.
+  - **Loopback-Locked Proxy & SSRF Protection**: `service/proxy.js` restricts all sensitive local endpoints (`/backup`, `/catalog-cache`, `/stream`, `/xtream`, `/m3u`, `/xmltv`, `/record`) strictly to TV loopback (`127.0.0.1` / `::1`) while keeping `GET /setup` and `POST /remote-setup` accessible for LAN phone configuration, blocks private-network SSRF targets, and enforces standard TLS verification.
+- **▶ Dynamic Playing Channel Indicator & Auto-Hide 4-Column Overlay**:
+  - **Live Playing Indicator (`▶`) Tracking**: The emerald `▶` badge (`.item-play-badge`) and active playing highlight dynamically follow the currently playing channel in real time across both the **Main 4-Column Channel List** (`#items-list`) and the **Fullscreen Quick Channel Zapper** (`#mini-zap-drawer` / `#mini-zap-list`)—even across virtualized list scrolling, numeric zapping (`0–9`), EPG modal tuning, and scheduled reminders.
+  - **Auto-Hide Heavy 4-Column Overlay**: Selecting a Live TV channel, Movie, or Series episode automatically hides the 4-column UI overlay (`setOverlayVisible(false)`) so hardware video plays unobstructed at 60 FPS.
+- **🔵 Smart Context-Aware Blue Button (Quick-Switch Portal vs. Column Filter)**:
+  - Pressing the **Blue Button** (`B`) while focused on the far-left **Main Menu** rail (`#col-modes`) immediately **quick-switches to the next configured IPTV Portal Profile** (`cycleActivePortalProfile()`).
+  - Pressing the **Blue Button** while focused on the **Categories** or **Channels / Items** columns opens the **Column Filter Modal** to filter categories or channels on the fly.
+- **🎬 Strong 8K & Multi-CDN VOD / Series Anti-Buffering Pipeline**:
+  - Uses a VLC-compatible streaming identity (`VLC/3.0.20 LibVLC/3.0.20`) for VOD Movies, Series episodes, and non-Stalker streams across `AVPlay` and `service/proxy.js` (including stream probes and recordings), preventing CDN throttling and frame skipping on providers like Strong 8K.
+  - Strips stale Stalker portal `Referer` headers on VOD CDN nodes, advertises `Accept-Ranges: bytes` for smooth container seeking, and eliminates redundant re-handshakes during `create_link` VOD/Series fallback.
+- **⚡ 60 FPS Performance & Memory Optimizations**:
+  - **3-Column Poster Grid Row-Shift DOM Recycling**: Scrolling a single row in the 3×3 VOD/Series poster grid recycles 6 of 9 card DOM nodes in-place and only updates the 3 newly entering cards.
+  - **Memoized Column Filtering & Zero-Exception Base64 UTF-8 Decoder**: Memoizes filtered/sorted category and item arrays (`catsFilterMemo` / `itemsFilterMemo`) and decodes Xtream Base64 EPG titles using a pure arithmetic UTF-8 state machine with bounded caching.
+- **🔒 Deep Parental Control & Hidden Item Isolation**:
+  - Seasons, episodes, **▶ Continue Watching**, and **History** automatically inherit parental lock (`censored`) and genre flags from their parent Series, and locked/hidden channels are strictly filtered out of Global Search, 2D EPG Grid, and `CH+ / CH-` zapping pools.
 - **🚀 Extreme Large-Portal Engine (5,000–25,000+ Channels & 900+ Categories)**:
   - **Chunked Non-Blocking Ingestion**: Time-sliced catalog indexing, chunked async M3U (`parseM3uPlaylistCatalogAsync`) and XMLTV (`parseXmltvDocumentAsync`) parsers, and O(1) category lookup maps prevent Tizen WebView watchdog freezes on massive portals.
 - **🌐 Multi-Provider Architecture**: Full native support for **Stalker / Ministra MAC Portals**, **Xtream Codes API** (`player_api.php` with username/password authentication), and **M3U / M3U8 Playlists** (remote URL or local `.m3u` / `.m3u8` file import with automatic Live TV, Movies, and Series `SxxExx` classification).
 - **⚡ Progressive Instant Category Boot**: Categories (`get_genres` / `get_live_categories`) fetch and render within ~200ms on launch while the full channel catalog loads asynchronously in the background—allowing immediate remote navigation without waiting for thousands of channels to finish downloading.
 - **🔄 Fast Channel Zapping, Multi-Link Failover & Auto-Reconnect**:
   - Defers background `get_short_epg` requests during channel switches so `create_link` never collides with EPG polling on single-session Stalker portals.
-  - Automatic multi-link failover across backup server URLs (`cmds[]`) when an upstream server link fails.
+  - Automatic multi-link failover across backup server URLs (`cmds[]`) when an upstream server link fails, plus manual server link selection in the **Audio / Subtitles / Server Links** modal.
   - Automatically reconnects Live TV streams in fullscreen when the provider drops the connection or sends an unexpected `onstreamcompleted` (EOF) after extended viewing—without kicking you back to the channel list.
 - **🔊 Enhanced Audio, Subtitle Timing Offset & Per-Channel Memory**:
   - Late-PID audio track discovery across both `onbufferingcomplete` and `oncurrentplaytime` with compatibility across Tizen 4.0–9.0 firmware (`extra_info` JSON & raw key-value formats).
   - Persistent per-channel/item memory for selected audio track, subtitle track, and aspect ratio (`cfg_item_media_prefs`), plus live `±250ms` subtitle sync timing offset (`webapis.avplay.setSubtitlePosition`).
 - **🎨 10-Foot Broadcast UI/UX Overhaul & 6 Color Themes**:
-  - **3-Column VOD & Series Poster Grid**: Toggle between a 3×3 poster card grid (with IMDb rating badges, favorite stars, and resume progress bars) and the classic 1D list view.
+  - **3-Column VOD & Series Poster Grid**: Toggle between a 3×3 poster card grid (with IMDb rating badges, favorite stars, watched badges, and resume progress bars) and the classic 1D list view.
   - **Live Video Glass Backdrop (`playing-live`)**: Semi-transparent glass columns let live TV continue playing visibly behind the channel guide while browsing.
   - **OSD Broadcast Station Deck & Inline EPG Progress Bars**: Station logo box, channel number pill, remaining time (`-24m left`), and subtle inline progress bars on live channel rows.
   - **6 Hardware-Safe Color Themes**: Choose between **Classic Blue**, **Royal Purple**, **Cyber Cyan**, **Emerald Green**, **Crimson Red**, and **Gold Amber**.
@@ -121,7 +141,7 @@ The embedded background service runs locally on the TV at `http://127.0.0.1:3001
 - Per-MAC isolated cookie jar management and Stalker token refresh.
 - Seamless MPEG-TS and HLS manifest rewriting for direct AVPlay hardware consumption.
 - Real-time stream throughput and upstream HTTP status telemetry via `/stream-diag`.
-- Phone / LAN remote configuration web interface at `/setup`.
+- Phone / LAN remote configuration web interface at `/setup` (all other proxy routes are restricted strictly to TV loopback `127.0.0.1`).
 
 ---
 
@@ -129,7 +149,7 @@ The embedded background service runs locally on the TV at `http://127.0.0.1:3001
 
 Before installing the app on your Samsung Smart TV, ensure you have:
 1. **Samsung Smart TV** running Tizen OS 4.0 or newer (Manufactured from 2018 onwards).
-2. **Computer (Windows / macOS / Linux)** on the **same local Wi-Fi or Ethernet network** as your TV (for Tizen Studio deployment).
+2. **Computer (Windows / macOS / Linux)** on the **same local Wi-Fi or Ethernet network** as your TV (for Apps2Samsung or Tizen Studio deployment).
 3. **Samsung Remote Control** (Standard IR remote with numeric keypad or Smart Remote).
 4. **Active IPTV Subscription**:
    - **Stalker Portal URL** + activated **MAC Address** (`00:1A:79:XX:XX:XX`), **OR**
@@ -140,7 +160,32 @@ Before installing the app on your Samsung Smart TV, ensure you have:
 
 ## Step-by-Step Installation on Samsung Tizen TV
 
-### Phase 1: Enable Developer Mode on your Samsung TV
+You can install **Tizen IPTV Player** using **Apps2Samsung (Recommended)** or manually with **Tizen Studio**:
+
+---
+
+### Method 1: One-Click Install via Apps2Samsung (Recommended)
+
+**Tizen IPTV Player** is officially available in the **[Apps2Samsung Community Packages](https://github.com/Apps2Samsung/tizen-community-packages)** catalog (`iptv` category), allowing you to install the app without downloading or configuring Tizen Studio.
+
+1. **Enable Developer Mode on your Samsung TV**:
+   - Turn on your Samsung TV, open the **Apps** screen, and press **`1` `2` `3` `4` `5`** on your remote control.
+   - Toggle **Developer Mode** to **ON**, enter your computer's local IP address (e.g., `192.168.1.100`), and click **OK**.
+   - Hold down the **Power** button on your remote for **3–5 seconds** until the Samsung logo appears to restart the TV.
+2. **Download & Open Apps2Samsung**:
+   - Download **[Apps2Samsung](https://github.com/Apps2Samsung/Apps2Samsung)** for Windows, macOS, or Linux.
+3. **Connect to Your TV & Sign In**:
+   - Enter your Samsung TV's local IP address in **Apps2Samsung** to connect.
+   - Sign in with your free **Samsung Account** when prompted so Apps2Samsung can generate your TV's **Partner** certificate automatically.
+4. **Install Tizen IPTV Player**:
+   - Browse the **Community Packages** list (under the **IPTV** category) and select **Tizen IPTV Player** (`Rusty24h/Tizen-IPTV-Player`).
+   - Click **Install** — Apps2Samsung will automatically download `SmartSTBcloneV2.wgt`, sign it for your TV's DUID with a Partner certificate, and install it on your TV!
+
+---
+
+### Method 2: Manual Build & Install via Tizen Studio
+
+#### Phase 1: Enable Developer Mode on your Samsung TV
 
 1. Turn on your Samsung TV and press the **Home** button on your remote.
 2. Navigate to **Apps** on the Smart Hub menu.
@@ -153,7 +198,7 @@ Before installing the app on your Samsung Smart TV, ensure you have:
 
 ---
 
-### Phase 2: Install Tizen Studio & TV Extension
+#### Phase 2: Install Tizen Studio & TV Extension
 
 1. Download and install **Tizen Studio** (with IDE or CLI) from the official Samsung Developer portal.
 2. Launch **Tizen Package Manager**:
@@ -164,7 +209,7 @@ Before installing the app on your Samsung Smart TV, ensure you have:
 
 ---
 
-### Phase 3: Generate Samsung Certificates (Author & Distributor)
+#### Phase 3: Generate Samsung Certificates (Author & Distributor)
 
 Samsung Smart TVs reject unsigned `.wgt` packages. You must generate a free Samsung certificate tied to your TV's Unique Device ID (DUID):
 
@@ -176,13 +221,13 @@ Samsung Smart TVs reject unsigned `.wgt` packages. You must generate a free Sams
    - Create a new **Author Certificate** (enter your name and a password).
    - Sign in with your free **Samsung Account**.
 4. In the next step, create a **Distributor Certificate**:
-   - Ensure the privilege level is set to **Public** or **Partner**.
+   - Set the privilege level to **Partner** (required for `<tizen:service>`, `avplay`, `productinfo`, and `appcommon`).
    - Under **Individual DUIDs**, connect your TV or manually add your TV's DUID (found in TV Menu > Support > About This TV).
 5. Click **Finish**. Ensure the new certificate profile is checked as **Active**.
 
 ---
 
-### Phase 4: Connect Tizen Studio to your Samsung TV
+#### Phase 4: Connect Tizen Studio to your Samsung TV
 
 1. In Tizen Studio, go to **Tools** > **Device Manager**.
 2. Click the **Remote Device Manager** icon (top right).
@@ -195,9 +240,9 @@ Samsung Smart TVs reject unsigned `.wgt` packages. You must generate a free Sams
 
 ---
 
-### Phase 5: Build and Deploy the `.wgt` Package
+#### Phase 5: Build and Deploy the `.wgt` Package
 
-#### Method A: Using Tizen Studio GUI (Recommended)
+##### Method A: Using Tizen Studio GUI (Recommended)
 1. Open Tizen Studio.
 2. Select **File** > **Import** > **Tizen** > **Tizen Project**.
 3. Choose **Archive file** or **Directory** pointing to the repository folder containing `config.xml`.
@@ -205,7 +250,7 @@ Samsung Smart TVs reject unsigned `.wgt` packages. You must generate a free Sams
 5. Select **Run As** > **Tizen Web Application**.
 6. Tizen Studio will automatically package the app, sign it with your certificate, transfer it to your TV, and launch it!
 
-#### Method B: Using Tizen CLI
+##### Method B: Using Tizen CLI
 Open your terminal inside the project directory:
 
 ```bash
@@ -216,7 +261,7 @@ tizen package -t wgt -s <YourCertificateProfileName> -- .
 sdb devices
 
 # 3. Install on the TV
-tizen install -s <TV_DEVICE_ID> -n SmartSTBclone.wgt
+tizen install -s <TV_DEVICE_ID> -n SmartSTBcloneV2.wgt
 
 # 4. (Optional) Launch the app directly from terminal
 tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
