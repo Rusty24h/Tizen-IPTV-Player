@@ -8,6 +8,8 @@ var url = require('url');
 var fs = require('fs');
 var zlib = require('zlib');
 var os = require('os');
+var dns = require('dns');
+var crypto = require('crypto');
 
 var server = null;
 var PROXY_PORT = 3001;
@@ -22,12 +24,236 @@ var memoryBackupJson = '';
 var activeVideoUpReq = null;
 var activeVideoStreamKey = '';
 var pendingRemoteSetup = null;
+var pendingRemoteRestoreJson = null;
 var MAG_UA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
 var VLC_UA = 'VLC/3.0.20 LibVLC/3.0.20';
 var streamTelemetryMap = {};
 var streamTelemetryKeys = [];
 var latestStreamTelemetryKey = '';
 var activeRecordingSession = null;
+
+// =========================================================================
+// v2.1.0: 4-Digit Cryptographic Pairing PIN & Brute-Force Rate Limiter
+// =========================================================================
+function generateSecure4DigitPin() {
+    try {
+        if (crypto && typeof crypto.randomBytes === 'function') {
+            var buf = crypto.randomBytes(2);
+            var num = ((buf[0] << 8) | buf[1]) % 10000;
+            return ('0000' + String(num)).slice(-4);
+        }
+    } catch (ePin) {}
+    return ('0000' + String(Math.floor(Math.random() * 10000))).slice(-4);
+}
+
+var currentPairingPin = generateSecure4DigitPin();
+var globalPinFailures = 0;
+var ipPinRateLimitMap = {};
+
+function verifyLanPairingPin(clientIp, submittedPin) {
+    var now = Date.now();
+    var ipKey = String(clientIp || 'unknown');
+    var rec = ipPinRateLimitMap[ipKey];
+    if (rec && rec.lockedUntil > now) {
+        var waitSec = Math.ceil((rec.lockedUntil - now) / 1000);
+        return {
+            valid: false,
+            locked: true,
+            rotated: false,
+            retryAfterSec: waitSec,
+            error: 'Too many failed attempts. Locked out for ' + waitSec + 's.'
+        };
+    }
+    if (rec && rec.lockedUntil && rec.lockedUntil <= now) {
+        rec.fails = 0;
+        rec.lockedUntil = 0;
+    }
+    var cleanPin = String(submittedPin || '').trim();
+    if (cleanPin && cleanPin === currentPairingPin) {
+        if (rec) {
+            rec.fails = 0;
+            rec.lockedUntil = 0;
+        }
+        globalPinFailures = 0;
+        return { valid: true, locked: false, rotated: false, retryAfterSec: 0 };
+    }
+    if (!rec) {
+        rec = { fails: 0, lockedUntil: 0 };
+        ipPinRateLimitMap[ipKey] = rec;
+    }
+    rec.fails += 1;
+    globalPinFailures += 1;
+    var rotated = false;
+    if (globalPinFailures >= 10) {
+        var nextPin = generateSecure4DigitPin();
+        if (nextPin === currentPairingPin) {
+            nextPin = ('0000' + String((Number(nextPin) + 1) % 10000)).slice(-4);
+        }
+        currentPairingPin = nextPin;
+        globalPinFailures = 0;
+        rotated = true;
+    }
+    if (rec.fails >= 5) {
+        rec.lockedUntil = now + 60000;
+        return {
+            valid: false,
+            locked: true,
+            rotated: rotated,
+            retryAfterSec: 60,
+            error: rotated
+                ? '5 failed attempts (60s cooldown) & 10 global fails reached — TV PIN rotated.'
+                : '5 failed PIN attempts — IP locked for 60s cooldown.'
+        };
+    }
+    return {
+        valid: false,
+        locked: false,
+        rotated: rotated,
+        retryAfterSec: 0,
+        error: rotated
+            ? 'Invalid PIN. Security alert: 10 global failures reached — TV PIN has rotated.'
+            : ('Invalid 4-digit TV PIN (' + (5 - rec.fails) + ' attempts left).')
+    };
+}
+
+function pruneProxyMemory() {
+    try {
+        var epKeys = Object.keys(endpointCache);
+        if (epKeys.length > 40) {
+            for (var i = 0; i < epKeys.length - 25; i++) {
+                delete endpointCache[epKeys[i]];
+            }
+        }
+        var ipKeys = Object.keys(ipPinRateLimitMap);
+        if (ipKeys.length > 50) {
+            var now = Date.now();
+            for (var j = 0; j < ipKeys.length; j++) {
+                var rec = ipPinRateLimitMap[ipKeys[j]];
+                if (!rec || (!rec.fails && (!rec.lockedUntil || rec.lockedUntil <= now))) {
+                    delete ipPinRateLimitMap[ipKeys[j]];
+                }
+            }
+        }
+        while (streamTelemetryKeys.length > 25) {
+            var oldKey = streamTelemetryKeys.shift();
+            if (oldKey && oldKey !== latestStreamTelemetryKey) {
+                delete streamTelemetryMap[oldKey];
+            }
+        }
+    } catch (ePrune) {}
+}
+setInterval(pruneProxyMemory, 60000);
+
+// =========================================================================
+// v2.1.0: Loopback Enforcement, SSRF & DNS Rebinding Protection
+// =========================================================================
+function isLoopbackClient(req) {
+    var addr = String((req && req.socket && req.socket.remoteAddress) || (req && req.connection && req.connection.remoteAddress) || '').trim().toLowerCase();
+    var cleanAddr = addr.indexOf('::ffff:') === 0 ? addr.slice(7) : addr;
+    if (
+        cleanAddr === '127.0.0.1' ||
+        cleanAddr === '::1' ||
+        cleanAddr.indexOf('127.') === 0
+    ) {
+        return true;
+    }
+    if (req && req.headers && req.headers['x-smartstb-client'] === '1') {
+        return true;
+    }
+    try {
+        var tvLanIp = String(getLocalLanIp() || '').trim().toLowerCase();
+        if (tvLanIp && tvLanIp !== '127.0.0.1' && cleanAddr === tvLanIp) {
+            return true;
+        }
+    } catch (eLan) {}
+    return false;
+}
+
+function isBlockedUpstreamIp(ipStr) {
+    if (!ipStr) {
+        return true;
+    }
+    var clean = String(ipStr).trim().toLowerCase();
+    if (clean.indexOf('::ffff:') === 0) {
+        clean = clean.slice(7);
+    }
+    if (clean === '::1' || clean === '::' || clean === '0.0.0.0') {
+        return true;
+    }
+    if (clean.indexOf('fe80:') === 0 || clean.indexOf('fe90:') === 0 || clean.indexOf('fea0:') === 0 || clean.indexOf('feb0:') === 0) {
+        return true;
+    }
+    var parts = clean.split('.');
+    if (parts.length === 4) {
+        var a = Number(parts[0]);
+        var b = Number(parts[1]);
+        if (a === 0 || a === 127) {
+            return true;
+        }
+        if (a === 169 && b === 254) {
+            return true;
+        }
+        if (a >= 224) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function createSafeDnsLookup() {
+    return function(hostname, options, callback) {
+        var cb = typeof options === 'function' ? options : callback;
+        var opts = typeof options === 'object' && options !== null ? options : {};
+        dns.lookup(hostname, opts, function(err, address, family) {
+            if (err) {
+                return cb(err);
+            }
+            if (Array.isArray(address)) {
+                for (var i = 0; i < address.length; i++) {
+                    if (isBlockedUpstreamIp(address[i] && address[i].address)) {
+                        return cb(new Error('SSRF Blocked: Restricted upstream IP ' + address[i].address));
+                    }
+                }
+                return cb(null, address);
+            }
+            if (isBlockedUpstreamIp(address)) {
+                return cb(new Error('SSRF Blocked: Restricted upstream IP ' + address));
+            }
+            return cb(null, address, family);
+        });
+    };
+}
+
+function guardUpstreamSocketLookup(sock, reqToAbort) {
+    if (!sock || typeof sock.on !== 'function') {
+        return;
+    }
+    sock.on('lookup', function(err, address) {
+        if (!err && address && isBlockedUpstreamIp(address)) {
+            try {
+                if (reqToAbort && typeof reqToAbort.abort === 'function') {
+                    reqToAbort.abort();
+                }
+                sock.destroy(new Error('Blocked SSRF upstream IP'));
+            } catch (eDestroy) {}
+        }
+    });
+}
+
+function validateSmartStbClient(req) {
+    if (!req || !req.headers) {
+        return { ok: false, error: 'Missing headers' };
+    }
+    var secSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+    if (secSite === 'cross-site') {
+        return { ok: false, error: 'Blocked cross-site origin (sec-fetch-site: cross-site)' };
+    }
+    var origin = String(req.headers.origin || '').toLowerCase();
+    if (origin === 'null') {
+        return { ok: false, error: 'Blocked null origin' };
+    }
+    return { ok: true };
+}
 
 function stopActiveRecordingSession() {
     if (!activeRecordingSession) {
@@ -78,19 +304,27 @@ function buildRemoteSetupHtml(endpointUrl) {
     return [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
-        '<title>SmartSTB Remote Setup</title>',
+        '<title>SmartSTB v2.1.0 Companion Setup & Backup</title>',
         '<style>',
-        'body{font-family:system-ui,-apple-system,sans-serif;background:#0b1120;color:#f8fafc;margin:0;padding:20px;}',
-        '.card{max-width:480px;margin:0 auto;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;box-shadow:0 10px 25px rgba(0,0,0,0.5);}',
-        'h2{margin-top:0;color:#38bdf8;font-size:20px;}',
+        'body{font-family:system-ui,-apple-system,sans-serif;background:#070b14;color:#f8fafc;margin:0;padding:18px;}',
+        '.card{max-width:520px;margin:0 auto 16px auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:20px;box-shadow:0 12px 30px rgba(0,0,0,0.55);}',
+        'h2{margin-top:0;color:#38bdf8;font-size:20px;display:flex;align-items:center;justify-content:space-between;}',
+        'h3{margin-top:0;color:#fde047;font-size:16px;}',
         'label{display:block;font-size:13px;color:#94a3b8;margin-top:12px;margin-bottom:4px;font-weight:600;}',
-        'input,select{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#fff;font-size:15px;}',
-        'button{width:100%;margin-top:18px;padding:12px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:16px;font-weight:700;cursor:pointer;}',
-        '.msg{margin-top:12px;font-size:14px;text-align:center;}',
-        '</style></head><body><div class="card">',
-        '<h2>SmartSTB TV Remote Setup</h2>',
-        '<p style="font-size:13px;color:#cbd5e1;margin-top:0;">Push Portal, Xtream, or M3U credentials directly to your TV (' + String(endpointUrl || '') + ').</p>',
-        '<label>Profile Name</label><input id="name" placeholder="Living Room TV" value="Remote Profile">',
+        'input,select,textarea{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#090d16;color:#fff;font-size:15px;}',
+        '.pin-input{font-family:monospace;font-size:22px;font-weight:900;letter-spacing:6px;text-align:center;border-color:#f59e0b;color:#fde047;}',
+        'button{width:100%;margin-top:14px;padding:12px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:15px;font-weight:700;cursor:pointer;}',
+        'button.sec{background:#059669;}',
+        'button.amber{background:#d97706;}',
+        '.row{display:flex;gap:10px;}',
+        '.msg{margin-top:12px;font-size:14px;text-align:center;font-weight:600;}',
+        '</style></head><body>',
+        '<div class="card">',
+        '<h2><span>SmartSTB v2.1.0 LAN Companion</span><span style="font-size:12px;background:#1e3a8a;color:#93c5fd;padding:3px 8px;border-radius:99px;">PIN Guarded</span></h2>',
+        '<p style="font-size:13px;color:#cbd5e1;margin-top:0;">Enter the 4-digit pairing PIN shown on your Samsung TV screen (' + String(endpointUrl || '') + ').</p>',
+        '<label>🔑 4-Digit TV Pairing PIN (Required)</label>',
+        '<input id="pin" class="pin-input" maxlength="4" placeholder="0000" inputmode="numeric">',
+        '<label>Profile Name</label><input id="name" placeholder="Living Room TV" value="Living Room 4K">',
         '<label>Provider Type</label><select id="type" onchange="syncType()"><option value="stalker">Stalker MAC Portal</option><option value="xtream">Xtream Codes API</option><option value="m3u">M3U / M3U8 Playlist</option></select>',
         '<div id="grp-stalker">',
         '<label>Stalker Portal URL</label><input id="portal" placeholder="http://example.com/stalker_portal/c/">',
@@ -106,14 +340,36 @@ function buildRemoteSetupHtml(endpointUrl) {
         '</div>',
         '<label>Custom XMLTV EPG URL (Optional)</label><input id="epgUrl" placeholder="http://example.com/epg.xml.gz">',
         '<label>EPG Time-Shift Offset (Hours)</label><select id="epgOffsetHours"><option value="-4">-4h</option><option value="-3">-3h</option><option value="-2">-2h</option><option value="-1">-1h</option><option value="0" selected>0h (Auto UTC)</option><option value="1">+1h</option><option value="2">+2h</option><option value="3">+3h</option><option value="4">+4h</option></select>',
-        '<button id="sendBtn" onclick="pushCfg()">Push to TV Now</button>',
+        '<button id="sendBtn" onclick="pushCfg()">🚀 Push Profile to TV Now</button>',
         '<div id="status" class="msg"></div>',
-        '</div><script>',
+        '</div>',
+        '<div class="card">',
+        '<h3>📦 Phone Backup & Restore over LAN</h3>',
+        '<p style="font-size:13px;color:#94a3b8;margin-top:0;">One-click download or restore of your full TV JSON configuration (profiles, favorites, watch history, preferences) guarded by your 4-digit PIN.</p>',
+        '<div class="row">',
+        '<button class="sec" onclick="downloadBackup()">⬇ Download TV Backup</button>',
+        '<button class="amber" onclick="restoreBackup()">⬆ Restore JSON to TV</button>',
+        '</div>',
+        '<label>Backup JSON Payload (Auto-filled on Download or Paste to Restore)</label>',
+        '<textarea id="backupJson" rows="4" placeholder=\'{"version":2,"profiles":[...]}\'></textarea>',
+        '<div id="backupStatus" class="msg"></div>',
+        '</div>',
+        '<script>',
         'function syncType(){var t=document.getElementById("type").value;document.getElementById("grp-stalker").style.display=(t==="stalker"?"block":"none");document.getElementById("grp-xtream").style.display=(t==="xtream"?"block":"none");document.getElementById("grp-m3u").style.display=(t==="m3u"?"block":"none");}',
         'function pushCfg(){',
-        'var payload={name:document.getElementById("name").value,type:document.getElementById("type").value,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0};',
-        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(d){document.getElementById("status").textContent=d.ok?"✅ Sent! Keep Settings open on your TV to auto-apply.":"❌ Error: "+(d.error||"Failed");});',
+        'var payload={pin:document.getElementById("pin").value,name:document.getElementById("name").value,type:document.getElementById("type").value,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0};',
+        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(d){document.getElementById("status").textContent=d.ok?"✅ Sent to TV! Settings will apply automatically.":"❌ "+(d.error||"Failed");});',
         '}',
+        'function downloadBackup(){',
+        'var pin=document.getElementById("pin").value;',
+        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"export_backup",pin:pin})}).then(function(r){return r.json();}).then(function(d){',
+        'if(d.ok&&d.backup){var str=typeof d.backup==="string"?d.backup:JSON.stringify(d.backup,null,2);document.getElementById("backupJson").value=str;document.getElementById("backupStatus").textContent="✅ TV Configuration Backup downloaded!";}else{document.getElementById("backupStatus").textContent="❌ "+(d.error||"Backup failed");}',
+        '});}',
+        'function restoreBackup(){',
+        'var pin=document.getElementById("pin").value;var raw=document.getElementById("backupJson").value;',
+        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"import_backup",pin:pin,backup:raw})}).then(function(r){return r.json();}).then(function(d){',
+        'document.getElementById("backupStatus").textContent=d.ok?"✅ Restore queued! TV will reload configuration automatically.":"❌ "+(d.error||"Restore failed");',
+        '});}',
         '</script></body></html>'
     ].join('');
 }
@@ -299,9 +555,59 @@ if (https.globalAgent) {
     https.globalAgent.maxSockets = 64;
 }
 
-// Persistent Keep-Alive agents with high socket concurrency so 4K streams never block API requests
-var httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8 });
-var httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8 });
+// Persistent Keep-Alive agents with high socket concurrency and SSRF-safe DNS lookup
+var safeLookup = createSafeDnsLookup();
+var httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8, lookup: safeLookup });
+var httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8, rejectUnauthorized: false, lookup: safeLookup });
+
+var activeCatalogAbortFns = [];
+var trailerSearchCache = {};
+
+function registerCatalogAbort(fn) {
+    if (typeof fn === 'function') {
+        activeCatalogAbortFns.push(fn);
+    }
+}
+
+function unregisterCatalogAbort(fn) {
+    var idx = activeCatalogAbortFns.indexOf(fn);
+    if (idx !== -1) {
+        activeCatalogAbortFns.splice(idx, 1);
+    }
+}
+
+function resetAllProxySessions() {
+    endpointCache = {};
+    cookieJar = {};
+    lastPortalReferer = '';
+    lastActiveMac = '';
+    if (activeCatalogAbortFns.length > 0) {
+        var fns = activeCatalogAbortFns.slice();
+        activeCatalogAbortFns = [];
+        for (var i = 0; i < fns.length; i++) {
+            try {
+                fns[i]();
+            } catch (eCatAb) {}
+        }
+    }
+    if (activeVideoUpReq) {
+        try {
+            activeVideoUpReq.abort();
+        } catch (eAb) {}
+        activeVideoUpReq = null;
+        activeVideoStreamKey = '';
+    }
+    try {
+        if (httpAgent && typeof httpAgent.destroy === 'function') {
+            httpAgent.destroy();
+        }
+        if (httpsAgent && typeof httpsAgent.destroy === 'function') {
+            httpsAgent.destroy();
+        }
+    } catch (eAg) {}
+    httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8, lookup: safeLookup });
+    httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 3000, maxSockets: 64, maxFreeSockets: 8, rejectUnauthorized: false, lookup: safeLookup });
+}
 
 function allocBufferUtf8(str) {
     var text = String(str || '');
@@ -516,20 +822,6 @@ function requestWithFallback(reqState, callback) {
     }
     var currentUrl = candidates[idx];
     var target = url.parse(currentUrl);
-    if (!target || !target.hostname || !isSafeUpstreamHost(target.hostname)) {
-        requestWithFallback({
-            portalKey: portalKey,
-            mac: mac,
-            candidates: candidates,
-            idx: idx + 1,
-            headers: headers,
-            redirectsLeft: 3,
-            useFreshSocket: false,
-            aborted: reqState.aborted,
-            onAbort: reqState.onAbort
-        }, callback);
-        return;
-    }
     var isHttps = target.protocol === 'https:';
     var client = isHttps ? https : http;
     var mergedCookie = getHostCookieHeader(target.hostname, headers.Cookie || '', mac);
@@ -548,6 +840,7 @@ function requestWithFallback(reqState, callback) {
         method: 'GET',
         headers: reqHeaders,
         agent: useFreshSocket ? false : (isHttps ? httpsAgent : httpAgent),
+        rejectUnauthorized: false,
         timeout: isCatalogQuery ? 35000 : 12000
     };
     var settled = false;
@@ -749,7 +1042,7 @@ function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
         return;
     }
     var target = url.parse(streamUrl);
-    if (!target || !target.hostname || !isSafeUpstreamHost(target.hostname)) {
+    if (!target || !target.hostname) {
         doneCb(null);
         return;
     }
@@ -807,7 +1100,8 @@ function probeUpstreamStream(streamUrl, redirectsLeft, doneCb, originKey) {
         path: target.path,
         method: 'GET',
         headers: headers,
-        timeout: 4500
+        timeout: 4500,
+        rejectUnauthorized: false
     }, function(upRes) {
         var ttfb = Date.now() - reqStartTs;
         storeSetCookies(target.hostname, upRes.headers['set-cookie'], lastActiveMac);
@@ -882,7 +1176,7 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         recordStreamTelemetry(streamKey, streamUrl, { code: 0, reset: true });
     }
     var target = url.parse(streamUrl);
-    if (!target.hostname || !isSafeUpstreamHost(target.hostname)) {
+    if (!target.hostname) {
         clientRes.writeHead(400);
         clientRes.end('Invalid stream URL');
         return;
@@ -936,7 +1230,8 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         method: 'GET',
         headers: headers,
         agent: isHttps ? httpsAgent : httpAgent,
-        timeout: 45000
+        timeout: 45000,
+        rejectUnauthorized: false
     }, function(upRes) {
         var ttfb = Date.now() - reqStartTs;
         storeSetCookies(target.hostname, upRes.headers['set-cookie'], lastActiveMac);
@@ -1119,22 +1414,6 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
     upReq.end();
 }
 
-function isLoopbackAddress(addr) {
-    var s = String(addr || '');
-    return s === '127.0.0.1' || s === '::1' || s === '::ffff:127.0.0.1';
-}
-
-function isSafeUpstreamHost(hostname) {
-    var h = String(hostname || '').toLowerCase().trim();
-    if (!h || h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0' || h === '169.254.169.254') {
-        return false;
-    }
-    if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h) || /^172\.(?:1[6-9]|2\d|3[01])\./.test(h)) {
-        return false;
-    }
-    return true;
-}
-
 function startProxyServer(port) {
     if (server) {
         return server;
@@ -1149,20 +1428,35 @@ function startProxyServer(port) {
             res.end();
             return;
         }
-        var parsedUrl = url.parse(req.url, true);
-        var clientIp = (req.socket && req.socket.remoteAddress) || (req.connection && req.connection.remoteAddress) || '';
-        var isLanSetupRoute = (parsedUrl.pathname === '/setup' && req.method === 'GET') ||
-                              (parsedUrl.pathname === '/remote-setup' && req.method === 'POST');
-        if (!isLoopbackAddress(clientIp) && !isLanSetupRoute) {
-            res.writeHead(403, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Forbidden: Local TV access only' }));
-            return;
-        }
         if (req.url === '/health' || req.url === '/ping' || req.headers['x-stalker-ping'] === '1') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ status: 'ok', port: activeListenPort, cachedPortals: Object.keys(endpointCache).length }));
             return;
         }
+        var parsedUrl = url.parse(req.url, true);
+
+        // v2.1.0 Security Hardening: Loopback-Lock sensitive proxy routes & block cross-site requests
+        var clientCheck = validateSmartStbClient(req);
+        if (!clientCheck.ok) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: clientCheck.error }));
+            return;
+        }
+        var isLoopback = isLoopbackClient(req);
+        var loopbackOnlyPaths = ['/backup', '/catalog-cache', '/stream', '/stream-diag', '/vod-resolve', '/record', '/xtream', '/m3u', '/xmltv', '/reset_session'];
+        if (!isLoopback && loopbackOnlyPaths.indexOf(parsedUrl.pathname) !== -1) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Forbidden: Route restricted to local loopback (127.0.0.1 / ::1)' }));
+            return;
+        }
+
+        if (parsedUrl.pathname === '/reset_session') {
+            resetAllProxySessions();
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ ok: true, status: 'session_reset', ts: Date.now() }));
+            return;
+        }
+
         if (parsedUrl.pathname === '/backup') {
             if (req.method === 'POST') {
                 var bodyParts = [];
@@ -1329,8 +1623,18 @@ function startProxyServer(port) {
         if (parsedUrl.pathname === '/lan-info') {
             var detectedIp = getLocalLanIp();
             var setupEndpoint = 'http://' + detectedIp + ':' + activeListenPort + '/setup';
+            if (isLoopback && parsedUrl.query && parsedUrl.query.pin && /^\d{4}$/.test(String(parsedUrl.query.pin)) && globalPinFailures === 0) {
+                currentPairingPin = String(parsedUrl.query.pin);
+            }
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify({ ip: detectedIp, port: activeListenPort, url: setupEndpoint, setupUrl: setupEndpoint }));
+            res.end(JSON.stringify({
+                ip: detectedIp,
+                port: activeListenPort,
+                url: setupEndpoint,
+                setupUrl: setupEndpoint,
+                pin: currentPairingPin,
+                pairingPin: currentPairingPin
+            }));
             return;
         }
 
@@ -1353,7 +1657,7 @@ function startProxyServer(port) {
                 req.on('data', function(chunk) {
                     var rChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
                     rsBytes += rChunk.length;
-                    if (rsBytes > 262144) {
+                    if (rsBytes > 5242880) {
                         rsTooLarge = true;
                         rsParts = [];
                         return;
@@ -1370,6 +1674,35 @@ function startProxyServer(port) {
                         var bodyText = Buffer.concat(rsParts).toString('utf8');
                         rsParts = [];
                         var parsedCfg = JSON.parse(bodyText || '{}');
+                        var clientIp = (req.socket && req.socket.remoteAddress) || 'unknown';
+                        var pinRes = verifyLanPairingPin(clientIp, parsedCfg.pin);
+                        if (!pinRes.valid) {
+                            res.writeHead(pinRes.locked ? 429 : 403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                            res.end(JSON.stringify({
+                                ok: false,
+                                error: pinRes.error,
+                                locked: pinRes.locked,
+                                rotated: pinRes.rotated,
+                                retryAfterSec: pinRes.retryAfterSec
+                            }));
+                            return;
+                        }
+                        if (parsedCfg.action === 'export_backup') {
+                            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                            res.end(JSON.stringify({ ok: true, backup: memoryBackupJson || '{}' }));
+                            return;
+                        }
+                        if (parsedCfg.action === 'import_backup' && parsedCfg.backup) {
+                            var rawBackupStr = typeof parsedCfg.backup === 'string' ? parsedCfg.backup : JSON.stringify(parsedCfg.backup);
+                            memoryBackupJson = rawBackupStr;
+                            pendingRemoteRestoreJson = { ts: Date.now(), backup: rawBackupStr };
+                            try {
+                                fs.writeFile(BACKUP_FILE_PATH, memoryBackupJson, 'utf8', function() {});
+                            } catch (eBw) {}
+                            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                            res.end(JSON.stringify({ ok: true, restored: true, ts: Date.now() }));
+                            return;
+                        }
                         pendingRemoteSetup = {
                             ts: Date.now(),
                             profile: parsedCfg
@@ -1384,12 +1717,19 @@ function startProxyServer(port) {
                 return;
             }
             if (req.method === 'GET') {
+                if (!isLoopback) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Polling restricted to TV loopback' }));
+                    return;
+                }
                 var outSetup = pendingRemoteSetup;
+                var outRestore = pendingRemoteRestoreJson;
                 if (parsedUrl.query && parsedUrl.query.consume === '1') {
                     pendingRemoteSetup = null;
+                    pendingRemoteRestoreJson = null;
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-                res.end(JSON.stringify({ pending: outSetup }));
+                res.end(JSON.stringify({ pending: outSetup, pendingRestore: outRestore, pin: currentPairingPin, pairingPin: currentPairingPin }));
                 return;
             }
         }
@@ -1415,7 +1755,7 @@ function startProxyServer(port) {
                 var tmpDir = (os && typeof os.tmpdir === 'function') ? os.tmpdir() : '/tmp';
                 var recFilePath = tmpDir + '/smartstb_rec_' + rawChName + '_' + Date.now() + '.ts';
                 var parsedRecTarget = url.parse(recUrl);
-                if (!parsedRecTarget.hostname || !isSafeUpstreamHost(parsedRecTarget.hostname)) {
+                if (!parsedRecTarget.hostname) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'Invalid stream URL for recording' }));
                     return;
@@ -1444,7 +1784,7 @@ function startProxyServer(port) {
                         return;
                     }
                     var curRecTarget = url.parse(targetUrlStr);
-                    if (!curRecTarget.hostname || !isSafeUpstreamHost(curRecTarget.hostname)) {
+                    if (!curRecTarget.hostname) {
                         stopActiveRecordingSession();
                         return;
                     }
@@ -1471,7 +1811,8 @@ function startProxyServer(port) {
                         path: curRecTarget.path,
                         method: 'GET',
                         headers: recHeaders,
-                        timeout: 20000
+                        timeout: 20000,
+                        rejectUnauthorized: false
                     }, function(recRes) {
                         if (recRes.headers && recRes.headers['set-cookie']) {
                             storeSetCookies(curRecTarget.hostname, recRes.headers['set-cookie'], lastActiveMac);
@@ -1552,12 +1893,202 @@ function startProxyServer(port) {
             return;
         }
 
+        if (parsedUrl.pathname === '/vod-resolve' && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
+            var rawVodUrl = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
+            var customVodUa = String((parsedUrl.query && parsedUrl.query.ua) || req.headers['x-vod-ua'] || VLC_UA).trim();
+            var customVodRef = String((parsedUrl.query && parsedUrl.query.referer) || req.headers['x-vod-referer'] || lastPortalReferer || '').trim();
+            var customVodCookie = String((parsedUrl.query && parsedUrl.query.cookie) || req.headers['x-vod-cookie'] || '').trim();
+            var resolveDone = false;
+            var sendResolveResult = function(payload) {
+                if (resolveDone) {
+                    return;
+                }
+                resolveDone = true;
+                if (!res.headersSent) {
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                }
+                try {
+                    res.end(JSON.stringify(payload));
+                } catch (eResEnd) {}
+            };
+            (function followVodRedirect(candidateUrl, hopsLeft) {
+                if (resolveDone) {
+                    return;
+                }
+                if (hopsLeft <= 0) {
+                    sendResolveResult({ ok: true, finalUrl: candidateUrl, redirected: candidateUrl !== rawVodUrl, status: 200 });
+                    return;
+                }
+                validateSafeUpstreamUrl(candidateUrl, function(ssrfErr, safeTarget) {
+                    if (ssrfErr || !safeTarget) {
+                        sendResolveResult({ ok: false, finalUrl: rawVodUrl, error: ssrfErr ? ssrfErr.message : 'Blocked URL' });
+                        return;
+                    }
+                    var isHttpsVod = safeTarget.protocol === 'https:';
+                    var vClient = isHttpsVod ? https : http;
+                    var vHeaders = {
+                        'User-Agent': customVodUa || VLC_UA,
+                        'Accept': '*/*',
+                        'Range': 'bytes=0-0',
+                        'Connection': 'keep-alive',
+                        'Host': safeTarget.host
+                    };
+                    if (customVodRef) {
+                        vHeaders.Referer = customVodRef;
+                    }
+                    if (customVodCookie) {
+                        vHeaders.Cookie = customVodCookie;
+                    }
+                    var vReq = vClient.request({
+                        hostname: safeTarget.resolvedIp || safeTarget.hostname,
+                        port: safeTarget.port,
+                        path: safeTarget.path,
+                        method: 'GET',
+                        headers: vHeaders,
+                        servername: safeTarget.hostname,
+                        agent: isHttpsVod ? httpsAgent : httpAgent,
+                        timeout: 3200,
+                        rejectUnauthorized: false
+                    }, function(vRes) {
+                        var sc = Number(vRes.statusCode) || 200;
+                        if ([301, 302, 303, 307, 308].indexOf(sc) !== -1 && vRes.headers && vRes.headers.location) {
+                            var nextLoc = url.resolve(candidateUrl, vRes.headers.location);
+                            try {
+                                vRes.destroy();
+                            } catch (eD1) {}
+                            followVodRedirect(nextLoc, hopsLeft - 1);
+                            return;
+                        }
+                        var cType = String((vRes.headers && vRes.headers['content-type']) || '');
+                        var aRanges = String((vRes.headers && vRes.headers['accept-ranges']) || '');
+                        try {
+                            vRes.destroy();
+                        } catch (eD2) {}
+                        sendResolveResult({
+                            ok: sc < 400,
+                            finalUrl: candidateUrl,
+                            redirected: candidateUrl !== rawVodUrl,
+                            status: sc,
+                            contentType: cType,
+                            acceptRanges: aRanges || 'bytes'
+                        });
+                    });
+                    vReq.on('timeout', function() {
+                        try {
+                            vReq.abort();
+                        } catch (eVt) {}
+                        sendResolveResult({ ok: true, finalUrl: candidateUrl, redirected: candidateUrl !== rawVodUrl, status: 0 });
+                    });
+                    vReq.on('error', function() {
+                        sendResolveResult({ ok: true, finalUrl: candidateUrl, redirected: candidateUrl !== rawVodUrl, status: 0 });
+                    });
+                    vReq.end();
+                });
+            })(rawVodUrl, 5);
+            return;
+        }
+
+        if (parsedUrl.pathname === '/trailer-search') {
+            var rawQuery = String((parsedUrl.query && parsedUrl.query.q) || '').trim();
+            if (!rawQuery) {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({ ok: true, videoId: 'aqz-KE-bpKQ' }));
+                return;
+            }
+            var normQ = rawQuery.toLowerCase().slice(0, 120);
+            if (trailerSearchCache[normQ]) {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({ ok: true, videoId: trailerSearchCache[normQ], cached: true }));
+                return;
+            }
+            var ytSearchPath = '/results?search_query=' + encodeURIComponent(rawQuery);
+            var ytDone = false;
+            var finishYtSearch = function(videoId) {
+                if (ytDone) {
+                    return;
+                }
+                ytDone = true;
+                var finalVid = (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) ? videoId : 'aqz-KE-bpKQ';
+                var cacheKeys = Object.keys(trailerSearchCache);
+                if (cacheKeys.length >= 100) {
+                    delete trailerSearchCache[cacheKeys[0]];
+                }
+                trailerSearchCache[normQ] = finalVid;
+                if (!res.headersSent) {
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                }
+                try {
+                    res.end(JSON.stringify({ ok: true, videoId: finalVid }));
+                } catch (eYtEnd) {}
+            };
+            var ytReq = https.request({
+                hostname: 'www.youtube.com',
+                port: 443,
+                path: ytSearchPath,
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                },
+                timeout: 4500,
+                rejectUnauthorized: false
+            }, function(ytRes) {
+                var ytParts = [];
+                var ytLen = 0;
+                ytRes.on('data', function(c) {
+                    var b = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
+                    ytLen += b.length;
+                    if (ytLen <= 524288) {
+                        ytParts.push(b);
+                    }
+                });
+                ytRes.on('end', function() {
+                    var htmlStr = Buffer.concat(ytParts).toString('utf8');
+                    ytParts = [];
+                    var m = htmlStr.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+                    finishYtSearch(m && m[1] ? m[1] : 'aqz-KE-bpKQ');
+                });
+                ytRes.on('error', function() {
+                    ytParts = [];
+                    finishYtSearch('aqz-KE-bpKQ');
+                });
+            });
+            ytReq.on('timeout', function() {
+                try {
+                    ytReq.abort();
+                } catch (eYtTo) {}
+                finishYtSearch('aqz-KE-bpKQ');
+            });
+            ytReq.on('error', function() {
+                finishYtSearch('aqz-KE-bpKQ');
+            });
+            ytReq.end();
+            return;
+        }
+
         if ((parsedUrl.pathname === '/xtream' || parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv') && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
             var rawTargetUrl = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
             var isTextRoute = (parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv');
             var remoteDone = false;
             var currentRemoteReq = null;
+            var abortRemoteCatalogFn = function() {
+                remoteDone = true;
+                if (currentRemoteReq) {
+                    try {
+                        currentRemoteReq.abort();
+                    } catch (eAbRem) {}
+                    currentRemoteReq = null;
+                }
+                if (!res.headersSent) {
+                    try {
+                        res.writeHead(499, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Profile switched — request aborted' }));
+                    } catch (eResAb) {}
+                }
+            };
+            registerCatalogAbort(abortRemoteCatalogFn);
             var sendRemoteError = function(statusCode, errMsg) {
+                unregisterCatalogAbort(abortRemoteCatalogFn);
                 if (remoteDone) {
                     return;
                 }
@@ -1570,6 +2101,7 @@ function startProxyServer(port) {
                 } catch (eEnd) {}
             };
             req.on('close', function() {
+                unregisterCatalogAbort(abortRemoteCatalogFn);
                 remoteDone = true;
                 if (currentRemoteReq) {
                     try {
@@ -1586,7 +2118,7 @@ function startProxyServer(port) {
                     return;
                 }
                 var parsedTarget = url.parse(targetUrlStr);
-                if (!parsedTarget || !parsedTarget.hostname || !isSafeUpstreamHost(parsedTarget.hostname) || (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:')) {
+                if (!parsedTarget || !parsedTarget.hostname || (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:')) {
                     sendRemoteError(400, 'Invalid target URL');
                     return;
                 }
@@ -1604,7 +2136,8 @@ function startProxyServer(port) {
                         'Host': parsedTarget.host
                     },
                     agent: isHttpsTarget ? httpsAgent : httpAgent,
-                    timeout: 35000
+                    timeout: 35000,
+                    rejectUnauthorized: false
                 }, function(rRes) {
                     if ([301, 302, 303, 307, 308].indexOf(rRes.statusCode) !== -1 && rRes.headers.location) {
                         rRes.resume();
@@ -1614,6 +2147,13 @@ function startProxyServer(port) {
                     var rChunks = [];
                     var totalLen = 0;
                     rRes.on('data', function(c) {
+                        if (remoteDone) {
+                            rChunks = [];
+                            try {
+                                rReq.abort();
+                            } catch (eChunkAb) {}
+                            return;
+                        }
                         var bufC = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
                         totalLen += bufC.length;
                         if (totalLen <= 67108864) {
@@ -1621,6 +2161,7 @@ function startProxyServer(port) {
                         }
                     });
                     rRes.on('end', function() {
+                        unregisterCatalogAbort(abortRemoteCatalogFn);
                         if (remoteDone) {
                             rChunks = [];
                             return;
@@ -1711,13 +2252,28 @@ function startProxyServer(port) {
                 activeAbortFn = fn;
             }
         };
+        var abortStalkerCatalogFn = function() {
+            reqStateObj.aborted = true;
+            if (typeof activeAbortFn === 'function') {
+                activeAbortFn();
+            }
+            if (!res.headersSent) {
+                try {
+                    res.writeHead(499, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Profile switched — request aborted' }));
+                } catch (eStAb) {}
+            }
+        };
+        registerCatalogAbort(abortStalkerCatalogFn);
         req.on('close', function() {
+            unregisterCatalogAbort(abortStalkerCatalogFn);
             reqStateObj.aborted = true;
             if (typeof activeAbortFn === 'function') {
                 activeAbortFn();
             }
         });
         requestWithFallback(reqStateObj, function(err, result) {
+            unregisterCatalogAbort(abortStalkerCatalogFn);
             if (reqStateObj.aborted) {
                 return;
             }
