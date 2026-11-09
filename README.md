@@ -102,7 +102,6 @@
 
 ## Step-by-Step Installation on Samsung Tizen TV
 
----
 
 ### Method 1: One-Click Install via Apps2Samsung (Recommended)
 
