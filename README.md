@@ -9,6 +9,30 @@
 
 ---
 
+## 📑 Table of Contents
+
+- [🚀 What's New in v2.1.0](#-whats-new-in-v210)
+- [✨ Key Features](#-key-features)
+  - [1. Multi-Protocol IPTV & Multi-Profile Management](#1-multi-protocol-iptv--multi-profile-management)
+  - [2. Hardware-Accelerated Tizen AVPlay & Playback Controls](#2-hardware-accelerated-tizen-avplay--playback-controls)
+  - [3. 2D Timeline EPG Grid, Catch-Up TV, DVR & System Tools](#3-2d-timeline-epg-grid-catch-up-tv-dvr--system-tools)
+- [🎮 Samsung TV Remote Control Map](#-samsung-tv-remote-control-map)
+- [🛠️ How to Install on Your Samsung Smart TV (Tizen 4.0+ / 2018–2026)](#️-how-to-install-on-your-samsung-smart-tv-tizen-40--20182026)
+  - [Prerequisites: Enable Developer Mode on Your Samsung TV](#prerequisites-enable-developer-mode-on-your-samsung-tv)
+- [Step-by-Step Installation on Samsung Tizen TV](#step-by-step-installation-on-samsung-tizen-tv)
+  - [Method 1: One-Click Install via Apps2Samsung (Recommended)](#method-1-one-click-install-via-apps2samsung-recommended)
+  - [Method 2: Manual Build & Install via Tizen Studio](#method-2-manual-build--install-via-tizen-studio)
+    - [Phase 1: Enable Developer Mode on your Samsung TV](#phase-1-enable-developer-mode-on-your-samsung-tv)
+    - [Phase 2: Install Tizen Studio & TV Extension](#phase-2-install-tizen-studio--tv-extension)
+    - [Phase 3: Generate Samsung Certificates (Author & Distributor)](#phase-3-generate-samsung-certificates-author--distributor)
+    - [Phase 4: Connect Tizen Studio to your Samsung TV](#phase-4-connect-tizen-studio-to-your-samsung-tv)
+    - [Phase 5: Build and Deploy the `.wgt` Package](#phase-5-build-and-deploy-the-wgt-package)
+- [📂 Tizen `.wgt` Project Structure (`/public/tizen/`)](#-tizen-wgt-project-structure-publictizen)
+- [License](#license)
+- [Disclaimer](#disclaimer)
+
+---
+
 ## 🚀 What's New in v2.1.0
 
 - **Redesigned Full-Width Mobile QR & LAN Setup Banner (`http://<TV-LAN-IP>:3001/setup`)**:
