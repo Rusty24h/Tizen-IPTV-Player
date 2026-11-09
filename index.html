@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0, user-scalable=no" />
-    <title>SmartSTB Clone</title>
+    <title>SmartSTB v2.1.0</title>
     <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
     <link rel="stylesheet" type="text/css" href="css/style.css" />
+    <link rel="stylesheet" type="text/css" href="style.css" />
 </head>
 <body class="theme-blue">
     <!-- Hardware Video Surface -->
@@ -76,9 +77,8 @@
                 <div class="settings-workspace-box">
                     <div class="settings-workspace-header">
                         <div class="settings-header-titles">
-                            <div class="settings-eyebrow">SYSTEM &amp; PORTAL CONFIGURATION</div>
                             <h2>
-                                <span>Portal &amp; Profile Settings</span>
+                                <span class="settings-main-heading">Portal &amp; Profile Settings <small class="settings-eyebrow">SYSTEM &amp; PORTAL CONFIGURATION</small></span>
                                 <span class="settings-header-pills">
                                     <span id="settings-conn-status" class="settings-conn-status">Ready</span>
                                     <span id="settings-active-type-pill">Stalker MAC</span>
@@ -94,7 +94,7 @@
                                 <div class="settings-section-title">PORTAL PROFILE &amp; PROTOCOL</div>
                                 <div class="modal-row">
                                     <div>
-                                        <label for="sel-profile">Active Portal Profile</label>
+                                        <label for="sel-profile">Active Profile</label>
                                         <select id="sel-profile"></select>
                                     </div>
                                     <div>
@@ -104,9 +104,9 @@
                                 </div>
                                 <label for="sel-provider-type">Provider Type (Click Tab or Cycle with Enter)</label>
                                 <div class="provider-tabs">
-                                    <div id="tab-prov-stalker" class="provider-tab active" data-prov="stalker">📡 Stalker MAC Portal</div>
-                                    <div id="tab-prov-xtream" class="provider-tab" data-prov="xtream">🔑 Xtream Codes API</div>
-                                    <div id="tab-prov-m3u" class="provider-tab" data-prov="m3u">📋 M3U / M3U8 Playlist</div>
+                                    <div id="tab-prov-stalker" class="provider-tab active" data-prov="stalker">📡 Stalker MAC</div>
+                                    <div id="tab-prov-xtream" class="provider-tab" data-prov="xtream">🔑 Xtream Codes</div>
+                                    <div id="tab-prov-m3u" class="provider-tab" data-prov="m3u">📋 M3U Playlist</div>
                                 </div>
                                 <select id="sel-provider-type" style="display:none;">
                                     <option value="stalker">Stalker MAC Portal (MAG STB)</option>
@@ -117,23 +117,23 @@
 
                             <div id="provider-fields-stalker" class="settings-card">
                                 <div class="settings-section-title">STALKER MAC CREDENTIALS</div>
-                                <label for="inp-portal">Stalker Portal URL</label>
+                                <label for="inp-portal">Portal Server URL</label>
                                 <input id="inp-portal" type="text" placeholder="http://example.com/stalker_portal/c/" />
-                                <label for="inp-mac">MAC Address</label>
+                                <label for="inp-mac">Device MAC Address</label>
                                 <input id="inp-mac" type="text" placeholder="00:1A:79:XX:XX:XX" />
                             </div>
 
                             <div id="provider-fields-xtream" class="settings-card" style="display:none;">
                                 <div class="settings-section-title">XTREAM CODES CREDENTIALS</div>
-                                <label for="inp-xtream-url">Xtream Server URL (http://host:port)</label>
+                                <label for="inp-xtream-url">Server URL (http://host:port)</label>
                                 <input id="inp-xtream-url" type="text" placeholder="http://server.example.com:8080" />
-                                <div class="modal-row" style="margin-top:6px;">
+                                <div class="modal-row">
                                     <div>
-                                        <label for="inp-xtream-user" style="margin-top:6px;">Username</label>
+                                        <label for="inp-xtream-user">Username</label>
                                         <input id="inp-xtream-user" type="text" placeholder="username" />
                                     </div>
                                     <div>
-                                        <label for="inp-xtream-pass" style="margin-top:6px;">Password</label>
+                                        <label for="inp-xtream-pass">Password</label>
                                         <div class="pass-wrap">
                                             <input id="inp-xtream-pass" type="password" placeholder="password" style="padding-right: 74px;" />
                                             <span id="btn-xtream-pass-toggle" class="pass-toggle-btn" title="Show / Hide Password">Show</span>
@@ -144,24 +144,24 @@
 
                             <div id="provider-fields-m3u" class="settings-card" style="display:none;">
                                 <div class="settings-section-title">M3U / M3U8 PLAYLIST SOURCE</div>
-                                <label for="inp-m3u-url">M3U / M3U8 Playlist URL (Optional if Local File Loaded)</label>
+                                <label for="inp-m3u-url">Playlist URL (or upload local file below)</label>
                                 <input id="inp-m3u-url" type="text" placeholder="https://example.com/playlist.m3u8" />
-                                <div class="btn-row" style="margin-top:12px;margin-bottom:2px;align-items:center;">
-                                    <div id="btn-m3u-file" class="btn" style="flex:0 0 auto; padding: 10px 18px;">📂 Upload Local .M3U / .M3U8</div>
-                                    <div id="btn-m3u-clear" class="btn" style="flex:0 0 auto; padding: 10px 14px; background:#374151; font-size:19px;">✕ Clear File</div>
-                                    <span id="m3u-file-status" style="font-size:18px;color:#93c5fd;padding-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">No local file loaded</span>
+                                <div class="btn-row" style="margin-top:8px;margin-bottom:2px;align-items:center;">
+                                    <div id="btn-m3u-file" class="btn" style="flex:0 0 auto; padding: 8px 14px;">📂 Upload .M3U</div>
+                                    <div id="btn-m3u-clear" class="btn" style="flex:0 0 auto; padding: 8px 12px; background:#374151;">✕ Clear</div>
+                                    <span id="m3u-file-status" style="font-size:15px;color:#93c5fd;padding-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">No local file loaded</span>
                                     <input id="inp-m3u-file-hidden" type="file" accept=".m3u,.m3u8,audio/x-mpegurl,application/vnd.apple.mpegurl,text/plain" style="display:none;" />
                                 </div>
                             </div>
 
                             <div class="settings-card">
                                 <div class="settings-section-title">EXTERNAL XMLTV GUIDE</div>
-                                <label for="inp-epg-url" style="margin-top:0;">Custom XMLTV EPG URL (Optional — Auto-Detected from M3U Header or Xtream)</label>
+                                <label for="inp-epg-url" style="margin-top:0;">Custom XMLTV EPG URL (Optional — Auto-Detected by Default)</label>
                                 <input id="inp-epg-url" type="text" placeholder="http://example.com/epg.xml or .xml.gz" />
                             </div>
                         </div>
 
-                        <!-- Right Pane: Theme & Security, Playback & EPG Engine, Profile & System Actions, LAN Setup -->
+                        <!-- Right Pane: Theme & Security, Playback & EPG Engine, Profile & System Actions -->
                         <div class="settings-pane settings-pane-right">
                             <div class="settings-card">
                                 <div class="settings-section-title">APPEARANCE &amp; PARENTAL LOCK</div>
@@ -178,7 +178,7 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label for="inp-pin">Parental Control PIN (4 Digits)</label>
+                                        <label for="inp-pin">Parental PIN (4 Digits)</label>
                                         <input id="inp-pin" type="password" maxlength="4" placeholder="0000" />
                                     </div>
                                 </div>
@@ -188,7 +188,7 @@
                                 <div class="settings-section-title">PLAYBACK, BUFFER &amp; EPG ENGINE</div>
                                 <div class="modal-row modal-row-compact">
                                     <div>
-                                        <label for="sel-epg-offset">EPG Time-Shift Offset</label>
+                                        <label for="sel-epg-offset">EPG Time-Shift</label>
                                         <select id="sel-epg-offset">
                                             <option value="-4">-4.0 Hours</option>
                                             <option value="-3">-3.0 Hours</option>
@@ -202,23 +202,24 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label for="sel-buffer-mode">Hardware Buffer Profile</label>
+                                        <label for="sel-buffer-mode">Buffer Profile</label>
                                         <select id="sel-buffer-mode">
-                                            <option value="fast" selected="selected">Fast Zap (1s Buffer)</option>
-                                            <option value="balanced">Balanced (2s Buffer)</option>
-                                            <option value="stable">High Stability (4s Buffer)</option>
+                                            <option value="fast" selected="selected">Fast Zap (1s)</option>
+                                            <option value="balanced">Balanced (2s)</option>
+                                            <option value="stable">Stable (4s)</option>
                                         </select>
                                     </div>
                                     <div>
-                                        <label for="sel-startup-mode">Startup Boot Mode</label>
+                                        <label for="sel-startup-mode">Startup Mode</label>
                                         <select id="sel-startup-mode">
-                                            <option value="last_channel" selected="selected">Auto-Resume Last Channel</option>
+                                            <option value="last_channel" selected="selected">Resume Last TV</option>
                                             <option value="guide">Open Main Guide</option>
-                                            <option value="favorites">Open ★ Favorites First</option>
+                                            <option value="favorites">Open ★ Favorites</option>
+                                            <option value="profile_picker">Profile Picker</option>
                                         </select>
                                     </div>
                                     <div>
-                                        <label for="sel-osd-timeout">OSD Banner Timeout</label>
+                                        <label for="sel-osd-timeout">OSD Timeout</label>
                                         <select id="sel-osd-timeout">
                                             <option value="3000">3 Seconds</option>
                                             <option value="5000" selected="selected">5 Seconds</option>
@@ -244,16 +245,43 @@
                                     <div id="btn-restart" class="btn btn-warn">Clear Cache &amp; Reload</div>
                                 </div>
                                 <div class="settings-nav-hint">
-                                    <span><b>D-Pad Arrows:</b> Navigate Controls &amp; Panes</span>
-                                    <span><b>Left at Edge:</b> Main Menu Sidebar</span>
-                                    <span><b>OK / Enter:</b> Edit / Cycle / Activate</span>
+                                    <span><b>D-Pad:</b> Navigate Controls</span> &bull;
+                                    <span><b>Left at Edge:</b> Sidebar</span> &bull;
+                                    <span><b>OK:</b> Edit / Toggle</span>
                                 </div>
                             </div>
+                        </div>
+                    </div>
 
-                            <div id="lan-setup-banner" class="lan-setup-banner">
-                                <span>📱 <b>Phone / PC Remote Setup:</b> Open <u id="lan-setup-url">http://127.0.0.1:3001/setup</u> on Wi-Fi to push URLs</span>
-                                <span id="lan-setup-qr-badge" class="lan-setup-pill">LAN Ready</span>
+                    <div id="lan-setup-banner" class="lan-setup-banner">
+                        <div class="lan-setup-left">
+                            <div class="lan-setup-title-row">
+                                <span class="lan-setup-eyebrow">📱 PHONE / PC REMOTE SETUP &amp; WI-FI PAIRING</span>
+                                <span class="lan-setup-step-tag">Instant Push &amp; Backup</span>
                             </div>
+                            <div class="lan-setup-copy">
+                                <span>Open the Setup URL below on any phone or PC on your Wi-Fi — or scan the QR code — to push Portal URLs, M3U playlists, or full backups directly to your TV.</span>
+                            </div>
+                            <div class="lan-url-box">
+                                <span class="lan-url-label">SETUP URL</span>
+                                <u id="lan-setup-url">http://127.0.0.1:3001/setup</u>
+                            </div>
+                        </div>
+                        <div class="lan-setup-right">
+                            <div class="lan-setup-meta">
+                                <div class="lan-pin-card">
+                                    <div class="lan-pin-labels">
+                                        <span class="lan-pin-caption">4-DIGIT PAIRING PIN</span>
+                                        <span class="lan-pin-sub">Enter on phone / PC to pair</span>
+                                    </div>
+                                    <span id="lan-pairing-pin-badge" class="lan-setup-pill lan-pin-pill">🔑 PIN: 4829</span>
+                                </div>
+                                <div class="lan-status-row">
+                                    <span id="lan-setup-qr-badge" class="lan-setup-pill lan-wifi-pill">Wi-Fi Ready</span>
+                                    <span class="lan-scan-hint">Scan QR with Camera ➔</span>
+                                </div>
+                            </div>
+                            <div id="lan-setup-qr-wrap" class="lan-qr-box" title="Scan or visit URL on phone"></div>
                         </div>
                     </div>
                 </div>
@@ -397,6 +425,41 @@
                 <div id="btn-pin-unlock" class="btn">Unlock</div>
                 <div id="btn-pin-cancel" class="btn">Cancel</div>
             </div>
+        </div>
+    </div>
+
+    <!-- VOD & Series YouTube Trailer Player Modal -->
+    <div id="trailer-modal" class="modal">
+        <div id="trailer-modal-box" class="modal-box wide trailer-modal-box">
+            <div class="epg-modal-header-row">
+                <h2 id="trailer-modal-title" style="margin-bottom:0;">🎬 Official Trailer</h2>
+                <div class="epg-header-actions">
+                    <div id="btn-trailer-native" class="epg-view-toggle-btn" style="margin-right:10px;">📺 Open in YouTube TV App [GREEN]</div>
+                    <div id="btn-trailer-close" class="epg-view-toggle-btn">✕ Close Trailer [BACK]</div>
+                </div>
+            </div>
+            <div id="trailer-frame-wrap" class="trailer-frame-wrap"></div>
+            <div id="trailer-modal-hint" class="trailer-modal-hint">GREEN: Launch Native YouTube TV App &bull; BACK / ESC: Close Trailer &amp; Return to Catalog</div>
+        </div>
+    </div>
+
+    <!-- Netflix-Style "Who's Watching?" Profile Switcher Modal -->
+    <div id="profile-picker-modal" class="modal profile-picker-backdrop">
+        <div id="profile-picker-box" class="profile-picker-container">
+            <h1 id="profile-picker-title" class="profile-picker-title">Who's watching?</h1>
+            <div id="profile-picker-grid" class="profile-picker-grid"></div>
+            <div class="profile-picker-actions">
+                <div id="btn-manage-profiles" class="profile-manage-btn">Manage Profiles</div>
+            </div>
+            <div id="profile-picker-hint" class="profile-picker-hint">LEFT / RIGHT: Select Profile &bull; DOWN: Manage Profiles &bull; OK: Watch &bull; YELLOW: Edit Profile &bull; BACK: Close</div>
+        </div>
+    </div>
+
+    <!-- VOD 20-Second High-Stability Buffering Visual Overlay (Circle + Centered Percentage Only) -->
+    <div id="vod-loading-overlay" class="vod-loading-overlay">
+        <div class="vod-loading-spinner-wrap">
+            <div class="vod-loading-spinner"></div>
+            <span id="vod-loading-pct" class="vod-loading-pct">0%</span>
         </div>
     </div>
 
