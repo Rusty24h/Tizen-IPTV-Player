@@ -228,3 +228,7 @@ public/tizen/
 
 This project is licensed under the [MIT License](LICENSE) — free for personal and community use.
 Samsung, Tizen, SmartSTB, Xtream Codes, and MAG are trademarks of their respective owners. This application is an independent client implementation.
+
+##Disclaimer
+
+This application is provided for personal use with legally obtained content. The developer is not responsible for third-party playlists, external content, or compatibility issues on unsupported devices.
