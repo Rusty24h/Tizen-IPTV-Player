@@ -2,7 +2,7 @@
 
 ![Version](https://img.shields.io/badge/Version-2.1.0-00e676?style=for-the-badge)
 ![Tizen OS](https://img.shields.io/badge/Tizen_OS-4.0%2B_(2018--2026)-0072ff?style=for-the-badge&logo=samsung)
-![Resolution](https://img.shields.io/badge/Display-1080p_UI_%2F_4K_%26_8K_60fps_AVPlay-ff9100?style=for-the-badge)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20This%20Project-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/rusty24h)
 ![Protocols](https://img.shields.io/badge/Protocols-Stalker_MAG_%7C_Xtream_%7C_M3U8_%7C_MPEG--DASH-a855f7?style=for-the-badge)
 
 **Tizen-IPTV-Player (v2.1.0)** is a high-performance, native Samsung Smart TV IPTV application engineered for **Tizen OS 4.0+ (2018–2026 TV models)**. It combines Samsung's hardware-accelerated `webapis.avplay` multimedia pipeline with a bundled **Tizen Background Node.js Local Proxy (`127.0.0.1:3001`)** to bypass CORS restrictions, emulate MAG Set-Top Box hardware headers (`MAG250` / `MAG254` / `MAG322`), and deliver instant playback across **Stalker Middleware Portals**, **Xtream Codes API**, and **M3U / M3U8 / MPEG-DASH Playlists**.
