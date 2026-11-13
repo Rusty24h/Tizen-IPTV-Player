@@ -44,7 +44,6 @@
   - **Post-PLAYING Deferred Resume Seek**: Defers VOD resume seeking until the hardware demuxer decodes its first presentation timestamp, preventing `.mkv` and `.mp4` streams from resetting to `00:00:00`.
   - **Minimalist Circular VOD Buffering Overlay**
 - **Full-Bleed 2:3 Poster Grid & Click-to-Load Details & EPG**:
-  - **Full-Bleed 2:3 Movie & Series Cards**: True `2:3` aspect ratio poster cards with `object-fit: cover` and asynchronous image decoding.
   - **Click-to-Load Details & EPG**: Navigating across the 3×3 Poster Grid keeps the right-hand **Details & EPG** column locked without background network fetches on hover. Pressing **OK** once loads the selected item's details and unlocks the action tools; pressing **OK** a second time starts playback.
   - **List View Default & Scrollable 2-Column Quick Action Tools**: Defaults to List View for instant D-Pad **Right** access to the compact `1.1fr` Details & EPG column and its expandable 2-column Quick Action Tools bar (`⚙ More Tools` / `▴ Fewer Tools`).
 - **Multi-DRM (`WIDEVINE_CDM`, `PLAYREADY`, `CLEARKEY`), MPEG-DASH (`.mpd`) & Kodi/VLC M3U Directives**:
