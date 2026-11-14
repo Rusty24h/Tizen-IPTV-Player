@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0, user-scalable=no" />
-    <title>SmartSTB v2.1.0</title>
+    <title>VortixTV v2.2.0 (MPEG-DASH + DRM)</title>
     <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
     <link rel="stylesheet" type="text/css" href="css/style.css" />
     <link rel="stylesheet" type="text/css" href="style.css" />
@@ -11,6 +11,8 @@
 <body class="theme-blue">
     <!-- Hardware Video Surface -->
     <object id="av-player" type="application/avplayer"></object>
+    <!-- Shaka / EME MPEG-DASH + ClearKey / PlayReady Surface -->
+    <video id="shaka-video" playsinline autoplay></video>
 
     <!-- Subtitle Overlay -->
     <div id="subtitle-box"></div>
@@ -22,7 +24,7 @@
     <div id="ui-overlay">
         <div id="top-bar">
             <div id="top-left">
-                <div id="app-brand">SMART STB</div>
+                <div id="app-brand">VortixTV</div>
             </div>
             <div id="top-right">
                 <div id="top-status-cluster" class="status-cluster">
@@ -463,6 +465,8 @@
         </div>
     </div>
 
+    <script type="text/javascript">if (typeof window.globalThis === "undefined") { window.globalThis = window; }</script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/shaka-player@5.3.5/dist/shaka-player.compiled.js"></script>
     <script type="text/javascript" src="app.js"></script>
 </body>
 </html>
