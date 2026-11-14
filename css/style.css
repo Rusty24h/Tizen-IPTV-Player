@@ -43,6 +43,21 @@ body {
 #shaka-video.stretch {
     object-fit: fill;
 }
+/* Suppress native HTML5 <video>::cue text tracks so Shaka cues render exclusively via #subtitle-box */
+#shaka-video::cue {
+    color: transparent !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    text-shadow: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+}
+#shaka-video::-webkit-media-text-track-container,
+#shaka-video::-webkit-media-text-track-display {
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+}
 /* Subtitle Cue Overlay Box (Clean background-free broadcast text) */
 #subtitle-box {
     position: absolute;
@@ -3015,21 +3030,56 @@ body.theme-amber .lan-url-box {
     vertical-align: middle;
 }
 
-/* VOD & Series YouTube Trailer Modal */
-.trailer-modal-box {
-    width: 1180px;
+/* VOD & Series YouTube Trailer Modal (Tizen Hardware Video Punch-Through Safe) */
+body.trailer-open #av-player,
+body.trailer-open #shaka-video {
+    display: none !important;
+}
+#trailer-modal {
+    background: transparent !important;
+}
+#trailer-modal-box.trailer-modal-box {
+    width: 1152px;
     max-width: 92vw;
-    padding: 24px 28px;
+    padding: 0;
+    background: transparent !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+    position: relative;
+    z-index: 1;
+}
+#trailer-modal-box .epg-modal-header-row {
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-bottom: 0;
+    border-radius: 14px 14px 0 0;
+    padding: 16px 20px 14px 20px;
+    margin-bottom: 0;
+    position: relative;
+    z-index: 2;
+}
+#trailer-modal-title {
+    padding-right: 16px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .trailer-frame-wrap {
     width: 100%;
-    height: 600px;
-    margin-top: 16px;
-    background: #04070f;
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    border-radius: 12px;
-    overflow: hidden;
+    height: 630px;
+    margin-top: 0;
+    background: transparent !important;
+    border-left: 16px solid #1f2937;
+    border-right: 16px solid #1f2937;
+    border-top: 0;
+    border-bottom: 0;
+    border-radius: 0;
+    overflow: visible;
     position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3039,12 +3089,20 @@ body.theme-amber .lan-url-box {
     height: 100%;
     border: 0;
     display: block;
+    background: transparent !important;
 }
 .trailer-modal-hint {
-    margin-top: 14px;
+    margin-top: 0;
     font-size: 17px;
     color: #94a3b8;
     text-align: center;
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-top: 0;
+    border-radius: 0 0 14px 14px;
+    padding: 12px 20px 16px 20px;
+    position: relative;
+    z-index: 2;
 }
 
 /* Netflix-Style "Who's Watching?" Profile Switcher Screen */
