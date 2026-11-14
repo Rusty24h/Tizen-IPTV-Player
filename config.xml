@@ -8,7 +8,7 @@
     <feature name="http://tizen.org/feature/web.service"/>
     <access origin="*" subdomains="true"/>
     <tizen:allow-navigation>*</tizen:allow-navigation>
-    <tizen:content-security-policy>default-src * 'self' data: blob: filesystem: 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; script-src * 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; media-src * data: blob: http://127.0.0.1:3001 https:; connect-src * data: blob: http://127.0.0.1:3001 https: http: ws: wss:; frame-src * https://www.youtube.com https://www.youtube-nocookie.com;</tizen:content-security-policy>
+    <tizen:content-security-policy>default-src * 'self' data: blob: filesystem: 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; script-src * 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; media-src * data: blob: http://127.0.0.1:3001 https:; connect-src * data: blob: http://127.0.0.1:3001 https: http: ws: wss:; frame-src * http://127.0.0.1:3001 http://127.0.0.1:3000 https://www.youtube.com https://www.youtube-nocookie.com;</tizen:content-security-policy>
     <tizen:application id="vortixtvv2.VortixTV" package="vortixtvv2" required_version="4.0"/>
     <tizen:profile name="tv-samsung"/>
     <tizen:privilege name="http://tizen.org/privilege/internet"/>
