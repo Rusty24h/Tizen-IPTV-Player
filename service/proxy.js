@@ -2257,39 +2257,320 @@ function startProxyServer(port) {
             return;
         }
 
+        if (parsedUrl.pathname === '/trailer-embed') {
+            var embedVid = String((parsedUrl.query && parsedUrl.query.v) || '').trim();
+            var embedAltsRaw = String((parsedUrl.query && parsedUrl.query.alts) || '').trim();
+            var embedTitle = String((parsedUrl.query && parsedUrl.query.title) || 'Official Trailer').slice(0, 120);
+            if (!/^[a-zA-Z0-9_-]{11}$/.test(embedVid)) {
+                res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+                res.end('<!DOCTYPE html><html><body style="background:#04070f;color:#e2e8f0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div>Invalid trailer video ID. Press GREEN to search in Samsung YouTube TV App.</div></body></html>');
+                return;
+            }
+            var altList = [];
+            var rawParts = embedAltsRaw ? embedAltsRaw.split(',') : [];
+            for (var ai = 0; ai < rawParts.length; ai++) {
+                var candidateId = String(rawParts[ai] || '').trim();
+                if (/^[a-zA-Z0-9_-]{11}$/.test(candidateId) && candidateId !== embedVid && altList.indexOf(candidateId) === -1) {
+                    altList.push(candidateId);
+                }
+            }
+            var allIds = [embedVid].concat(altList).slice(0, 5);
+            var originHost = 'http://' + (req.headers.host || ('127.0.0.1:' + activeListenPort));
+            var safeTitleHtml = embedTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            var embedHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + safeTitleHtml + '</title>' +
+                '<style>html,body,#player-wrap,#yt-frame{margin:0;padding:0;width:100%;height:100%;background:transparent !important;background-color:transparent !important;overflow:visible;font-family:sans-serif;color:#e2e8f0;}' +
+                '#fallback-msg{display:none;position:absolute;inset:0;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;background:#070b14;}' +
+                '#fallback-msg.visible{display:flex;}' +
+                '.title{font-size:22px;font-weight:700;margin-bottom:10px;color:#f8fafc;}' +
+                '.sub{font-size:16px;color:#94a3b8;max-width:620px;line-height:1.5;}</style></head><body>' +
+                '<div id="player-wrap"><iframe id="yt-frame" allowtransparency="true" src="https://www.youtube.com/embed/' + encodeURIComponent(allIds[0]) +
+                '?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin=' + encodeURIComponent(originHost) +
+                '" title="' + safeTitleHtml + '" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen style="border:0;width:100%;height:100%;display:block;background:transparent !important;"></iframe></div>' +
+                '<div id="fallback-msg"><div class="title">Embedded playback unavailable for this trailer</div>' +
+                '<div class="sub" id="fallback-detail">The video owner disabled embedded playback. Press <b>GREEN</b> to launch the Native Samsung YouTube TV App, or <b>BACK</b> to close.</div></div>' +
+                '<script>' +
+                'var ids=' + JSON.stringify(allIds) + ';var idx=0;var ytPlayer=null;' +
+                'function tryNextCandidate(errCode){' +
+                '  idx++;' +
+                '  if(idx<ids.length){' +
+                '    if(ytPlayer&&typeof ytPlayer.loadVideoById==="function"){ytPlayer.loadVideoById(ids[idx]);}' +
+                '    else{var f=document.getElementById("yt-frame");if(f){f.src="https://www.youtube.com/embed/"+encodeURIComponent(ids[idx])+"?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin="+encodeURIComponent(' + JSON.stringify(originHost) + ');}}' +
+                '    return;' +
+                '  }' +
+                '  var m=document.getElementById("fallback-msg");var d=document.getElementById("fallback-detail");' +
+                '  if(d&&errCode){d.innerHTML="YouTube error "+String(errCode)+" (embedding blocked by studio). Press <b>GREEN</b> to watch in the Native Samsung YouTube TV App, or <b>BACK</b> to return.";}' +
+                '  if(m){m.className="visible";}' +
+                '}' +
+                'window.onYouTubeIframeAPIReady=function(){' +
+                '  try{ytPlayer=new YT.Player("yt-frame",{events:{onError:function(ev){tryNextCandidate(ev&&ev.data);}}});}catch(e){}' +
+                '};' +
+                'var s=document.createElement("script");s.src="https://www.youtube.com/iframe_api";s.async=true;document.head.appendChild(s);' +
+                '</script></body></html>';
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+            res.end(embedHtml);
+            return;
+        }
+
         if (parsedUrl.pathname === '/trailer-search') {
             var rawQuery = String((parsedUrl.query && parsedUrl.query.q) || '').trim();
+            var mediaTypeHint = String((parsedUrl.query && parsedUrl.query.type) || '').toLowerCase();
+            var yearHint = String((parsedUrl.query && parsedUrl.query.year) || '').replace(/[^0-9]/g, '').slice(0, 4);
             if (!rawQuery) {
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-                res.end(JSON.stringify({ ok: true, videoId: 'aqz-KE-bpKQ' }));
+                res.end(JSON.stringify({ ok: false, videoId: '', candidates: [], error: 'Missing trailer search query' }));
                 return;
             }
-            var normQ = rawQuery.toLowerCase().slice(0, 120);
-            if (trailerSearchCache[normQ]) {
+            var normQ = (rawQuery + '|' + mediaTypeHint + '|' + yearHint).toLowerCase().slice(0, 150);
+            if (trailerSearchCache[normQ] && trailerSearchCache[normQ].videoId) {
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-                res.end(JSON.stringify({ ok: true, videoId: trailerSearchCache[normQ], cached: true }));
+                res.end(JSON.stringify({
+                    ok: true,
+                    videoId: trailerSearchCache[normQ].videoId,
+                    candidates: trailerSearchCache[normQ].candidates || [trailerSearchCache[normQ].videoId],
+                    title: trailerSearchCache[normQ].title || '',
+                    cached: true
+                }));
                 return;
             }
+
+            var parseDurationSec = function(lenText) {
+                var s = String(lenText || '').trim();
+                if (!s) {
+                    return 0;
+                }
+                var parts = s.split(':');
+                var total = 0;
+                for (var pi = 0; pi < parts.length; pi++) {
+                    var n = parseInt(parts[pi], 10);
+                    if (isNaN(n)) {
+                        return 0;
+                    }
+                    total = (total * 60) + n;
+                }
+                return total;
+            };
+
+            var extractYtInitialDataJson = function(htmlStr) {
+                var markers = ['var ytInitialData = ', 'window["ytInitialData"] = ', "window['ytInitialData'] = "];
+                for (var mi = 0; mi < markers.length; mi++) {
+                    var startMarker = markers[mi];
+                    var idx = htmlStr.indexOf(startMarker);
+                    if (idx === -1) {
+                        continue;
+                    }
+                    var jsonStart = htmlStr.indexOf('{', idx + startMarker.length);
+                    if (jsonStart === -1) {
+                        continue;
+                    }
+                    var depth = 0;
+                    var inStr = false;
+                    var escaped = false;
+                    for (var ci = jsonStart; ci < htmlStr.length; ci++) {
+                        var ch = htmlStr.charAt(ci);
+                        if (inStr) {
+                            if (escaped) {
+                                escaped = false;
+                            } else if (ch === '\\') {
+                                escaped = true;
+                            } else if (ch === '"') {
+                                inStr = false;
+                            }
+                        } else {
+                            if (ch === '"') {
+                                inStr = true;
+                            } else if (ch === '{') {
+                                depth++;
+                            } else if (ch === '}') {
+                                depth--;
+                                if (depth === 0) {
+                                    try {
+                                        return JSON.parse(htmlStr.slice(jsonStart, ci + 1));
+                                    } catch (eJson) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return null;
+            };
+
+            var collectCandidatesFromYtData = function(rootObj) {
+                var found = [];
+                var seenIds = {};
+                var walkNode = function(node, inAdOrShort) {
+                    if (!node || typeof node !== 'object' || found.length >= 25) {
+                        return;
+                    }
+                    if (node.reelShelfRenderer || node.reelItemRenderer || node.shortsLockupViewModel || node.adSlotRenderer || node.promotedVideoRenderer) {
+                        return;
+                    }
+                    if (node.videoRenderer && node.videoRenderer.videoId) {
+                        var vr = node.videoRenderer;
+                        var vid = String(vr.videoId || '').trim();
+                        if (/^[a-zA-Z0-9_-]{11}$/.test(vid) && !seenIds[vid]) {
+                            var navUrl = (vr.navigationEndpoint && vr.navigationEndpoint.commandMetadata && vr.navigationEndpoint.commandMetadata.webCommandMetadata && vr.navigationEndpoint.commandMetadata.webCommandMetadata.url) || '';
+                            var isShortUrl = navUrl.indexOf('/shorts/') !== -1;
+                            var lenText = (vr.lengthText && vr.lengthText.simpleText) || '';
+                            var durSec = parseDurationSec(lenText);
+                            var titleText = '';
+                            if (vr.title && Array.isArray(vr.title.runs)) {
+                                for (var tr = 0; tr < vr.title.runs.length; tr++) {
+                                    titleText += (vr.title.runs[tr].text || '');
+                                }
+                            } else if (vr.title && vr.title.simpleText) {
+                                titleText = vr.title.simpleText;
+                            }
+                            var chanText = '';
+                            if (vr.ownerText && Array.isArray(vr.ownerText.runs) && vr.ownerText.runs[0]) {
+                                chanText = vr.ownerText.runs[0].text || '';
+                            }
+                            if (!isShortUrl && !inAdOrShort) {
+                                seenIds[vid] = true;
+                                found.push({
+                                    id: vid,
+                                    title: String(titleText || '').trim(),
+                                    channel: String(chanText || '').trim(),
+                                    durationSec: durSec,
+                                    durationText: lenText
+                                });
+                            }
+                        }
+                        return;
+                    }
+                    if (Array.isArray(node)) {
+                        for (var ai = 0; ai < node.length; ai++) {
+                            walkNode(node[ai], inAdOrShort);
+                        }
+                    } else {
+                        var keys = Object.keys(node);
+                        for (var ki = 0; ki < keys.length; ki++) {
+                            walkNode(node[keys[ki]], inAdOrShort);
+                        }
+                    }
+                };
+                walkNode(rootObj, false);
+                return found;
+            };
+
+            var scoreCandidate = function(cand, queryStr, isSeriesHint, yrHint) {
+                var titleLow = String(cand.title || '').toLowerCase();
+                var chanLow = String(cand.channel || '').toLowerCase();
+                var score = 0;
+                var tokens = String(queryStr || '').toLowerCase()
+                    .replace(/\b(official|trailer|teaser|tv|series|movie|hd|4k)\b/g, ' ')
+                    .replace(/[^a-z0-9\u00C0-\u024F\s]/g, ' ')
+                    .split(/\s+/);
+                var matchedTokens = 0;
+                var totalTokens = 0;
+                for (var ti = 0; ti < tokens.length; ti++) {
+                    var tok = tokens[ti];
+                    if (tok.length >= 2) {
+                        totalTokens++;
+                        if (titleLow.indexOf(tok) !== -1) {
+                            matchedTokens++;
+                        }
+                    }
+                }
+                if (totalTokens > 0) {
+                    score += Math.round((matchedTokens / totalTokens) * 45);
+                }
+                if (titleLow.indexOf('official trailer') !== -1 || titleLow.indexOf('main trailer') !== -1) {
+                    score += 35;
+                } else if (titleLow.indexOf('trailer') !== -1) {
+                    score += 22;
+                } else if (titleLow.indexOf('teaser') !== -1) {
+                    score += 14;
+                }
+                if (yrHint && titleLow.indexOf(yrHint) !== -1) {
+                    score += 12;
+                }
+                if (isSeriesHint && /\b(season|series|tv|netflix|hbo|max|apple tv|prime video|hulu|fx|amc|showtime)\b/.test(titleLow + ' ' + chanLow)) {
+                    score += 12;
+                }
+                if (/\b(rotten tomatoes|warner bros|universal pictures|sony pictures|paramount|marvel|disney|a24|netflix|hbo|lionsgate|20th century|focus features|searchlight|mgm|apple tv|prime video)\b/.test(chanLow)) {
+                    score += 15;
+                }
+                if (cand.durationSec >= 35 && cand.durationSec <= 270) {
+                    score += 20;
+                } else if (cand.durationSec > 600) {
+                    score -= 45;
+                } else if (cand.durationSec > 0 && cand.durationSec < 15) {
+                    score -= 35;
+                }
+                if (/\b(reaction|review|explained|ending explained|breakdown|full movie|soundtrack|ost|pitch meeting|honest trailers|parody|recap|gameplay)\b/.test(titleLow)) {
+                    score -= 45;
+                }
+                return score;
+            };
+
+            var checkOembed = function(vid, cb) {
+                var done = false;
+                var finish = function(ok) {
+                    if (!done) {
+                        done = true;
+                        cb(ok);
+                    }
+                };
+                var oReq = https.request({
+                    hostname: 'www.youtube.com',
+                    port: 443,
+                    path: '/oembed?url=' + encodeURIComponent('https://www.youtube.com/watch?v=' + vid) + '&format=json',
+                    method: 'GET',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    },
+                    timeout: 2200,
+                    rejectUnauthorized: false
+                }, function(oRes) {
+                    oRes.resume();
+                    finish(oRes.statusCode === 200);
+                });
+                oReq.on('timeout', function() {
+                    try { oReq.abort(); } catch (eO) {}
+                    finish(false);
+                });
+                oReq.on('error', function() {
+                    finish(false);
+                });
+                oReq.end();
+            };
+
             var ytSearchPath = '/results?search_query=' + encodeURIComponent(rawQuery);
             var ytDone = false;
-            var finishYtSearch = function(videoId) {
+            var finishYtResult = function(ok, videoId, candidates, titleText, errMsg) {
                 if (ytDone) {
                     return;
                 }
                 ytDone = true;
-                var finalVid = (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) ? videoId : 'aqz-KE-bpKQ';
-                var cacheKeys = Object.keys(trailerSearchCache);
-                if (cacheKeys.length >= 100) {
-                    delete trailerSearchCache[cacheKeys[0]];
+                var validId = (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) ? videoId : '';
+                if (ok && validId) {
+                    var cacheKeys = Object.keys(trailerSearchCache);
+                    if (cacheKeys.length >= 120) {
+                        delete trailerSearchCache[cacheKeys[0]];
+                    }
+                    trailerSearchCache[normQ] = {
+                        videoId: validId,
+                        candidates: candidates || [validId],
+                        title: titleText || ''
+                    };
                 }
-                trailerSearchCache[normQ] = finalVid;
                 if (!res.headersSent) {
                     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
                 }
                 try {
-                    res.end(JSON.stringify({ ok: true, videoId: finalVid }));
+                    res.end(JSON.stringify({
+                        ok: Boolean(ok && validId),
+                        videoId: validId,
+                        candidates: candidates || (validId ? [validId] : []),
+                        title: titleText || '',
+                        query: rawQuery,
+                        error: (!ok || !validId) ? (errMsg || 'No matching trailer found') : undefined
+                    }));
                 } catch (eYtEnd) {}
             };
+
             var ytReq = https.request({
                 hostname: 'www.youtube.com',
                 port: 443,
@@ -2297,39 +2578,93 @@ function startProxyServer(port) {
                 method: 'GET',
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept-Language': 'en-US,en;q=0.9'
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Cookie': 'CONSENT=PENDING+987; SOCS=CAI'
                 },
-                timeout: 4500,
+                timeout: 6500,
                 rejectUnauthorized: false
             }, function(ytRes) {
                 var ytParts = [];
                 var ytLen = 0;
                 ytRes.on('data', function(c) {
                     var b = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
-                    ytLen += b.length;
-                    if (ytLen <= 524288) {
+                    if (ytLen < 3145728) {
+                        ytLen += b.length;
                         ytParts.push(b);
                     }
                 });
                 ytRes.on('end', function() {
-                    var htmlStr = Buffer.concat(ytParts).toString('utf8');
+                    var rawBuf = Buffer.concat(ytParts);
                     ytParts = [];
-                    var m = htmlStr.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-                    finishYtSearch(m && m[1] ? m[1] : 'aqz-KE-bpKQ');
+                    decodeBufferByEncoding(rawBuf, ytRes.headers && ytRes.headers['content-encoding'], function(decodedBuf) {
+                        var htmlStr = decodedBuf.toString('utf8');
+                        var parsedData = extractYtInitialDataJson(htmlStr);
+                        var candidates = parsedData ? collectCandidatesFromYtData(parsedData) : [];
+                        if (candidates.length === 0) {
+                            var reVid = /"videoRenderer":\{"videoId":"([a-zA-Z0-9_-]{11})"/g;
+                            var mFallback;
+                            var seenFallback = {};
+                            while ((mFallback = reVid.exec(htmlStr)) !== null && candidates.length < 10) {
+                                if (!seenFallback[mFallback[1]]) {
+                                    seenFallback[mFallback[1]] = true;
+                                    candidates.push({ id: mFallback[1], title: '', channel: '', durationSec: 0, durationText: '' });
+                                }
+                            }
+                        }
+                        if (candidates.length === 0) {
+                            finishYtResult(false, '', [], '', 'YouTube search returned no video candidates');
+                            return;
+                        }
+                        var isSer = (mediaTypeHint === 'series');
+                        for (var si = 0; si < candidates.length; si++) {
+                            candidates[si].score = scoreCandidate(candidates[si], rawQuery, isSer, yearHint);
+                        }
+                        candidates.sort(function(a, b) {
+                            return b.score - a.score;
+                        });
+                        var topSlice = candidates.slice(0, 5);
+                        var rankedIds = [];
+                        for (var ri = 0; ri < topSlice.length; ri++) {
+                            rankedIds.push(topSlice[ri].id);
+                        }
+                        var probeIdx = 0;
+                        var tryVerifyNext = function() {
+                            if (probeIdx >= Math.min(3, topSlice.length)) {
+                                finishYtResult(true, topSlice[0].id, rankedIds, topSlice[0].title, '');
+                                return;
+                            }
+                            var cand = topSlice[probeIdx++];
+                            checkOembed(cand.id, function(embedOk) {
+                                if (embedOk) {
+                                    var ordered = [cand.id];
+                                    for (var oi = 0; oi < rankedIds.length; oi++) {
+                                        if (rankedIds[oi] !== cand.id) {
+                                            ordered.push(rankedIds[oi]);
+                                        }
+                                    }
+                                    finishYtResult(true, cand.id, ordered, cand.title, '');
+                                } else {
+                                    tryVerifyNext();
+                                }
+                            });
+                        };
+                        tryVerifyNext();
+                    });
                 });
                 ytRes.on('error', function() {
                     ytParts = [];
-                    finishYtSearch('aqz-KE-bpKQ');
+                    finishYtResult(false, '', [], '', 'YouTube search stream error');
                 });
             });
             ytReq.on('timeout', function() {
                 try {
                     ytReq.abort();
                 } catch (eYtTo) {}
-                finishYtSearch('aqz-KE-bpKQ');
+                finishYtResult(false, '', [], '', 'YouTube search timed out');
             });
             ytReq.on('error', function() {
-                finishYtSearch('aqz-KE-bpKQ');
+                finishYtResult(false, '', [], '', 'YouTube search request failed');
             });
             ytReq.end();
             return;
