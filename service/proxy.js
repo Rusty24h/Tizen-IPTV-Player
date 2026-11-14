@@ -9,13 +9,14 @@ var fs = require('fs');
 var zlib = require('zlib');
 var os = require('os');
 var dns = require('dns');
+var net = require('net');
 var crypto = require('crypto');
 
 var server = null;
 var PROXY_PORT = 3001;
 var FALLBACK_PORT = 3000;
 var activeListenPort = PROXY_PORT;
-var BACKUP_FILE_PATH = '/tmp/smartstb_backup.json';
+var BACKUP_FILE_PATH = '/tmp/vortixtv_backup.json';
 var endpointCache = {};
 var cookieJar = {};
 var lastPortalReferer = '';
@@ -142,7 +143,10 @@ function pruneProxyMemory() {
         }
     } catch (ePrune) {}
 }
-setInterval(pruneProxyMemory, 60000);
+var pruneTimer = setInterval(pruneProxyMemory, 60000);
+if (pruneTimer && typeof pruneTimer.unref === 'function') {
+    pruneTimer.unref();
+}
 
 // =========================================================================
 // v2.1.0: Loopback Enforcement, SSRF & DNS Rebinding Protection
@@ -157,7 +161,7 @@ function isLoopbackClient(req) {
     ) {
         return true;
     }
-    if (req && req.headers && req.headers['x-smartstb-client'] === '1') {
+    if (req && req.headers && req.headers['x-vortixtv-client'] === '1') {
         return true;
     }
     try {
@@ -240,16 +244,245 @@ function guardUpstreamSocketLookup(sock, reqToAbort) {
     });
 }
 
-function validateSmartStbClient(req) {
+function validateSafeUpstreamUrl(rawUrl, callback) {
+    var parsed;
+    try {
+        parsed = url.parse(String(rawUrl || '').trim());
+    } catch (eParse) {
+        return callback(new Error('Invalid URL'));
+    }
+    if (!parsed || !parsed.hostname || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+        return callback(new Error('Invalid HTTP/HTTPS target URL'));
+    }
+    var isHttps = parsed.protocol === 'https:';
+    var port = Number(parsed.port) || (isHttps ? 443 : 80);
+    var hostname = String(parsed.hostname).replace(/^\[|\]$/g, '');
+    var safeTarget = {
+        protocol: parsed.protocol,
+        hostname: hostname,
+        host: parsed.host,
+        port: port,
+        path: parsed.path || '/',
+        resolvedIp: hostname
+    };
+    if (net.isIP(hostname)) {
+        if (isBlockedUpstreamIp(hostname)) {
+            return callback(new Error('SSRF Blocked: Restricted upstream IP ' + hostname));
+        }
+        return callback(null, safeTarget);
+    }
+    dns.lookup(hostname, function(err, address) {
+        if (err) {
+            return callback(err);
+        }
+        if (isBlockedUpstreamIp(address)) {
+            return callback(new Error('SSRF Blocked: Restricted upstream IP ' + address));
+        }
+        safeTarget.resolvedIp = address || hostname;
+        return callback(null, safeTarget);
+    });
+}
+
+function proxyDashAndDrmRequest(targetUrlStr, customHdrsObj, clientReq, clientRes, redirectsLeft) {
+    if (redirectsLeft <= 0) {
+        if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Access-Control-Allow-Origin': '*' });
+        }
+        clientRes.end('Too many redirects');
+        return;
+    }
+    var reqBodyChunks = [];
+    var reqBodyLen = 0;
+    var aborted = false;
+    clientReq.on('error', function() {
+        aborted = true;
+        reqBodyChunks = [];
+    });
+    clientReq.on('data', function(chunk) {
+        var b = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
+        reqBodyLen += b.length;
+        if (reqBodyLen <= 2097152) {
+            reqBodyChunks.push(b);
+        }
+    });
+    clientReq.on('end', function() {
+        if (aborted) {
+            return;
+        }
+        var bodyBuf = reqBodyChunks.length > 0 ? Buffer.concat(reqBodyChunks) : null;
+        reqBodyChunks = [];
+        (function sendHop(candidateUrl, hopsLeft) {
+            validateSafeUpstreamUrl(candidateUrl, function(ssrfErr, safeTarget) {
+                if (ssrfErr || !safeTarget) {
+                    if (!clientRes.headersSent) {
+                        clientRes.writeHead(403, {
+                            'Access-Control-Allow-Origin': '*',
+                            'Content-Type': 'application/json'
+                        });
+                    }
+                    clientRes.end(JSON.stringify({ error: ssrfErr ? ssrfErr.message : 'Blocked target' }));
+                    return;
+                }
+                var isHttps = safeTarget.protocol === 'https:';
+                var client = isHttps ? https : http;
+                var outHeaders = {};
+                function setHeaderCaseInsensitive(targetObj, hName, hVal) {
+                    var lowTarget = String(hName || '').toLowerCase();
+                    if (!lowTarget) {
+                        return;
+                    }
+                    var existing = Object.keys(targetObj);
+                    for (var ei = 0; ei < existing.length; ei++) {
+                        if (existing[ei].toLowerCase() === lowTarget) {
+                            delete targetObj[existing[ei]];
+                        }
+                    }
+                    targetObj[hName] = hVal;
+                }
+                function hasHeaderCaseInsensitive(targetObj, hName) {
+                    var lowTarget = String(hName || '').toLowerCase();
+                    var existing = Object.keys(targetObj);
+                    for (var ei = 0; ei < existing.length; ei++) {
+                        if (existing[ei].toLowerCase() === lowTarget) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                var skipReq = {
+                    host: true,
+                    connection: true,
+                    'keep-alive': true,
+                    origin: true,
+                    referer: true,
+                    'accept-encoding': true,
+                    'content-length': true,
+                    'x-target-url': true,
+                    'x-proxy-ua': true,
+                    'x-proxy-referer': true,
+                    'x-proxy-origin': true,
+                    'x-proxy-cookie': true,
+                    'x-proxy-headers': true,
+                    'x-vortixtv-client': true,
+                    'sec-fetch-site': true,
+                    'sec-fetch-mode': true,
+                    'sec-fetch-dest': true
+                };
+                if (clientReq.headers) {
+                    var inKeys = Object.keys(clientReq.headers);
+                    for (var i = 0; i < inKeys.length; i++) {
+                        var ik = inKeys[i];
+                        var lowK = ik.toLowerCase();
+                        if (!skipReq[lowK] && clientReq.headers[ik] !== undefined) {
+                            setHeaderCaseInsensitive(outHeaders, ik, clientReq.headers[ik]);
+                        }
+                    }
+                }
+                if (customHdrsObj && typeof customHdrsObj === 'object') {
+                    var cKeys = Object.keys(customHdrsObj);
+                    for (var ci = 0; ci < cKeys.length; ci++) {
+                        var ck = String(cKeys[ci] || '').trim();
+                        var cv = String(customHdrsObj[ck] || '').trim();
+                        if (ck && cv) {
+                            setHeaderCaseInsensitive(outHeaders, ck, cv);
+                        }
+                    }
+                }
+                if (!hasHeaderCaseInsensitive(outHeaders, 'User-Agent')) {
+                    setHeaderCaseInsensitive(outHeaders, 'User-Agent', 'Mozilla/5.0 (SMART-TV; Linux; Tizen 5.5) AppleWebKit/537.36');
+                }
+                if (bodyBuf && bodyBuf.length > 0) {
+                    setHeaderCaseInsensitive(outHeaders, 'Content-Length', String(bodyBuf.length));
+                }
+                setHeaderCaseInsensitive(outHeaders, 'Host', safeTarget.host);
+                var upReq = client.request({
+                    hostname: safeTarget.resolvedIp || safeTarget.hostname,
+                    port: safeTarget.port,
+                    path: safeTarget.path,
+                    method: clientReq.method || 'GET',
+                    headers: outHeaders,
+                    servername: safeTarget.hostname,
+                    agent: isHttps ? httpsAgent : httpAgent,
+                    timeout: 20000,
+                    rejectUnauthorized: false
+                }, function(upRes) {
+                    var sc = Number(upRes.statusCode) || 502;
+                    if ([301, 302, 303, 307, 308].indexOf(sc) !== -1 && upRes.headers && upRes.headers.location && hopsLeft > 1) {
+                        var nextLoc = url.resolve(candidateUrl, upRes.headers.location);
+                        upRes.resume();
+                        sendHop(nextLoc, hopsLeft - 1);
+                        return;
+                    }
+                    var resHeaders = {
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Headers': '*',
+                        'Access-Control-Expose-Headers': '*',
+                        'Access-Control-Allow-Methods': 'GET, POST, HEAD, OPTIONS',
+                        'X-Final-Url': candidateUrl
+                    };
+                    var skipRes = {
+                        'transfer-encoding': true,
+                        connection: true,
+                        'keep-alive': true,
+                        te: true,
+                        trailer: true,
+                        trailers: true,
+                        upgrade: true,
+                        'proxy-authenticate': true,
+                        'proxy-authorization': true
+                    };
+                    var upKeys = Object.keys(upRes.headers || {});
+                    for (var ui = 0; ui < upKeys.length; ui++) {
+                        var uk = upKeys[ui];
+                        var lowUk = String(uk || '').toLowerCase();
+                        if (!skipRes[lowUk] && !/^access-control-allow-/i.test(uk) && upRes.headers[uk] !== undefined) {
+                            resHeaders[uk] = upRes.headers[uk];
+                        }
+                    }
+                    if (!clientRes.headersSent) {
+                        clientRes.writeHead(sc, resHeaders);
+                    }
+                    upRes.pipe(clientRes);
+                });
+                upReq.on('error', function(eUp) {
+                    if (!clientRes.headersSent) {
+                        clientRes.writeHead(502, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'text/plain' });
+                    }
+                    try { clientRes.end('DASH/DRM Proxy error: ' + (eUp ? eUp.message : 'upstream failed')); } catch (eEnd) {}
+                });
+                upReq.on('timeout', function() {
+                    try { upReq.abort(); } catch (eTo) {}
+                    if (!clientRes.headersSent) {
+                        clientRes.writeHead(504, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'text/plain' });
+                    }
+                    try { clientRes.end('DASH/DRM Proxy timeout'); } catch (eEnd2) {}
+                });
+                clientReq.once('close', function() {
+                    try { upReq.abort(); } catch (eAb) {}
+                });
+                if (bodyBuf && bodyBuf.length > 0) {
+                    upReq.write(bodyBuf);
+                }
+                upReq.end();
+            });
+        })(targetUrlStr, redirectsLeft);
+    });
+}
+
+function validateVortixTvClient(req) {
     if (!req || !req.headers) {
         return { ok: false, error: 'Missing headers' };
     }
+    var isLoopback = isLoopbackClient(req);
     var secSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
-    if (secSite === 'cross-site') {
-        return { ok: false, error: 'Blocked cross-site origin (sec-fetch-site: cross-site)' };
-    }
     var origin = String(req.headers.origin || '').toLowerCase();
-    if (origin === 'null') {
+    if (secSite === 'cross-site') {
+        var isLocalWebOrigin = !origin || origin === 'null' || /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin) || /^file:/i.test(origin);
+        if (!isLoopback || !isLocalWebOrigin) {
+            return { ok: false, error: 'Blocked cross-site origin (sec-fetch-site: cross-site)' };
+        }
+    }
+    if (origin === 'null' && !isLoopback) {
         return { ok: false, error: 'Blocked null origin' };
     }
     return { ok: true };
@@ -304,7 +537,7 @@ function buildRemoteSetupHtml(endpointUrl) {
     return [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
-        '<title>SmartSTB v2.1.0 Companion Setup & Backup</title>',
+        '<title>VortixTV v2.2.0 Companion Setup & Backup</title>',
         '<style>',
         'body{font-family:system-ui,-apple-system,sans-serif;background:#070b14;color:#f8fafc;margin:0;padding:18px;}',
         '.card{max-width:520px;margin:0 auto 16px auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:20px;box-shadow:0 12px 30px rgba(0,0,0,0.55);}',
@@ -320,7 +553,7 @@ function buildRemoteSetupHtml(endpointUrl) {
         '.msg{margin-top:12px;font-size:14px;text-align:center;font-weight:600;}',
         '</style></head><body>',
         '<div class="card">',
-        '<h2><span>SmartSTB v2.1.0 LAN Companion</span><span style="font-size:12px;background:#1e3a8a;color:#93c5fd;padding:3px 8px;border-radius:99px;">PIN Guarded</span></h2>',
+        '<h2><span>VortixTV v2.2.0 LAN Companion</span><span style="font-size:12px;background:#1e3a8a;color:#93c5fd;padding:3px 8px;border-radius:99px;">PIN Guarded</span></h2>',
         '<p style="font-size:13px;color:#cbd5e1;margin-top:0;">Enter the 4-digit pairing PIN shown on your Samsung TV screen (' + String(endpointUrl || '') + ').</p>',
         '<label>🔑 4-Digit TV Pairing PIN (Required)</label>',
         '<input id="pin" class="pin-input" maxlength="4" placeholder="0000" inputmode="numeric">',
@@ -1259,7 +1492,8 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         });
         var contentType = String(upRes.headers['content-type'] || '').toLowerCase();
         var isTsPath = /\.ts(\?|$)/i.test(target.path || '');
-        var isM3u8 = !isTsPath && (
+        var isDashManifest = contentType.indexOf('dash+xml') !== -1 || /\.mpd(\?|$)/i.test(target.path || '');
+        var isM3u8 = !isTsPath && !isDashManifest && (
             contentType.indexOf('mpegurl') !== -1 ||
             contentType.indexOf('m3u') !== -1 ||
             /\.m3u8(\?|$)/i.test(target.path || '')
@@ -1318,7 +1552,8 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
 
         var resHeaders = {
             'Access-Control-Allow-Origin': '*',
-            'Content-Type': upRes.headers['content-type'] || 'video/mp2t'
+            'Access-Control-Expose-Headers': '*',
+            'Content-Type': upRes.headers['content-type'] || (isDashManifest ? 'application/dash+xml' : 'video/mp2t')
         };
         if (upRes.headers['content-length']) {
             resHeaders['Content-Length'] = upRes.headers['content-length'];
@@ -1422,7 +1657,8 @@ function startProxyServer(port) {
     server = http.createServer(function(req, res) {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Expose-Headers', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
         if (req.method === 'OPTIONS') {
             res.writeHead(200);
             res.end();
@@ -1436,14 +1672,14 @@ function startProxyServer(port) {
         var parsedUrl = url.parse(req.url, true);
 
         // v2.1.0 Security Hardening: Loopback-Lock sensitive proxy routes & block cross-site requests
-        var clientCheck = validateSmartStbClient(req);
+        var clientCheck = validateVortixTvClient(req);
         if (!clientCheck.ok) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: clientCheck.error }));
             return;
         }
         var isLoopback = isLoopbackClient(req);
-        var loopbackOnlyPaths = ['/backup', '/catalog-cache', '/stream', '/stream-diag', '/vod-resolve', '/record', '/xtream', '/m3u', '/xmltv', '/reset_session'];
+        var loopbackOnlyPaths = ['/backup', '/catalog-cache', '/stream', '/dash-proxy', '/stream-diag', '/vod-resolve', '/record', '/xtream', '/m3u', '/xmltv', '/reset_session'];
         if (!isLoopback && loopbackOnlyPaths.indexOf(parsedUrl.pathname) !== -1) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Forbidden: Route restricted to local loopback (127.0.0.1 / ::1)' }));
@@ -1512,7 +1748,7 @@ function startProxyServer(port) {
         }
         if (parsedUrl.pathname === '/catalog-cache') {
             var profKey = String((parsedUrl.query && parsedUrl.query.profile) || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-            var cacheFilePath = '/tmp/smartstb_catalog_' + profKey + '.json';
+            var cacheFilePath = '/tmp/vortixtv_catalog_' + profKey + '.json';
             if (parsedUrl.query && parsedUrl.query.action === 'delete') {
                 var delMac = String(parsedUrl.query.mac || '').trim().toUpperCase();
                 if (delMac) {
@@ -1583,6 +1819,39 @@ function startProxyServer(port) {
         }
         if (parsedUrl.pathname === '/stream' && parsedUrl.query && parsedUrl.query.url) {
             proxyVideoStream(parsedUrl.query.url, req, res, 5);
+            return;
+        }
+        if (parsedUrl.pathname === '/dash-proxy' && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
+            var dashTarget = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
+            var dashHdrs = {};
+            if (parsedUrl.query && parsedUrl.query.hdrs) {
+                try {
+                    var parsedHdrsQ = JSON.parse(String(parsedUrl.query.hdrs));
+                    if (parsedHdrsQ && typeof parsedHdrsQ === 'object') {
+                        dashHdrs = parsedHdrsQ;
+                    }
+                } catch (eHq) {}
+            }
+            if (req.headers['x-proxy-headers']) {
+                try {
+                    var parsedHdrsH = JSON.parse(String(req.headers['x-proxy-headers']));
+                    if (parsedHdrsH && typeof parsedHdrsH === 'object') {
+                        var phk = Object.keys(parsedHdrsH);
+                        for (var phi = 0; phi < phk.length; phi++) {
+                            dashHdrs[phk[phi]] = parsedHdrsH[phk[phi]];
+                        }
+                    }
+                } catch (eHh) {}
+            }
+            if (parsedUrl.query && parsedUrl.query.ua) dashHdrs['User-Agent'] = String(parsedUrl.query.ua);
+            if (parsedUrl.query && parsedUrl.query.ref) dashHdrs.Referer = String(parsedUrl.query.ref);
+            if (parsedUrl.query && parsedUrl.query.orig) dashHdrs.Origin = String(parsedUrl.query.orig);
+            if (parsedUrl.query && parsedUrl.query.cookie) dashHdrs.Cookie = String(parsedUrl.query.cookie);
+            if (req.headers['x-proxy-ua']) dashHdrs['User-Agent'] = String(req.headers['x-proxy-ua']);
+            if (req.headers['x-proxy-referer']) dashHdrs.Referer = String(req.headers['x-proxy-referer']);
+            if (req.headers['x-proxy-origin']) dashHdrs.Origin = String(req.headers['x-proxy-origin']);
+            if (req.headers['x-proxy-cookie']) dashHdrs.Cookie = String(req.headers['x-proxy-cookie']);
+            proxyDashAndDrmRequest(dashTarget, dashHdrs, req, res, 5);
             return;
         }
 
@@ -1753,7 +2022,7 @@ function startProxyServer(port) {
                 var recUrl = String(parsedUrl.query.url || '').trim();
                 var rawChName = String(parsedUrl.query.name || 'channel').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'channel';
                 var tmpDir = (os && typeof os.tmpdir === 'function') ? os.tmpdir() : '/tmp';
-                var recFilePath = tmpDir + '/smartstb_rec_' + rawChName + '_' + Date.now() + '.ts';
+                var recFilePath = tmpDir + '/vortixtv_rec_' + rawChName + '_' + Date.now() + '.ts';
                 var parsedRecTarget = url.parse(recUrl);
                 if (!parsedRecTarget.hostname) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
