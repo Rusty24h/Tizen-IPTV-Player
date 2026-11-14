@@ -1,4 +1,4 @@
-# VortixTV — Native Samsung Tizen 4.0+ Smart TV IPTV Player (Stalker / Xtream / M3U / M3U8 / MPEG-DASH)
+# VortixTV — Native Samsung Tizen 4.0+ Smart TV IPTV Player (Stalker / Xtream / M3U8 / MPEG-DASH)
 
 ![Version](https://img.shields.io/badge/Version-2.2.0-00e676?style=for-the-badge)
 ![Tizen OS](https://img.shields.io/badge/Tizen_OS-4.0%2B_(2018--2026)-0072ff?style=for-the-badge&logo=samsung)
