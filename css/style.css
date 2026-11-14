@@ -1,4 +1,4 @@
-/* SmartSTB Clone - Samsung Tizen TV 1080p Stylesheet */
+/* VortixTV - Samsung Tizen TV 1080p Stylesheet */
 * {
     box-sizing: border-box;
     margin: 0;
@@ -21,6 +21,27 @@ body {
     width: 1920px;
     height: 1080px;
     z-index: 0;
+    display: none;
+}
+#av-player.active {
+    display: block;
+}
+#shaka-video {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1920px;
+    height: 1080px;
+    z-index: 1;
+    background: #000;
+    display: none;
+    object-fit: contain;
+}
+#shaka-video.active {
+    display: block;
+}
+#shaka-video.stretch {
+    object-fit: fill;
 }
 /* Subtitle Cue Overlay Box (Clean background-free broadcast text) */
 #subtitle-box {
@@ -81,7 +102,7 @@ body {
     display: block;
 }
 /* Toast Notification Banner */
-#smartstb-toast {
+#vortixtv-toast {
     position: fixed;
     top: 76px;
     right: 32px;
@@ -97,7 +118,7 @@ body {
     display: none;
     opacity: 0;
 }
-#smartstb-toast.visible {
+#vortixtv-toast.visible {
     display: block;
     opacity: 1;
 }
@@ -1194,7 +1215,7 @@ body.theme-green #epg-grid-sel-title,
 body.theme-green .epg-grid-ch-col-hdr {
     color: #34d399;
 }
-body.theme-green #smartstb-toast,
+body.theme-green #vortixtv-toast,
 body.theme-green #num-osd,
 body.theme-green #next-ep-banner,
 body.theme-green #filter-badge,
@@ -1276,7 +1297,7 @@ body.theme-red #epg-grid-sel-title,
 body.theme-red .epg-grid-ch-col-hdr {
     color: #f87171;
 }
-body.theme-red #smartstb-toast,
+body.theme-red #vortixtv-toast,
 body.theme-red #num-osd,
 body.theme-red #next-ep-banner,
 body.theme-red #filter-badge,
@@ -1358,7 +1379,7 @@ body.theme-amber #epg-grid-sel-title,
 body.theme-amber .epg-grid-ch-col-hdr {
     color: #fbbf24;
 }
-body.theme-amber #smartstb-toast,
+body.theme-amber #vortixtv-toast,
 body.theme-amber #num-osd,
 body.theme-amber #next-ep-banner,
 body.theme-amber #filter-badge,
@@ -1440,7 +1461,7 @@ body.theme-purple #epg-grid-sel-title,
 body.theme-purple .epg-grid-ch-col-hdr {
     color: #c084fc;
 }
-body.theme-purple #smartstb-toast,
+body.theme-purple #vortixtv-toast,
 body.theme-purple #num-osd,
 body.theme-purple #next-ep-banner,
 body.theme-purple #filter-badge,
@@ -1522,7 +1543,7 @@ body.theme-cyan #epg-grid-sel-title,
 body.theme-cyan .epg-grid-ch-col-hdr {
     color: #22d3ee;
 }
-body.theme-cyan #smartstb-toast,
+body.theme-cyan #vortixtv-toast,
 body.theme-cyan #num-osd,
 body.theme-cyan #next-ep-banner,
 body.theme-cyan #filter-badge,
@@ -1754,6 +1775,11 @@ body.theme-cyan .item-progress-fill {
     color: #fde047;
     border-color: rgba(250, 204, 21, 0.65);
     background: rgba(161, 98, 7, 0.28);
+}
+.osd-tech-pill.drm {
+    color: #6ee7b7;
+    border-color: rgba(16, 185, 129, 0.65);
+    background: rgba(6, 95, 70, 0.35);
 }
 
 /* Fullscreen Quick Channel Zapper Drawer (Left Edge Overlay Above OSD) */
