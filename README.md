@@ -1,17 +1,16 @@
-# Tizen-IPTV-Player — Native Samsung Tizen 4.0+ Smart TV IPTV Player (Stalker / Xtream / M3U)
+# VortixTV — Native Samsung Tizen 4.0+ Smart TV IPTV Player (Stalker / Xtream / M3U / M3U8 / MPEG-DASH)
 
-![Version](https://img.shields.io/badge/Version-2.1.0-00e676?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.2.0-00e676?style=for-the-badge)
 ![Tizen OS](https://img.shields.io/badge/Tizen_OS-4.0%2B_(2018--2026)-0072ff?style=for-the-badge&logo=samsung)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20This%20Project-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/rusty24h)
 ![Protocols](https://img.shields.io/badge/Protocols-Stalker_MAG_%7C_Xtream_%7C_M3U8_%7C_MPEG--DASH-a855f7?style=for-the-badge)
 
-**Tizen-IPTV-Player (v2.1.0)** is a high-performance, native Samsung Smart TV IPTV application engineered for **Tizen OS 4.0+ (2018–2026 TV models)**. It combines Samsung's hardware-accelerated `webapis.avplay` multimedia pipeline with a bundled **Tizen Background Node.js Local Proxy (`127.0.0.1:3001`)** to bypass CORS restrictions, emulate MAG Set-Top Box hardware headers (`MAG250` / `MAG254` / `MAG322`), and deliver instant playback across **Stalker Middleware Portals**, **Xtream Codes API**, and **M3U / M3U8 / MPEG-DASH Playlists**.
+**VortixTV** is a high-performance, native Samsung Smart TV IPTV application engineered for **Tizen OS 4.0+ (2018–2026 TV models)**. It combines Samsung's hardware-accelerated `webapis.avplay` multimedia pipeline with a bundled **Tizen Background Node.js Local Proxy (`127.0.0.1:3001`)** to bypass CORS restrictions, emulate MAG Set-Top Box hardware headers (`MAG250` / `MAG254` / `MAG322`), and deliver instant playback across **Stalker Middleware Portals**, **Xtream Codes API**, and **M3U / M3U8 / MPEG-DASH Playlists**.
 
 ---
 
 ## 📑 Table of Contents
 
-- [🚀 What's New in v2.1.0](#-whats-new-in-v210)
 - [✨ Key Features](#-key-features)
   - [1. Multi-Protocol IPTV & Multi-Profile Management](#1-multi-protocol-iptv--multi-profile-management)
   - [2. Hardware-Accelerated Tizen AVPlay & Playback Controls](#2-hardware-accelerated-tizen-avplay--playback-controls)
@@ -33,28 +32,55 @@
 
 ---
 
-## 🚀 What's New in v2.1.0
+## 🚀 What's New in v2.2.0
 
-- **Redesigned Full-Width Mobile QR & LAN Setup Banner (`http://<TV-LAN-IP>:3001/setup`)**:
-  - Split full-width banner inside Settings featuring setup instructions and the TV's LAN URL on the left, paired with a **248×248px ISO/IEC 18004 Vector QR Code**, a **4-Digit Pairing PIN**, and a **Wi-Fi Ready** indicator on the right for easy scanning from across the room.
-  - Built-in brute-force rate limiting (60-second IP lockout after 5 failed PIN attempts and automatic PIN rotation after 10 global failures) plus one-click **Phone Backup & Restore** over local Wi-Fi.
-- **High-Bitrate VOD / Series Anti-Buffering Pipeline**:
-  - **Two-Stage Asymmetric VOD Buffer**: Uses a fast **5-second initial play buffer** for rapid first-frame video decode alongside a **20-second sustain buffer**, a **45-second buffering timeout**, and a **65-second buffering watchdog** for smooth 4K/8K VOD and Series playback.
-  - **Pre-Open VOD Redirect Resolver (`/vod-resolve`)**: Resolves HTTP `301`/`302`/`303`/`307`/`308` CDN redirects before opening `webapis.avplay` so the hardware player connects directly to the final media server.
-  - **Post-PLAYING Deferred Resume Seek**: Defers VOD resume seeking until the hardware demuxer decodes its first presentation timestamp, preventing `.mkv` and `.mp4` streams from resetting to `00:00:00`.
-  - **Minimalist Circular VOD Buffering Overlay**
-- **Full-Bleed 2:3 Poster Grid & Click-to-Load Details & EPG**:
-  - **Click-to-Load Details & EPG**: Navigating across the 3×3 Poster Grid keeps the right-hand **Details & EPG** column locked without background network fetches on hover. Pressing **OK** once loads the selected item's details and unlocks the action tools; pressing **OK** a second time starts playback.
-  - **List View Default & Scrollable 2-Column Quick Action Tools**: Defaults to List View for instant D-Pad **Right** access to the compact `1.1fr` Details & EPG column and its expandable 2-column Quick Action Tools bar (`⚙ More Tools` / `▴ Fewer Tools`).
-- **Multi-DRM (`WIDEVINE_CDM`, `PLAYREADY`, `CLEARKEY`), MPEG-DASH (`.mpd`) & Kodi/VLC M3U Directives**:
-  - Native `webapis.avplay.setDrm()` support for **Widevine Modular**, **Microsoft PlayReady**, and **W3C ClearKey** (`kid:key` hex and JWK), plus `.mpd` MPEG-DASH streams.
-  - Parses `#KODIPROP:inputstream.adaptive.*`, `#EXTVLCOPT:http-*`, `#EXTHTTP:{...}`, and inline `|User-Agent=...&Referer=...` pipe headers in M3U playlists.
-- **Profile Switcher & Synchronized Session Reset**:
-  - Full-screen profile selector with **7 pre-cached High-DPI studio avatars**
-- **380MB DDR RAM Budget Enforcer & Large-Catalog Pagination**:
-  - Automatic memory trimmers bound EPG, VOD metadata, Base64, XMLTV, and M3U caches and release detached DOM images, while automatically switching massive catalogs (`600+` categories) to on-demand per-category pagination.
-- **Official YouTube Trailer Modal & Automatic Trailer Search**:
-  - Plays explicit `youtube_trailer` IDs or resolves official trailers automatically via `/trailer-search`, playing inside the built-in 1080p YouTube modal or launching the native Samsung YouTube TV app via the **Green** button.
+### 1. Shaka Player 5.3.5 + W3C EME Dual-Backend Playback Engine
+* **Dual-Surface Video Architecture**:
+  * **`#shaka-video` Surface (`<video>`)**: Dedicated, hardware-accelerated W3C HTML5 media plane for MPEG-DASH manifests (`.mpd`), adaptive HLS (`.m3u8`), ClearKey, and PlayReady encrypted streams.
+  * **`#av-player` Surface (`<object>`)**: Native Samsung AVPlay (`webapis.avplay`) hardware pipeline preserved for raw TS (`.ts`), direct MP4/MKV VOD, and Stalker/Xtream legacy transport streams.
+* **Two-Phase CDM Lifecycle Management**:
+  * Enforces an asynchronous `player.unload()` (2s timeout) followed by `player.destroy()` (5s timeout) before releasing media element sources.
+  * Completely eliminates Tizen 4.0/5.0 hardware MediaKeySession memory leaks and CDM freezes during rapid channel zapping.
+ 
+### 2. Multi-DRM: ClearKey & Microsoft PlayReady Support
+* **CENC ClearKey (`org.w3.clearkey`)**:
+  * Direct hex `KID:KEY` pairs (with or without UUID hyphens).
+  * Multi-key JSON dictionaries (e.g. `{"kid1":"key1","kid2":"key2"}`).
+  * Unquoted Kodi dictionaries (e.g. `{kid1:key1,kid2:key2}`).
+  * W3C JSON Web Key (JWK) sets (`{"keys":[{"kty":"oct","kid":"...","k":"..."}]}`) parsed and converted to native hex key maps.
+* **Microsoft PlayReady (`com.microsoft.playready`)**:
+  * Seamless playback on Samsung Tizen TVs and Windows Microsoft Edge.
+  * Multi-key PlayReady entitlement support with custom headers (`X-AxDRM-Message`, `SOAPAction`, `Authorization: Bearer <token>`).
+  * Non-persistent temporary session compatibility, eliminating `6008 LICENSE_RESPONSE_REJECTED` errors.
+  * Automatic fallback to native `webapis.avplay.setDrm('PLAYREADY', ...)` on older firmware lacking PlayReady EME.
+
+### 3. Adaptive Bitrate (ABR) Optimization & Decoder Crash Protection
+* **720p DRM ABR Safety Ceiling**:
+  * Default Auto ABR on DRM streams is safely capped to `720p` (`avc1.64001f` High@L3.1) to prevent hardware decoder crashes on high-profile `1080p` (`avc1.640033` High@L5.1) segments.
+* **Interactive Video Quality Selector**:
+  * Switch between `Auto (Adaptive Bitrate)`, `1080p`, `720p`, `480p`, `360p`, or `288p` directly from the on-screen Track Settings modal.
+* **Automated Decode Error Recovery**:
+  * Intercepts HTMLVideoElement error code `3` / Shaka `3014-3016` errors, dynamically steps down the ABR ceiling (`computeSafeAbrCeiling`), and seamlessly resumes playback at the exact elapsed position.
+
+### 4. Advanced M3U & KODIPROP Parsing
+* **Full Kodi Directive Support**:
+  * `#KODIPROP:inputstream.adaptive.license_type=...`
+  * `#KODIPROP:inputstream.adaptive.license_key=...`
+  * `#KODIPROP:inputstream.adaptive.stream_headers=...`
+  * `#KODIPROP:inputstream.adaptive.license_data=...`
+  * `#KODIPROP:inputstream.adaptive.manifest_type=...`
+* **Pipe Header Syntax**:
+  * Supports pipe delimiters (`|` and URL-encoded `%7C`), extracting inline custom headers (`User-Agent`, `Referer`, `Cookie`) and DRM configurations while preserving CDN tokens.
+* **Edge-Auth Token Forwarding**:
+  * Automatically detects and promotes authentication cookies (`__hdnea__`, `hdnea`, `hdntl`, `hdnts`) to relative manifest and segment URIs.
+
+### 5. Hardened Local Background Proxy (`service/proxy.js`)
+* **New `/dash-proxy` Route**:
+  * Proxies segment and license server requests requiring custom headers or CORS workarounds (`GET`, `POST`, `HEAD`, `OPTIONS`).
+* **SSRF & DNS Rebinding Protection**:
+  * Integrates `validateSafeUpstreamUrl` and `isBlockedUpstreamIp` to block requests targeting loopback, private ranges, or cloud metadata endpoints (`169.254.169.254`).
+* **Loopback Client Verification**:
+  * Authenticates internal `.wgt` requests via `x-vortixtv-client: 1`, allowing seamless communication from `file://` origins while rejecting unauthorized external web access.   
 
 ---
 
