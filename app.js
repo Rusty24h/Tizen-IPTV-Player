@@ -1,9 +1,8 @@
 /* jshint browser: true, devel: true, undef: true, unused: true, strict: true, esversion: 5 */
 /* global tizen, webapis, shaka, Promise, Intl, Blob, URL, FileReader */
 /*
- * VortixTV for Samsung Tizen TV & PC
+ * VortixTV for Samsung Tizen TV
  * Complete Application Controller (app.js)
- * Compatible with Tizen 4.0+ WebEngine & Desktop Browsers (ES5/ES6 safe)
  */
 (function() {
     'use strict';
@@ -61,6 +60,7 @@
     var retryCount = 0;
     var playSessionId = 0;
     var bufferingWatchdogTimer = null;
+    var bufferingWatchdogIsInterval = false;
     var avPlayerEl = document.getElementById('av-player');
     var shakaVideoEl = document.getElementById('shaka-video');
     var shakaInstance = null;
@@ -284,10 +284,16 @@
     var helpContextActionsEl = document.getElementById('help-context-actions');
     var vodViewMode = localStorage.getItem('cfg_vod_view') || 'list';
     var lockedPreviewItem = null;
+    var posterFallbackSvgCounter = 0;
     var profilePickerOpen = false;
     var profilePickerIdx = 0;
     var trailerModalOpen = false;
     var activeTrailerYoutubeId = '';
+    var dvrModalOpen = false;
+    var dvrModalItems = [];
+    var dvrModalIdx = 0;
+    var dvrModalFocusArea = 'list';
+    var dvrModalActionIdx = 0;
     var rebufferBurstTimestamps = [];
     var vodExtendedMetaCache = {};
     var filterBadgeEl = document.getElementById('filter-badge');
@@ -2413,6 +2419,11 @@
         return parsed;
     }
     function compareItemsByNewestAdded(a, b) {
+        var aa = Number((a && a._sortAdded) || 0);
+        var ab = Number((b && b._sortAdded) || 0);
+        if (aa !== ab) {
+            return ab - aa;
+        }
         var ya = (a && typeof a._sortYear === 'number') ? a._sortYear : (parseInt(String((a && a.year) || '0'), 10) || 0);
         var yb = (b && typeof b._sortYear === 'number') ? b._sortYear : (parseInt(String((b && b.year) || '0'), 10) || 0);
         if (a && typeof a._sortYear !== 'number') {
@@ -4111,6 +4122,7 @@
                     poster: String(m.stream_icon || m.cover || ''),
                     youtube_trailer: String(m.youtube_trailer || m.trailer || ''),
                     genreId: String(m.category_id || categoryId || '*'),
+                    _sortAdded: Number(m.added || 0),
                     censored: (String(m.is_adult) === '1' || ADULT_RE.test(mName)) ? 1 : 0,
                     isVod: true,
                     isSeries: false
@@ -4121,16 +4133,6 @@
             }
             var catIdStr = String(categoryId || '*');
             var isSpecificCat = (catIdStr !== '*' && catIdStr !== 'new' && !searchQuery);
-            if (!isSpecificCat && !searchQuery && vodCats.length > 600) {
-                for (var vc = 0; vc < vodCats.length; vc++) {
-                    var vcId = String(vodCats[vc].id);
-                    if (vcId !== '*' && vcId !== 'new' && vcId !== 'cont' && vcId !== 'fav' && vcId !== 'rec' && !vodCats[vc].censored) {
-                        catIdStr = vcId;
-                        isSpecificCat = true;
-                        break;
-                    }
-                }
-            }
             if (isSpecificCat) {
                 if (this.xtreamVodByCatCache && this.xtreamVodByCatCache[catIdStr]) {
                     return Promise.resolve(filterAndPaginateLocalList(this.xtreamVodByCatCache[catIdStr], '*', page, searchQuery, sortBy));
@@ -4390,6 +4392,7 @@
                     poster: String(s.cover || ''),
                     youtube_trailer: String(s.youtube_trailer || s.trailer || ''),
                     genreId: String(s.category_id || categoryId || '*'),
+                    _sortAdded: Number(s.last_modified || s.added || 0),
                     censored: (String(s.is_adult) === '1' || ADULT_RE.test(serName)) ? 1 : 0,
                     isVod: true,
                     isSeries: true,
@@ -4401,16 +4404,6 @@
             }
             var catIdStr = String(categoryId || '*');
             var isSpecificSeriesCat = (catIdStr !== '*' && catIdStr !== 'new' && !searchQuery);
-            if (!isSpecificSeriesCat && !searchQuery && seriesCats.length > 600) {
-                for (var sc = 0; sc < seriesCats.length; sc++) {
-                    var scId = String(seriesCats[sc].id);
-                    if (scId !== '*' && scId !== 'new' && scId !== 'cont' && scId !== 'fav' && scId !== 'rec' && !seriesCats[sc].censored) {
-                        catIdStr = scId;
-                        isSpecificSeriesCat = true;
-                        break;
-                    }
-                }
-            }
             if (isSpecificSeriesCat) {
                 if (this.xtreamSeriesByCatCache && this.xtreamSeriesByCatCache[catIdStr]) {
                     return Promise.resolve(filterAndPaginateLocalList(this.xtreamSeriesByCatCache[catIdStr], '*', page, searchQuery, sortBy));
@@ -4913,7 +4906,7 @@
         var effectiveUseTmp = activeCmdObj ? Boolean(activeCmdObj.useTmp) : Boolean(item && item.useTmpLink);
         var directUrl = extractStreamUrl(rawItemCmd, portalBase, item);
 
-        if (pType === 'xtream' || pType === 'm3u' || (item && item.directUrl && !activeCmdObj)) {
+        if (pType === 'xtream' || pType === 'm3u' || (item && (item.directUrl || item.isDvrClip) && !activeCmdObj)) {
             if (pType === 'xtream' && forceAlternate && !item.isVod && !item.isEpisode && /\.ts$/i.test(directUrl) && ((item._altFormatIdx || 0) % 2 === 1)) {
                 return Promise.resolve(directUrl.replace(/\.ts$/i, '.m3u8'));
             }
@@ -5220,18 +5213,44 @@
         renderItems();
         updatePreviewPanel();
     }
+    function isContentModeId(modeId) {
+        return modeId === 'live' || modeId === 'vod' || modeId === 'series';
+    }
     function getActiveContentModeId() {
-        var m = modes[modeIdx];
-        if (m && m.id !== 'search' && m.id !== 'settings') {
-            return m.id;
+        var activeM = modes[lastContentModeIdx];
+        if (activeM && isContentModeId(activeM.id)) {
+            return activeM.id;
         }
-        var fallbackM = modes[lastContentModeIdx];
-        return (fallbackM && fallbackM.id !== 'search' && fallbackM.id !== 'settings') ? fallbackM.id : 'live';
+        var curM = modes[modeIdx];
+        return (curM && isContentModeId(curM.id)) ? curM.id : 'live';
+    }
+    function syncModeCursorToActiveContent() {
+        var targetIdx = (modes[lastContentModeIdx] && isContentModeId(modes[lastContentModeIdx].id)) ? lastContentModeIdx : 0;
+        if (modeIdx !== targetIdx) {
+            modeIdx = targetIdx;
+            renderModes();
+        }
     }
     function isPosterGridActive() {
-        return (getActiveContentModeId() === 'vod' || getActiveContentModeId() === 'series') &&
+        var modeId = getActiveContentModeId();
+        return (modeId === 'vod' || modeId === 'series') &&
                seriesStack.length === 0 &&
                vodViewMode !== 'list';
+    }
+    function isPosterGridNavActive() {
+        if (isPosterGridActive()) {
+            return true;
+        }
+        if (seriesStack.length === 0 &&
+            vodViewMode !== 'list' &&
+            itemsListEl &&
+            itemsListEl.classList &&
+            itemsListEl.classList.contains('poster-grid-mode') &&
+            itemsListEl.querySelector &&
+            itemsListEl.querySelector('.poster-card')) {
+            return true;
+        }
+        return false;
     }
     function moveFavoriteItem(delta) {
         var curCat = currentCats[catIdx];
@@ -5277,6 +5296,73 @@
         renderItems();
         updatePreviewPanel();
         showToast((delta < 0 ? '⬆ Moved Up: ' : '⬇ Moved Down: ') + selItem.name);
+    }
+    function writeTextToTizenStorage(fileName, content, onDone) {
+        if (typeof tizen === 'undefined' || !tizen.filesystem) {
+            onDone(false, '');
+            return;
+        }
+        var writeIntoDir = function(dirLabel, dirObj) {
+            try {
+                var targetFile;
+                try {
+                    targetFile = dirObj.resolve(fileName);
+                } catch (eRes) {
+                    targetFile = dirObj.createFile(fileName);
+                }
+                targetFile.openStream('w', function(fsStream) {
+                    try {
+                        fsStream.write(content);
+                        fsStream.close();
+                        onDone(true, dirLabel + '/' + fileName);
+                    } catch (eWr) {
+                        try { fsStream.close(); } catch (eCl) {}
+                        onDone(false, '');
+                    }
+                }, function() {
+                    onDone(false, '');
+                }, 'UTF-8');
+            } catch (eDir) {
+                onDone(false, '');
+            }
+        };
+        var tryDocumentsFallback = function() {
+            try {
+                tizen.filesystem.resolve('documents', function(docDir) {
+                    writeIntoDir('Documents', docDir);
+                }, function() {
+                    onDone(false, '');
+                }, 'rw');
+            } catch (eDoc) {
+                onDone(false, '');
+            }
+        };
+        try {
+            if (typeof tizen.filesystem.listStorages === 'function') {
+                tizen.filesystem.listStorages(function(storages) {
+                    var usbStorage = null;
+                    if (Array.isArray(storages)) {
+                        for (var si = 0; si < storages.length; si++) {
+                            if (storages[si] && storages[si].type === 'EXTERNAL' && storages[si].state === 'MOUNTED') {
+                                usbStorage = storages[si];
+                                break;
+                            }
+                        }
+                    }
+                    if (usbStorage && usbStorage.label) {
+                        tizen.filesystem.resolve(usbStorage.label, function(usbDir) {
+                            writeIntoDir('USB (' + usbStorage.label + ')', usbDir);
+                        }, tryDocumentsFallback, 'rw');
+                    } else {
+                        tryDocumentsFallback();
+                    }
+                }, tryDocumentsFallback);
+            } else {
+                tryDocumentsFallback();
+            }
+        } catch (eListSt) {
+            tryDocumentsFallback();
+        }
     }
     function exportFavoritesM3u() {
         var curModeId = getActiveContentModeId();
@@ -5324,13 +5410,34 @@
             return;
         }
         var m3uContent = lines.join('\n') + '\n';
+        var exportFileName = 'vortixtv-favorites-' + new Date().toISOString().slice(0, 10) + '.m3u';
+        var lanSyncedPromise = proxyFetch(api.proxyUrl + '/favorites-export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ m3u: m3uContent, count: exportedCount, fileName: exportFileName })
+        }).then(function(r) { return r.json(); }).catch(function() { return null; });
+
+        if (typeof tizen !== 'undefined' && tizen.filesystem) {
+            writeTextToTizenStorage(exportFileName, m3uContent, function(savedOnTv, destLabel) {
+                lanSyncedPromise.then(function(proxyRes) {
+                    if (savedOnTv) {
+                        showToast('📋 Saved ' + exportedCount + ' Favorites to ' + destLabel + (proxyRes && proxyRes.ok ? ' & LAN /setup' : ''));
+                    } else if (proxyRes && proxyRes.ok) {
+                        showToast('📋 Ready! Download ' + exportedCount + ' Favorites via Settings -> LAN /setup');
+                    } else {
+                        showToast('⚠ Could not access USB or LAN proxy to export Favorites');
+                    }
+                });
+            });
+            return;
+        }
         try {
             if (typeof Blob !== 'undefined') {
                 var blob = new Blob([m3uContent], { type: 'audio/x-mpegurl;charset=utf-8' });
                 var objUrl = URL.createObjectURL(blob);
                 var a = document.createElement('a');
                 a.href = objUrl;
-                a.download = 'vortixtv-favorites-' + new Date().toISOString().slice(0, 10) + '.m3u';
+                a.download = exportFileName;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -5341,7 +5448,7 @@
                 }, 2000);
             }
         } catch (ex) {}
-        showToast('📋 Exported ' + exportedCount + ' channels to Favorites .M3U');
+        showToast('📋 Exported ' + exportedCount + ' favorites (.M3U + LAN /setup)');
     }
     function getRemindersList() {
         if (!remindersCache) {
@@ -5459,13 +5566,13 @@
         }
         var nowSec = Math.floor(Date.now() / 1000);
         var remaining = [];
-        var triggered = null;
+        var triggeredList = [];
         var changed = false;
         for (var i = 0; i < list.length; i++) {
             var r = list[i];
             var sTs = Number(r.startTs || 0);
             if (sTs <= nowSec && sTs >= nowSec - 180) {
-                triggered = r;
+                triggeredList.push(r);
                 changed = true;
             } else if (sTs > nowSec) {
                 if (sTs - nowSec <= 45 && !r.warned) {
@@ -5483,16 +5590,36 @@
         } else {
             updateReminderBadge();
         }
-        if (triggered) {
-            var targetCh = channelByIdMap[String(triggered.chId)];
-            if (targetCh) {
-                showToast('⏰ Auto-Tuning Reminder: ' + triggered.progName + ' (' + triggered.chName + ')');
-                showOSD(targetCh.name, '⏰ REMINDER AUTO-TUNE', triggered.progName, '');
-                if (window._parentalUnlocked || !isAdultContentItem(targetCh)) {
-                    setOverlayVisible(false);
+        if (triggeredList.length > 0) {
+            var tuned = false;
+            var missedNames = [];
+            for (var t = 0; t < triggeredList.length; t++) {
+                var trig = triggeredList[t];
+                var targetCh = channelByIdMap[String(trig.chId)] || null;
+                if (!targetCh) {
+                    for (var cIdx = 0; cIdx < allChannels.length; cIdx++) {
+                        if (allChannels[cIdx] && String(allChannels[cIdx].id) === String(trig.chId)) {
+                            targetCh = allChannels[cIdx];
+                            break;
+                        }
+                    }
                 }
-                playItem(targetCh);
-                syncLiveChannelCursorOnZap(targetCh);
+                if (!tuned && targetCh) {
+                    tuned = true;
+                    var extraSuffix = triggeredList.length > 1 ? (' (+' + (triggeredList.length - 1) + ' other reminder(s) fired)') : '';
+                    showToast('⏰ Auto-Tuning Reminder: ' + trig.progName + ' (' + trig.chName + ')' + extraSuffix);
+                    showOSD(targetCh.name, '⏰ REMINDER AUTO-TUNE', trig.progName + extraSuffix, '');
+                    if (window._parentalUnlocked || !isAdultContentItem(targetCh)) {
+                        setOverlayVisible(false);
+                    }
+                    playItem(targetCh);
+                    syncLiveChannelCursorOnZap(targetCh);
+                } else {
+                    missedNames.push(trig.progName + ' (' + trig.chName + ')');
+                }
+            }
+            if (!tuned && missedNames.length > 0) {
+                showToast('⏰ Reminders Due: ' + missedNames.join(' | '));
             }
         }
     }
@@ -5560,7 +5687,7 @@
         isRecordingStream = true;
         var rawBytes = Number((data && (data.bytes !== undefined ? data.bytes : data.bytesWritten)) || 0);
         var mb = (rawBytes / 1048576).toFixed(1);
-        recStatusBadgeEl.textContent = '⏺ REC ' + formatTimeHMS(data.elapsedSec || 0) + ' • ' + mb + ' MB';
+        recStatusBadgeEl.textContent = '● REC ' + formatTimeHMS(data.elapsedSec || 0) + ' • ' + mb + ' MB';
         recStatusBadgeEl.classList.add('visible');
     }
     function toggleStreamRecording() {
@@ -5572,20 +5699,20 @@
                     var rawBytes = Number((d && (d.bytes !== undefined ? d.bytes : d.bytesWritten)) || 0);
                     var mb = (rawBytes / 1048576).toFixed(2);
                     var savedFile = (d && (d.file || d.fileName)) || 'clip.ts';
-                    showToast('⏹ Stopped Recording: ' + savedFile + ' (' + mb + ' MB)');
+                    showToast('■ Stopped Recording: ' + savedFile + ' (' + mb + ' MB)');
                 })
                 .catch(function() {
                     updateRecBadge({ active: false });
-                    showToast('⏹ Recording stopped');
+                    showToast('■ Recording stopped');
                 });
             return;
         }
         var target = currentPlayingItem || currentItems[itemIdx];
         if (!target || target.isSeason) {
-            showToast('⏺ Play or select a Live TV channel first to record');
+            showToast('● Play or select a Live TV channel first to record');
             return;
         }
-        showToast('⏺ Starting stream recording for ' + target.name + '...');
+        showToast('● Starting stream recording for ' + target.name + '...');
         api.resolveStream(target, false).then(function(url) {
             var cleanUrl = unwrapProxyStreamUrl(String(url || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim());
             if (!cleanUrl) {
@@ -5596,7 +5723,7 @@
             return proxyFetch(recEndpoint, { method: 'GET' }).then(function(r) { return r.json(); }).then(function(d) {
                 if (d && (d.active || d.ok || d.recording)) {
                     updateRecBadge(d);
-                    showToast('⏺ Recording to ' + (d.file || d.fileName || 'disk') + ' (Click REC badge or press again to stop)');
+                    showToast('● Recording to persistent DVR storage (Manage in 📼 DVR Clips)');
                     if (recordingPollTimer) {
                         clearInterval(recordingPollTimer);
                     }
@@ -5614,41 +5741,373 @@
             showToast('⚠ Recording error: ' + err.message);
         });
     }
-    function runStreamHealthProbe() {
-        var target = currentItems[itemIdx] || currentPlayingItem;
-        if (!target || target.isSeason) {
-            showToast('🩺 Select a channel or movie to test stream health');
+    function formatDvrSize(bytes) {
+        var num = Number(bytes || 0);
+        if (num >= 1048576) {
+            return (num / 1048576).toFixed(1) + ' MB';
+        }
+        return Math.max(1, Math.round(num / 1024)) + ' KB';
+    }
+    function getDvrActionButtons() {
+        var ids = ['btn-dvr-play', 'btn-dvr-usb', 'btn-dvr-delete'];
+        if (isRecordingStream) {
+            ids.push('btn-dvr-stop');
+        }
+        ids.push('btn-dvr-close');
+        var list = [];
+        for (var i = 0; i < ids.length; i++) {
+            var el = document.getElementById(ids[i]);
+            if (el) {
+                list.push({ id: ids[i], el: el });
+            }
+        }
+        return list;
+    }
+    function updateDvrModalActions() {
+        var stopBtn = document.getElementById('btn-dvr-stop');
+        if (stopBtn) {
+            stopBtn.style.display = isRecordingStream ? '' : 'none';
+        }
+        var btns = getDvrActionButtons();
+        if (dvrModalActionIdx >= btns.length) {
+            dvrModalActionIdx = Math.max(0, btns.length - 1);
+        }
+        for (var i = 0; i < btns.length; i++) {
+            if (dvrModalFocusArea === 'actions' && i === dvrModalActionIdx) {
+                btns[i].el.classList.add('focused');
+            } else {
+                btns[i].el.classList.remove('focused');
+            }
+        }
+    }
+    function updateDvrDetailPanel() {
+        var titleEl = document.getElementById('dvr-detail-title');
+        var metaEl = document.getElementById('dvr-detail-meta');
+        var item = dvrModalItems[dvrModalIdx] || null;
+        if (!item) {
+            if (titleEl) {
+                titleEl.textContent = 'No saved DVR clips';
+            }
+            if (metaEl) {
+                metaEl.textContent = 'Use "● Record Clip" on any Live TV channel to save persistent .TS recordings here.';
+            }
             return;
         }
-        showToast('🩺 Probing stream health & speed for ' + target.name + '...');
-        api.resolveStream(target, false).then(function(url) {
-            var cleanUrl = unwrapProxyStreamUrl(String(url || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim());
-            if (!cleanUrl) {
-                showToast('🩺 Stream Probe: Empty stream URL');
+        var dStr = item.createdAt ? new Date(Number(item.createdAt)).toLocaleString() : '';
+        if (titleEl) {
+            titleEl.textContent = (item.isRecording ? '🔴 [REC] ' : '📼 ') + (item.title || item.fileName);
+        }
+        if (metaEl) {
+            metaEl.textContent = 'File: ' + item.fileName + '\nSize: ' + formatDvrSize(item.sizeBytes) + (dStr ? ('\nRecorded: ' + dStr) : '');
+        }
+    }
+    function renderDvrModalList() {
+        var listEl = document.getElementById('dvr-modal-list');
+        if (!listEl) {
+            return;
+        }
+        if (!listEl._dvrClickBound) {
+            listEl._dvrClickBound = true;
+            listEl.addEventListener('click', function(ev) {
+                var t = ev && ev.target ? ev.target : null;
+                while (t && t !== listEl && (!t.classList || !t.classList.contains('item'))) {
+                    t = t.parentNode;
+                }
+                if (t && t !== listEl && typeof t._rowIndex === 'number') {
+                    dvrModalIdx = t._rowIndex;
+                    dvrModalFocusArea = 'list';
+                    renderDvrModalList();
+                }
+            });
+        }
+        renderList(listEl, dvrModalItems, dvrModalIdx, function(clip) {
+            return (clip.isRecording ? '🔴 ' : '📼 ') + (clip.title || clip.fileName) + '  (' + formatDvrSize(clip.sizeBytes) + ')';
+        }, 12);
+        if (dvrModalFocusArea !== 'list' && listEl.children) {
+            for (var i = 0; i < listEl.children.length; i++) {
+                listEl.children[i].classList.remove('focused');
+            }
+        }
+        updateDvrDetailPanel();
+        updateDvrModalActions();
+    }
+    function refreshDvrModalList() {
+        var storageEl = document.getElementById('dvr-storage-info');
+        return proxyFetch(api.proxyUrl + '/record?action=list', { method: 'GET' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                dvrModalItems = (data && Array.isArray(data.recordings)) ? data.recordings : [];
+                if (dvrModalIdx >= dvrModalItems.length) {
+                    dvrModalIdx = Math.max(0, dvrModalItems.length - 1);
+                }
+                if (storageEl) {
+                    storageEl.textContent = dvrModalItems.length + ' clip(s)' + (data && data.dataDir ? ' • Persistent' : '');
+                }
+                if (dvrModalItems.length === 0) {
+                    dvrModalFocusArea = 'actions';
+                    dvrModalActionIdx = Math.max(0, getDvrActionButtons().length - 1);
+                }
+                var listEl = document.getElementById('dvr-modal-list');
+                if (listEl) {
+                    listEl._forceRebuild = true;
+                }
+                renderDvrModalList();
+            })
+            .catch(function() {
+                dvrModalItems = [];
+                if (storageEl) {
+                    storageEl.textContent = 'Proxy Offline';
+                }
+                renderDvrModalList();
+            });
+    }
+    function playSelectedDvrClip() {
+        var clip = dvrModalItems[dvrModalIdx];
+        if (!clip || !clip.fileName) {
+            showToast('📼 Select a DVR recording first');
+            return;
+        }
+        var clipUrl = api.proxyUrl + '/record?action=play&file=' + encodeURIComponent(clip.fileName);
+        closeDvrModal();
+        var dvrItem = {
+            id: 'dvr_' + clip.fileName,
+            name: '📼 ' + (clip.title || clip.fileName),
+            cmd: clipUrl,
+            directUrl: true,
+            isDvrClip: true,
+            isVod: true,
+            isSeries: false
+        };
+        setOverlayVisible(false);
+        playItem(dvrItem);
+    }
+    function exportSelectedDvrClipToUsb() {
+        var clip = dvrModalItems[dvrModalIdx];
+        if (!clip || !clip.fileName) {
+            showToast('💾 Select a DVR recording first');
+            return;
+        }
+        if (typeof tizen === 'undefined' || !tizen.filesystem || typeof tizen.filesystem.listStorages !== 'function') {
+            showToast('💾 Download ' + clip.fileName + ' via Settings -> LAN Companion (/setup)');
+            return;
+        }
+        tizen.filesystem.listStorages(function(storages) {
+            var usbStorage = null;
+            if (Array.isArray(storages)) {
+                for (var i = 0; i < storages.length; i++) {
+                    if (storages[i] && storages[i].type === 'EXTERNAL' && storages[i].state === 'MOUNTED') {
+                        usbStorage = storages[i];
+                        break;
+                    }
+                }
+            }
+            if (!usbStorage || !usbStorage.label) {
+                showToast('💾 Insert USB drive or download via LAN Companion (/setup)');
                 return;
             }
-            return proxyFetch(api.proxyUrl + '/stream-diag?probe=1&url=' + encodeURIComponent(cleanUrl), { method: 'GET' })
+            showToast('💾 Exporting ' + clip.fileName + ' to USB...');
+            proxyFetch(api.proxyUrl + '/record?action=play&file=' + encodeURIComponent(clip.fileName), { method: 'GET' })
+                .then(function(r) {
+                    if (!r.ok) {
+                        throw new Error('HTTP ' + r.status);
+                    }
+                    return r.arrayBuffer();
+                })
+                .then(function(buf) {
+                    var bytes = new Uint8Array(buf);
+                    tizen.filesystem.resolve(usbStorage.label, function(usbDir) {
+                        var outFile;
+                        try {
+                            outFile = usbDir.resolve(clip.fileName);
+                        } catch (eR) {
+                            outFile = usbDir.createFile(clip.fileName);
+                        }
+                        outFile.openStream('w', function(fsStream) {
+                            try {
+                                fsStream.writeBytes(Array.prototype.slice.call(bytes));
+                                fsStream.close();
+                                showToast('💾 Saved to USB: ' + clip.fileName);
+                            } catch (eWrUsb) {
+                                try { fsStream.close(); } catch (eClU) {}
+                                showToast('⚠ USB write failed — use LAN Companion (/setup)');
+                            }
+                        }, function() {
+                            showToast('⚠ USB openStream error — use LAN Companion (/setup)');
+                        }, 'UTF-8');
+                    }, function() {
+                        showToast('⚠ USB resolve failed');
+                    }, 'rw');
+                })
+                .catch(function() {
+                    showToast('⚠ Failed to read DVR clip for USB export');
+                });
+        }, function() {
+            showToast('💾 Use Settings -> LAN Companion (/setup) to download clip');
+        });
+    }
+    function deleteSelectedDvrClip() {
+        var clip = dvrModalItems[dvrModalIdx];
+        if (!clip || !clip.fileName) {
+            return;
+        }
+        proxyFetch(api.proxyUrl + '/record?action=delete&file=' + encodeURIComponent(clip.fileName), { method: 'GET' })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d && d.ok) {
+                    showToast('✕ Deleted DVR clip: ' + clip.fileName);
+                    refreshDvrModalList();
+                } else {
+                    showToast('⚠ Could not delete clip');
+                }
+            })
+            .catch(function() {
+                showToast('⚠ Error deleting DVR clip');
+            });
+    }
+    function openDvrModal() {
+        if (searchOpen) closeSearch();
+        if (filterOpen) closeFilterModal();
+        if (epgModalOpen) closeEpgModal();
+        if (pinModalOpen) closePinModal();
+        if (tracksModalOpen) closeTracksModal();
+        if (trailerModalOpen) closeTrailerModal();
+        if (profilePickerOpen) closeProfilePickerModal();
+        if (miniZapOpen) closeMiniZapDrawer();
+        dvrModalOpen = true;
+        dvrModalIdx = 0;
+        dvrModalActionIdx = 0;
+        dvrModalFocusArea = 'list';
+        var modalEl = document.getElementById('dvr-modal');
+        if (modalEl) {
+            modalEl.style.display = '';
+            modalEl.classList.add('visible');
+        }
+        var btnPlay = document.getElementById('btn-dvr-play');
+        var btnUsb = document.getElementById('btn-dvr-usb');
+        var btnDel = document.getElementById('btn-dvr-delete');
+        var btnStop = document.getElementById('btn-dvr-stop');
+        var btnClose = document.getElementById('btn-dvr-close');
+        if (btnPlay) btnPlay.onclick = function(ev) { ev.stopPropagation(); playSelectedDvrClip(); };
+        if (btnUsb) btnUsb.onclick = function(ev) { ev.stopPropagation(); exportSelectedDvrClipToUsb(); };
+        if (btnDel) btnDel.onclick = function(ev) { ev.stopPropagation(); deleteSelectedDvrClip(); };
+        if (btnStop) btnStop.onclick = function(ev) { ev.stopPropagation(); toggleStreamRecording(); setTimeout(refreshDvrModalList, 300); };
+        if (btnClose) btnClose.onclick = function(ev) { ev.stopPropagation(); closeDvrModal(); };
+        refreshDvrModalList();
+        updateContextualHelpBar();
+    }
+    function closeDvrModal() {
+        dvrModalOpen = false;
+        var modalEl = document.getElementById('dvr-modal');
+        if (modalEl) {
+            modalEl.classList.remove('visible');
+            modalEl.style.display = '';
+        }
+        updateContextualHelpBar();
+    }
+    function runStreamHealthProbe() {
+        var target = currentItems[itemIdx] || lockedPreviewItem || currentPlayingItem;
+        if (!target || target.isSeason || (target.isSeries && !target.isEpisode)) {
+            showToast('📡 Select a channel, movie, or episode to test stream');
+            return;
+        }
+        showToast('📡 Probing stream health & speed for ' + target.name + '...');
+        api.resolveStream(target, false).then(function(url) {
+            var rawCandidate = unwrapProxyStreamUrl(String(url || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim());
+            var pipeInfo = splitM3uPipeHeaders(rawCandidate);
+            var cleanUrl = pipeInfo.cleanUrl || rawCandidate;
+            if (!cleanUrl) {
+                showToast('📡 Stream Probe: Empty stream URL');
+                return;
+            }
+            var mergedHdrs = {};
+            if (target.streamHeaders) {
+                for (var hk in target.streamHeaders) {
+                    if (Object.prototype.hasOwnProperty.call(target.streamHeaders, hk)) {
+                        mergedHdrs[String(hk).toLowerCase()] = target.streamHeaders[hk];
+                    }
+                }
+            }
+            if (pipeInfo && pipeInfo.headers) {
+                for (var pk in pipeInfo.headers) {
+                    if (Object.prototype.hasOwnProperty.call(pipeInfo.headers, pk)) {
+                        mergedHdrs[String(pk).toLowerCase()] = pipeInfo.headers[pk];
+                    }
+                }
+            }
+            var uaHdr = target.userAgent || mergedHdrs['user-agent'] || '';
+            var refHdr = target.httpReferer || mergedHdrs.referer || mergedHdrs.referrer || '';
+            var ckHdr = mergedHdrs.cookie || '';
+            var origHdr = mergedHdrs.origin || '';
+            var diagUrl = api.proxyUrl + '/stream-diag?probe=1&url=' + encodeURIComponent(cleanUrl);
+            if (uaHdr) { diagUrl += '&ua=' + encodeURIComponent(uaHdr); }
+            if (refHdr) { diagUrl += '&referer=' + encodeURIComponent(refHdr); }
+            if (ckHdr) { diagUrl += '&cookie=' + encodeURIComponent(ckHdr); }
+            if (origHdr) { diagUrl += '&origin=' + encodeURIComponent(origHdr); }
+
+            return proxyFetch(diagUrl, { method: 'GET' })
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
                     if (!d) {
-                        showToast('🩺 Probe returned no data');
+                        showToast('📡 Probe returned no data');
                         return;
                     }
                     var httpCode = Number(d.httpStatus || 0);
                     var kBps = Number(d.kBps || (d.kbps ? Math.round(d.kbps / 8) : 0));
-                    var mbps = (kBps > 0) ? (((kBps * 8) / 1000).toFixed(1) + ' Mbps (' + kBps + ' KB/s)') : (httpCode >= 400 ? 'Offline / Error' : 'Live Ready');
-                    var ttfb = (d.ttfbMs !== null && d.ttfbMs !== undefined) ? (d.ttfbMs + 'ms TTFB') : 'Fast TTFB';
-                    var codecs = ((d.videoCodec || 'H264') + '/' + (d.audioCodec || 'AAC')).toUpperCase();
-                    var statusLabel = httpCode > 0 ? ('HTTP ' + httpCode) : 'HTTP OK';
-                    var summary = '🩺 ' + statusLabel + ' • ' + ttfb + ' • ' + mbps + ' • ' + codecs;
+                    var totalB = Number(d.totalBytes || 0);
+                    var isErr = (httpCode >= 400) || Boolean(d.isHtmlError) || (d.verdict && d.verdict.status === 'provider_error');
+                    var speedText;
+                    if (isErr) {
+                        speedText = totalB > 0 ? ('Blocked / Error (' + totalB + ' B)') : 'Offline / No Data';
+                    } else if (d.isPlaylist) {
+                        var kbStr = totalB >= 1024 ? ((totalB / 1024).toFixed(1) + ' KB') : (totalB + ' B');
+                        speedText = 'Manifest Ready (' + kbStr + ')';
+                    } else if (kBps > 0) {
+                        speedText = ((kBps * 8) / 1000).toFixed(1) + ' Mbps (' + kBps + ' KB/s)';
+                    } else if (totalB > 0) {
+                        speedText = totalB + ' B received';
+                    } else {
+                        speedText = 'Live Ready';
+                    }
+                    var ttfb = (d.ttfbMs !== null && d.ttfbMs !== undefined) ? (d.ttfbMs + 'ms TTFB') : 'Timeout / No TTFB';
+                    var formatLabel = d.detectedFormat ? String(d.detectedFormat).toUpperCase() : '';
+                    if (!formatLabel && d.contentType) {
+                        formatLabel = String(d.contentType).split(';')[0].trim().toUpperCase();
+                    }
+                    if (!formatLabel && d.videoCodec) {
+                        formatLabel = ((d.videoCodec || '') + (d.audioCodec ? '/' + d.audioCodec : '')).toUpperCase();
+                    }
+                    var isTestingActive = Boolean(currentPlayingItem && String(currentPlayingItem.id) === String(target.id));
+                    if (isTestingActive && activePlaybackBackend === 'shaka' && shakaInstance && typeof shakaInstance.getVariantTracks === 'function') {
+                        try {
+                            var vTracks = shakaInstance.getVariantTracks();
+                            for (var vt = 0; vt < vTracks.length; vt++) {
+                                if (vTracks[vt] && vTracks[vt].active) {
+                                    var resTag = vTracks[vt].height ? (vTracks[vt].height + 'p') : '';
+                                    var cTag = vTracks[vt].codecs ? String(vTracks[vt].codecs).split(',')[0].split('.')[0].toUpperCase() : '';
+                                    var liveParts = [formatLabel || 'DASH', resTag, cTag].filter(Boolean);
+                                    if (liveParts.length > 0) {
+                                        formatLabel = liveParts.join(' ');
+                                    }
+                                    break;
+                                }
+                            }
+                        } catch (eTrk) {}
+                    }
+                    var statusLabel = httpCode > 0 ? ('HTTP ' + httpCode) : (isErr ? 'CONN ERROR' : 'HTTP OK');
+                    var summaryParts = ['📡 ' + statusLabel, ttfb, speedText];
+                    if (formatLabel) {
+                        summaryParts.push(formatLabel);
+                    }
+                    var summary = summaryParts.join(' • ');
                     showToast(summary);
                     if (previewDescEl) {
-                        var verdictText = (d.verdict && (d.verdict.summary || d.verdict.reason)) ? (d.verdict.summary || d.verdict.reason) : 'Stream connection healthy.';
-                        previewDescEl.textContent = summary + '\n' + verdictText + '\n\n' + (previewDescEl.textContent || '');
+                        var verdictText = (d.verdict && (d.verdict.summary || d.verdict.reason)) ? (d.verdict.summary || d.verdict.reason) : (isErr ? 'Stream probe failed.' : 'Stream connection healthy.');
+                        var existingDesc = String(previewDescEl.textContent || '').replace(/^📡 [^\n]+\n[^\n]*(?:\n\n|$)/, '');
+                        previewDescEl.textContent = summary + '\n' + verdictText + (existingDesc ? ('\n\n' + existingDesc) : '');
                     }
                 });
         }).catch(function(err) {
-            showToast('🩺 Probe Failed: ' + err.message);
+            showToast('📡 Probe Failed: ' + (err && err.message ? err.message : 'Network error'));
         });
     }
     function cycleEpgOffsetHours() {
@@ -5941,7 +6400,7 @@
         }
         if (foundIdx !== -1) {
             hidden.splice(foundIdx, 1);
-            showToast('👁 Unhid Category: ' + catObj.title);
+            showToast('✓ Unhid Category: ' + catObj.title);
         } else {
             hidden.push(String(catObj.id));
             showToast('🚫 Hid Category: ' + catObj.title);
@@ -6002,7 +6461,7 @@
         }
         if (foundIdx !== -1) {
             hidden.splice(foundIdx, 1);
-            showToast('👁 Unhid: ' + itemObj.name);
+            showToast('✓ Unhid: ' + itemObj.name);
         } else {
             hidden.push(String(itemObj.id));
             showToast('🚫 Hid: ' + itemObj.name);
@@ -6021,7 +6480,7 @@
         showHiddenEntries = !showHiddenEntries;
         catsFilterMemo = null;
         itemsFilterMemo = null;
-        showToast(showHiddenEntries ? '👁 Showing Hidden Categories & Channels' : '🚫 Hiding Filtered Categories & Channels');
+        showToast(showHiddenEntries ? '◉ Showing Hidden Categories & Channels' : '🚫 Hiding Filtered Categories & Channels');
         applyColumnFilters();
         if (catsListEl) {
             catsListEl._forceRebuild = true;
@@ -6274,7 +6733,7 @@
         if (searchOpen) {
             closeSearch();
         }
-        var refreshModeIdx = (modes[modeIdx] && modes[modeIdx].id !== 'settings' && modes[modeIdx].id !== 'search') ? modeIdx : (lastContentModeIdx || 0);
+        var refreshModeIdx = (modes[lastContentModeIdx] && isContentModeId(modes[lastContentModeIdx].id)) ? lastContentModeIdx : 0;
         switchMode(refreshModeIdx);
     }
 
@@ -6572,8 +7031,13 @@
     var bufferingDiagPollTimer = null;
     function clearBufferingWatchdog() {
         if (bufferingWatchdogTimer) {
-            clearTimeout(bufferingWatchdogTimer);
+            if (bufferingWatchdogIsInterval) {
+                clearInterval(bufferingWatchdogTimer);
+            } else {
+                clearTimeout(bufferingWatchdogTimer);
+            }
             bufferingWatchdogTimer = null;
+            bufferingWatchdogIsInterval = false;
         }
         if (bufferingDiagPollTimer) {
             clearInterval(bufferingDiagPollTimer);
@@ -6672,6 +7136,7 @@
         clearBufferingWatchdog();
         if (activePlaybackBackend === 'shaka') {
             var loadStartTs = shakaLoadStartAt || Date.now();
+            bufferingWatchdogIsInterval = true;
             bufferingWatchdogTimer = setInterval(function() {
                 if (activeSession !== playSessionId || activePlaybackBackend !== 'shaka') {
                     clearBufferingWatchdog();
@@ -6700,6 +7165,7 @@
         }
         var isLiveFastSwitch = item && !item.isVod && !item.isEpisode && !item.isCatchup;
         var watchdogMs = isLiveFastSwitch ? (retryCount === 0 ? 7500 : 8500) : 65000;
+        bufferingWatchdogIsInterval = false;
         bufferingWatchdogTimer = setTimeout(function() {
             if (activeSession !== playSessionId) {
                 return;
@@ -7833,7 +8299,7 @@
                     hasActivePlaybackError = true;
                     hideVodLoadingVisual();
                     showOSD(formatOsdTitle(item), 'PlayReady DRM Requires Samsung Tizen TV or Edge Browser');
-                    showToast('🛡 PlayReady CDM unavailable in this desktop browser (Requires Samsung Tizen TV / Edge)');
+                    showToast('🔒 PlayReady CDM unavailable in this desktop browser (Requires Samsung Tizen TV / Edge)');
                     return;
                 }
 
@@ -8440,7 +8906,8 @@
             }
         }
         var isProxyStreamUrl = String(streamUrl || '').indexOf('/stream?url=') !== -1 ||
-            String(streamUrl || '').indexOf('/dash-proxy?url=') !== -1;
+            String(streamUrl || '').indexOf('/dash-proxy?url=') !== -1 ||
+            String(streamUrl || '').indexOf('/record?action=play') !== -1;
         if (!streamUrl || (!isProxyStreamUrl && isLocalhostOrInvalidUrl(streamUrl))) {
             hasActivePlaybackError = true;
             hideVodLoadingVisual();
@@ -8900,7 +9367,7 @@
                             var isProv = d.verdict.source === 'provider' || d.verdict.status === 'provider_error' || d.verdict.status === 'provider_slow';
                             var statusLabel = isProv ? 'PROVIDER OFFLINE' : 'STREAM ERROR';
                             showOSD(formatOsdTitle(item), statusLabel, summaryText, 'Press OK to Retry • Tools/Settings for options');
-                            showToast('🩺 ' + summaryText);
+                            showToast('📡 ' + summaryText);
                         }
                     })
                     .catch(function() {});
@@ -9732,7 +10199,7 @@
                     id: 'aud_' + a,
                     kind: 'audio',
                     trackArrIdx: a,
-                    label: (isActAud ? '🟢 ' : '🔊 ') + 'Audio: ' + parseTrackLabel(audioTracks[a], a + 1) + (isActAud ? ' [ACTIVE]' : '')
+                    label: (isActAud ? '✓ ' : '🔊 ') + 'Audio: ' + parseTrackLabel(audioTracks[a], a + 1) + (isActAud ? ' [ACTIVE]' : '')
                 });
             }
         }
@@ -9740,7 +10207,7 @@
             id: 'sub_off',
             kind: 'sub',
             trackArrIdx: -1,
-            label: (!subtitlesEnabled || textIdx === -1 ? '🟢 ' : '💬 ') + 'Subtitles: Off' + (!subtitlesEnabled || textIdx === -1 ? ' [ACTIVE]' : '')
+            label: (!subtitlesEnabled || textIdx === -1 ? '✓ ' : '💬 ') + 'Subtitles: Off' + (!subtitlesEnabled || textIdx === -1 ? ' [ACTIVE]' : '')
         });
         for (var t = 0; t < textTracks.length; t++) {
             var isActSub = (subtitlesEnabled && t === textIdx);
@@ -9748,7 +10215,7 @@
                 id: 'sub_' + t,
                 kind: 'sub',
                 trackArrIdx: t,
-                label: (isActSub ? '🟢 ' : '💬 ') + 'Subtitle: ' + parseTrackLabel(textTracks[t], t + 1) + (isActSub ? ' [ACTIVE]' : '')
+                label: (isActSub ? '✓ ' : '💬 ') + 'Subtitle: ' + parseTrackLabel(textTracks[t], t + 1) + (isActSub ? ' [ACTIVE]' : '')
             });
         }
         if (activePlaybackBackend === 'shaka' && shakaVariantHeights.length > 0) {
@@ -9757,7 +10224,7 @@
                 id: 'qual_auto',
                 kind: 'quality',
                 height: 0,
-                label: (isAutoAbr ? '🟢 ' : '📺 ') + 'Video Quality: Auto (Adaptive Bitrate)' + (shakaLastActiveHeight > 0 ? (' • ' + shakaLastActiveHeight + 'p') : '') + (isAutoAbr ? ' [ACTIVE]' : '')
+                label: (isAutoAbr ? '✓ ' : '📺 ') + 'Video Quality: Auto (Adaptive Bitrate)' + (shakaLastActiveHeight > 0 ? (' • ' + shakaLastActiveHeight + 'p') : '') + (isAutoAbr ? ' [ACTIVE]' : '')
             });
             for (var qh = 0; qh < shakaVariantHeights.length; qh++) {
                 var hOpt = shakaVariantHeights[qh];
@@ -9767,7 +10234,7 @@
                     id: 'qual_' + hOpt,
                     kind: 'quality',
                     height: hOpt,
-                    label: (isLockedH ? '🟢 ' : '📺 ') + 'Video Quality: ' + hOpt + 'p ' + qBadge + (isLockedH ? ' [LOCKED]' : '')
+                    label: (isLockedH ? '✓ ' : '📺 ') + 'Video Quality: ' + hOpt + 'p ' + qBadge + (isLockedH ? ' [LOCKED]' : '')
                 });
             }
         }
@@ -9821,7 +10288,7 @@
             items.push({
                 id: 'clear_ch_prefs',
                 kind: 'clear_ch_prefs',
-                label: '🗑 Reset Saved Channel Audio/Sub/Aspect Memory'
+                label: '✕ Reset Saved Channel Audio/Sub/Aspect Memory'
             });
         }
         tracksModalItems = items;
@@ -9982,7 +10449,7 @@
             var targetItem = currentPlayingItem || currentItems[itemIdx];
             if (targetItem) {
                 clearItemMediaPrefs(targetItem);
-                showToast('🗑 Cleared saved preferences for ' + targetItem.name);
+                showToast('✕ Cleared saved preferences for ' + targetItem.name);
             }
             closeTracksModal();
             return;
@@ -10500,7 +10967,7 @@
                     blkEl.style.width = widthPct.toFixed(2) + '%';
                     var titleDiv = document.createElement('div');
                     titleDiv.className = 'epg-grid-cell-title';
-                    titleDiv.textContent = (blk.isNow ? '🟢 ' : (hasRemind ? '⏰ ' : '')) + blk.name;
+                    titleDiv.textContent = (blk.isNow ? '● ' : (hasRemind ? '⏰ ' : '')) + blk.name;
                     var timeDiv = document.createElement('div');
                     timeDiv.className = 'epg-grid-cell-time';
                     timeDiv.textContent = blk.timeLabel || '';
@@ -10819,7 +11286,7 @@
         renderList(epgModalList, epgModalItems, epgModalIdx, function(p) {
             var prefix = '';
             if (p.isNow) {
-                prefix = '🟢 [LIVE] ';
+                prefix = '● [LIVE] ';
             } else if (p.isPast) {
                 prefix = (epgModalChannel && epgModalChannel.archive) ? '⏱ [CATCH-UP] ' : '[PAST] ';
             } else if (epgModalChannel && isProgramReminderScheduled(epgModalChannel.id, p.start_timestamp)) {
@@ -11263,12 +11730,14 @@
                     updateColumnFocusClasses();
                 }
             } else if (container === catsListEl) {
+                syncModeCursorToActiveContent();
                 activeCol = 'items';
                 catIdx = rIdx;
                 renderCats();
                 updateColumnFocusClasses();
                 selectCategory(catIdx);
             } else if (container === itemsListEl) {
+                syncModeCursorToActiveContent();
                 activeCol = 'items';
                 updateColumnFocusClasses();
                 if (itemIdx !== rIdx) {
@@ -11745,7 +12214,9 @@
     }
     function buildPosterFallbackSvgHtml(titleText) {
         var monogram = String(titleText || 'VOD').replace(/[^A-Za-z0-9 ]/g, '').trim().slice(0, 2).toUpperCase() || 'TV';
-        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 340" preserveAspectRatio="none" class="poster-card-svg-fallback"><defs><linearGradient id="pfbGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1e293b"/><stop offset="100%" stop-color="#090d16"/></linearGradient></defs><rect width="240" height="340" fill="url(#pfbGrad)"/><text x="120" y="185" text-anchor="middle" fill="#64748b" font-family="sans-serif" font-weight="900" font-size="68">' + monogram + '</text></svg>';
+        posterFallbackSvgCounter += 1;
+        var gradId = 'pfbGrad_' + posterFallbackSvgCounter;
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 340" preserveAspectRatio="none" class="poster-card-svg-fallback"><defs><linearGradient id="' + gradId + '" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1e293b"/><stop offset="100%" stop-color="#090d16"/></linearGradient></defs><rect width="240" height="340" fill="url(#' + gradId + ')"/><text x="120" y="185" text-anchor="middle" fill="#64748b" font-family="sans-serif" font-weight="900" font-size="68">' + monogram + '</text></svg>';
     }
 
     function createPosterCardNode(entry, index, selectedIdx) {
@@ -11758,6 +12229,8 @@
         card.onclick = function(e) {
             e.stopPropagation();
             userInteractedSinceBoot = true;
+            syncModeCursorToActiveContent();
+            activeCol = 'items';
             itemIdx = typeof card._cardIndex === 'number' ? card._cardIndex : index;
             lockedPreviewItem = currentItems[itemIdx] || entry || null;
             renderUI();
@@ -11898,6 +12371,7 @@
         var list = Array.isArray(items) ? items : [];
         if (list.length === 0) {
             container._gridRef = null;
+            container.classList.remove('poster-grid-mode');
             renderList(container, items, selectedIdx, null, 12);
             return;
         }
@@ -12000,7 +12474,7 @@
     }
 
     function renderItems() {
-        var activeModeObj = (modes[modeIdx] && modes[modeIdx].id !== 'search' && modes[modeIdx].id !== 'settings') ? modes[modeIdx] : (modes[lastContentModeIdx] || modes[0]);
+        var activeModeObj = (modes[lastContentModeIdx] && isContentModeId(modes[lastContentModeIdx].id)) ? modes[lastContentModeIdx] : (modes[0] || null);
         if (itemsHeaderEl && seriesStack.length === 0 && activeModeObj) {
             var baseTitle = activeModeObj.title;
             if (currentItems.length > 0) {
@@ -12112,7 +12586,12 @@
             return;
         }
         var hints = [];
-        if (epgModalOpen) {
+        if (dvrModalOpen) {
+            hints.push({ key: '▲▼', desc: 'Clips / Actions' });
+            hints.push({ key: '◀▶', desc: 'Switch Column' });
+            hints.push({ key: 'OK', desc: 'Play / Execute' });
+            hints.push({ key: 'BACK', desc: 'Close' });
+        } else if (epgModalOpen) {
             hints.push({ key: '▲▼◀▶', desc: 'Navigate' });
             hints.push({ key: 'OK', desc: 'Watch / Catch-Up / Remind' });
             hints.push({ key: 'GREEN', desc: 'Grid / List' });
@@ -12244,7 +12723,16 @@
     function bindQuickActionPill(bar, act) {
         var pill = document.createElement('span');
         pill.className = 'quick-action-pill' + (act.group === 'toggle_more' ? ' toggle-more-pill' : '');
-        pill.textContent = act.label;
+        if (act.iconHtml) {
+            var iconWrap = document.createElement('span');
+            iconWrap.innerHTML = act.iconHtml;
+            if (iconWrap.firstChild) {
+                pill.appendChild(iconWrap.firstChild);
+            }
+            pill.appendChild(document.createTextNode(act.label));
+        } else {
+            pill.textContent = act.label;
+        }
         var entryObj = {
             el: pill,
             fn: act.fn,
@@ -12271,10 +12759,7 @@
         if (allQuickActionPills.length === 0) {
             return;
         }
-        var curModeId = modes[modeIdx] ? modes[modeIdx].id : 'live';
-        if (curModeId === 'search' || curModeId === 'settings') {
-            curModeId = modes[lastContentModeIdx] ? modes[lastContentModeIdx].id : 'live';
-        }
+        var curModeId = getActiveContentModeId();
         var curCat = currentCats[catIdx];
         var curCatId = curCat ? String(curCat.id) : '*';
         var isFavCat = (curCatId === 'fav');
@@ -12413,8 +12898,9 @@
             } },
             { label: '⏩ Speed', group: 'vod_primary', fn: function() { cyclePlaybackSpeed(); } },
             { label: '🔖 Bookmark', group: 'vod_primary', fn: function() { saveOrJumpVodBookmark(); } },
-            { label: '⏺ Record Clip', group: 'live_primary', fn: function() { toggleStreamRecording(); } },
-            { label: '🩺 Test Stream', group: 'primary', fn: function() { runStreamHealthProbe(); } },
+            { label: '● Record Clip', group: 'live_primary', fn: function() { toggleStreamRecording(); } },
+            { label: '📼 DVR Clips', group: 'primary', fn: function() { openDvrModal(); } },
+            { label: 'Test Stream', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2 12 6 12 9 4 15 20 18 12 22 12"/></svg>', group: 'primary', fn: function() { runStreamHealthProbe(); } },
             { label: '📋 Export Fav M3U', group: 'fav_context', fn: function() { exportFavoritesM3u(); } },
             { label: '🚫 Hide / Unhide Item', group: 'more', fn: function() {
                 if (currentItems[itemIdx]) {
@@ -12426,7 +12912,7 @@
                     toggleHideCategory(currentCats[catIdx]);
                 }
             } },
-            { label: '👁 Show Hidden Toggle', group: 'more', fn: function() { toggleShowHiddenMode(); } },
+            { label: 'Show Hidden Toggle', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>', group: 'more', fn: function() { toggleShowHiddenMode(); } },
             { label: '📐 Aspect Ratio', group: 'more', fn: function() { toggleAspectRatio(); } },
             { label: '⏱ Sleep Timer', group: 'more', fn: function() { cycleSleepTimer(); } },
             { label: '⇅ Sort', group: 'more', fn: function() {
@@ -12436,9 +12922,9 @@
                 applyColumnFilters();
                 renderUI();
             } },
-            { label: '⧩ Filter', group: 'more', fn: function() { openFilterModal('items'); } },
+            { label: 'Filter', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>', group: 'more', fn: function() { openFilterModal('items'); } },
             { label: '🔄 Refresh', group: 'more', fn: function() { forceRefreshCurrentCatalog(); } },
-            { label: '🗑 Clear History', group: 'history_context', fn: function() { clearCurrentHistory(); } },
+            { label: 'Clear History', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>', group: 'history_context', fn: function() { clearCurrentHistory(); } },
             { label: '⚙ More Tools', group: 'toggle_more', fn: function() {
                 var prevIdx = infoActionIdx;
                 moreToolsExpanded = !moreToolsExpanded;
@@ -13111,9 +13597,7 @@
         // v2.1.0 Click-to-Load Details & EPG (lockedPreviewItem) in 3x3 Poster Grid Mode
         var item = currentItems[itemIdx];
         if (isPosterGridActive() && !forceFromSelection) {
-            if (lockedPreviewItem) {
-                item = lockedPreviewItem;
-            }
+            item = lockedPreviewItem || null;
         } else if (item) {
             lockedPreviewItem = item;
         }
@@ -13121,14 +13605,26 @@
             setPreviewEpgProgress(0, false);
             renderPreviewUpNextCard([], null);
             schedulePreviewPosterLoad('', '');
-            if (previewTitleEl) {
-                previewTitleEl.textContent = 'Select an item';
-            }
-            if (previewMetaEl) {
-                previewMetaEl.textContent = accountInfoText ? ('Account: ' + accountInfoText) : '';
-            }
-            if (previewDescEl) {
-                previewDescEl.textContent = '';
+            if (isPosterGridActive() && currentItems.length > 0) {
+                if (previewTitleEl) {
+                    previewTitleEl.textContent = 'Select a poster';
+                }
+                if (previewMetaEl) {
+                    previewMetaEl.textContent = 'Press OK or click any poster';
+                }
+                if (previewDescEl) {
+                    previewDescEl.textContent = 'Synopsis, rating, cast, and trailer load only when you click or press OK on a poster.';
+                }
+            } else {
+                if (previewTitleEl) {
+                    previewTitleEl.textContent = 'Select an item';
+                }
+                if (previewMetaEl) {
+                    previewMetaEl.textContent = accountInfoText ? ('Account: ' + accountInfoText) : '';
+                }
+                if (previewDescEl) {
+                    previewDescEl.textContent = '';
+                }
             }
             return;
         }
@@ -13405,6 +13901,7 @@
             posterLoadTimer = null;
         }
         lastContentModeIdx = modeIdx;
+        lockedPreviewItem = null;
         seriesStack = [];
         seriesLoading = false;
         catFilterText = '';
@@ -13465,6 +13962,7 @@
             if (itemsListEl) {
                 itemsListEl._lastItemsRef = null;
                 itemsListEl._gridRef = null;
+                itemsListEl.classList.remove('poster-grid-mode');
                 itemsListEl.innerHTML = '<div class="item">Loading Live TV channels...</div>';
             }
 
@@ -13565,6 +14063,7 @@
             if (itemsListEl) {
                 itemsListEl._lastItemsRef = null;
                 itemsListEl._gridRef = null;
+                itemsListEl.classList.remove('poster-grid-mode');
                 itemsListEl.innerHTML = '<div class="item">Loading Movies...</div>';
             }
 
@@ -13634,6 +14133,7 @@
             if (itemsListEl) {
                 itemsListEl._lastItemsRef = null;
                 itemsListEl._gridRef = null;
+                itemsListEl.classList.remove('poster-grid-mode');
                 itemsListEl.innerHTML = '<div class="item">Loading TV Series...</div>';
             }
 
@@ -13733,11 +14233,16 @@
         var activeModeId = getActiveContentModeId();
         var sig = activeModeId + ':' + String(cat.id);
         var isDynamicBuiltIn = (cat.id === 'cont' || cat.id === 'fav' || cat.id === 'rec');
-        if (!forceReload && !isDynamicBuiltIn && loadedCatSignature === sig && seriesStack.length === 0 && (rawItems.length > 0 || vodLoading)) {
+        var gridDomMatches = !itemsListEl || !itemsListEl.classList ||
+            (isPosterGridActive() === itemsListEl.classList.contains('poster-grid-mode'));
+        if (!forceReload && !isDynamicBuiltIn && loadedCatSignature === sig && seriesStack.length === 0 && gridDomMatches && (rawItems.length > 0 || vodLoading)) {
             renderUI();
             return;
         }
         loadedCatSignature = sig;
+        if (isPosterGridActive()) {
+            lockedPreviewItem = null;
+        }
         itemIdx = 0;
         seriesStack = [];
         seriesLoading = false;
@@ -13853,6 +14358,7 @@
                 if (itemsListEl) {
                     itemsListEl._lastItemsRef = null;
                     itemsListEl._gridRef = null;
+                    itemsListEl.classList.remove('poster-grid-mode');
                     itemsListEl.innerHTML = '<div class="item">Loading Movies...</div>';
                 }
                 api.fetchVodPage(cat.id, 1, '', currentSort).then(function(items) {
@@ -13915,6 +14421,7 @@
                 if (itemsListEl) {
                     itemsListEl._lastItemsRef = null;
                     itemsListEl._gridRef = null;
+                    itemsListEl.classList.remove('poster-grid-mode');
                     itemsListEl.innerHTML = '<div class="item">Loading TV Series...</div>';
                 }
                 api.fetchSeriesPage(cat.id, 1, '', currentSort).then(function(items) {
@@ -15180,16 +15687,78 @@
         return String(prof.mac || '00:1A:79:A4:B2:C9');
     }
 
+    function computeProfileGridVerticalTarget(cardMetrics, currentIdx, direction) {
+        if (!Array.isArray(cardMetrics) || cardMetrics.length === 0 || currentIdx < 0 || currentIdx >= cardMetrics.length) {
+            return -1;
+        }
+        var cur = cardMetrics[currentIdx];
+        var curTop = cur.top;
+        var curCx = cur.cx;
+        var rowTolerance = 28;
+        var candidateRowTop = null;
+        var i;
+        for (i = 0; i < cardMetrics.length; i++) {
+            var m = cardMetrics[i];
+            if (direction > 0) {
+                if (m.top > curTop + rowTolerance) {
+                    if (candidateRowTop === null || m.top < candidateRowTop) {
+                        candidateRowTop = m.top;
+                    }
+                }
+            } else {
+                if (m.top < curTop - rowTolerance) {
+                    if (candidateRowTop === null || m.top > candidateRowTop) {
+                        candidateRowTop = m.top;
+                    }
+                }
+            }
+        }
+        if (candidateRowTop === null) {
+            return -1;
+        }
+        var bestIdx = -1;
+        var bestDist = Infinity;
+        for (i = 0; i < cardMetrics.length; i++) {
+            var c = cardMetrics[i];
+            if (Math.abs(c.top - candidateRowTop) <= rowTolerance) {
+                var dx = Math.abs(c.cx - curCx);
+                if (dx < bestDist) {
+                    bestDist = dx;
+                    bestIdx = i;
+                }
+            }
+        }
+        return bestIdx;
+    }
+
+    function getProfilePickerCardMetrics() {
+        var gridEl = document.getElementById('profile-picker-grid');
+        if (!gridEl) {
+            return [];
+        }
+        var cards = gridEl.querySelectorAll('.profile-picker-card');
+        var metrics = [];
+        for (var i = 0; i < cards.length; i++) {
+            var el = cards[i];
+            var top = el.offsetTop;
+            var cx = el.offsetLeft + (el.offsetWidth / 2);
+            metrics.push({ idx: i, top: top, cx: cx });
+        }
+        return metrics;
+    }
+
     function renderProfilePickerGrid() {
         var gridEl = document.getElementById('profile-picker-grid');
         var manageBtnEl = document.getElementById('btn-manage-profiles');
         if (!gridEl) {
             return;
         }
+        var prevScrollTop = gridEl.scrollTop || 0;
         gridEl.innerHTML = '';
         var list = Array.isArray(profiles) ? profiles : [];
         var addIdx = list.length;
         var manageIdx = list.length + 1;
+        var focusedCardEl = null;
 
         for (var i = 0; i < list.length; i++) {
             (function(idx, prof) {
@@ -15197,6 +15766,9 @@
                 var isFocused = (profilePickerIdx === idx);
                 var isActive = (prof.id === activeProfileId);
                 card.className = 'profile-picker-card' + (isFocused ? ' focused' : '');
+                if (isFocused) {
+                    focusedCardEl = card;
+                }
 
                 var avatarBox = document.createElement('div');
                 avatarBox.className = 'profile-avatar-box';
@@ -15240,6 +15812,9 @@
 
         var addCard = document.createElement('div');
         addCard.className = 'profile-picker-card add-profile-card' + (profilePickerIdx === addIdx ? ' focused' : '');
+        if (profilePickerIdx === addIdx) {
+            focusedCardEl = addCard;
+        }
         addCard.innerHTML =
             '<div class="profile-avatar-box"><div class="profile-add-circle">+</div></div>' +
             '<div class="profile-card-name">Add Profile</div>' +
@@ -15253,6 +15828,19 @@
             createNewProfileInSettings();
         };
         gridEl.appendChild(addCard);
+
+        gridEl.scrollTop = prevScrollTop;
+        if (focusedCardEl && gridEl.clientHeight > 0) {
+            var cardTop = focusedCardEl.offsetTop - gridEl.offsetTop;
+            var cardBottom = cardTop + focusedCardEl.offsetHeight;
+            var viewTop = gridEl.scrollTop;
+            var viewBottom = viewTop + gridEl.clientHeight;
+            if (cardTop < viewTop) {
+                gridEl.scrollTop = Math.max(0, cardTop - 10);
+            } else if (cardBottom > viewBottom) {
+                gridEl.scrollTop = cardBottom - gridEl.clientHeight + 10;
+            }
+        }
 
         if (manageBtnEl) {
             if (profilePickerIdx === manageIdx) {
@@ -15521,6 +16109,27 @@
                 if (pushed.m3uUrl) {
                     targetProf.m3uUrl = String(pushed.m3uUrl).trim();
                 }
+                if (data && data.uploadedM3uText && pType === 'm3u') {
+                    var rawUploadedM3u = String(data.uploadedM3uText);
+                    var uploadedName = String(pushed.m3uFileName || 'uploaded_playlist.m3u');
+                    targetProf.m3uFileName = uploadedName;
+                    if (!targetProf.m3uUrl) {
+                        targetProf.m3uUrl = 'local://' + uploadedName;
+                    }
+                    m3uRawMemoryCache[targetProf.id] = rawUploadedM3u;
+                    if (rawUploadedM3u.length <= 1500000) {
+                        safeSetStorage('m3u_raw_' + targetProf.id, rawUploadedM3u);
+                    } else {
+                        try {
+                            localStorage.removeItem('m3u_raw_' + targetProf.id);
+                        } catch (eRmLanM3u) {}
+                    }
+                    proxyFetch(api.proxyUrl + '/catalog-cache?profile=' + encodeURIComponent('m3u_raw_' + targetProf.id), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ rawText: rawUploadedM3u, fileName: uploadedName, ts: Date.now() })
+                    }).catch(function() {});
+                }
                 if (pushed.epgUrl !== undefined) {
                     targetProf.epgUrl = String(pushed.epgUrl || '').trim();
                 }
@@ -15528,7 +16137,7 @@
                     targetProf.epgOffsetHours = Number(pushed.epgOffsetHours) || 0;
                 }
                 loadProfileIntoSettingsInputs(editingProfileIndex, true);
-                showToast('📱 Received Remote Setup from Phone/PC!');
+                showToast(data && data.uploadedM3uText ? ('📂 Received uploaded M3U: ' + (targetProf.m3uFileName || 'playlist')) : '📱 Received Remote Setup from Phone/PC!');
                 saveSettingsAndBoot();
             }).catch(function() {});
         }, 2500);
@@ -15552,6 +16161,9 @@
         }
         if (tracksModalOpen) {
             closeTracksModal();
+        }
+        if (dvrModalOpen) {
+            closeDvrModal();
         }
         if (miniZapOpen) {
             closeMiniZapDrawer();
@@ -15598,7 +16210,7 @@
         updateSettingsFocus();
         startLanRemoteSetupPolling();
     }
-    function closeSettings() {
+    function closeSettings(skipReload) {
         stopLanRemoteSetupPolling();
         var focusedEl = getFocusedModalElement(settingsGrid, settingsRow, settingsCol);
         if (focusedEl && focusedEl.blur) {
@@ -15621,7 +16233,7 @@
         }
         renderModes();
         updateColumnFocusClasses();
-        if (rawCats.length === 0 && !liveCatalogLoading && !vodLoading && !seriesLoading) {
+        if (!skipReload && rawCats.length === 0 && !liveCatalogLoading && !vodLoading && !seriesLoading) {
             switchMode(modeIdx);
         }
     }
@@ -15659,7 +16271,7 @@
             }).catch(function() {});
         }
         resetCatalogMemoryState();
-        showToast('🧹 Clearing catalog cache & reloading...');
+        showToast('🔄 Clearing catalog cache & reloading...');
         showOSD('Clearing Cache...', 'Reloading application');
         setTimeout(function() {
             window.location.reload();
@@ -15692,6 +16304,10 @@
         if (posterLoadTimer) {
             clearTimeout(posterLoadTimer);
             posterLoadTimer = null;
+        }
+        if (vodMetaDebounceTimer) {
+            clearTimeout(vodMetaDebounceTimer);
+            vodMetaDebounceTimer = null;
         }
         if (numTimeout) {
             clearTimeout(numTimeout);
@@ -15752,6 +16368,8 @@
         epgGridProgramsByCh = {};
         pagedLiveGenresMap = {};
         loadedCatSignature = '';
+        catsFilterMemo = null;
+        itemsFilterMemo = null;
         catIdx = 0;
         itemIdx = 0;
         lastQuickActionSig = '';
@@ -15763,6 +16381,7 @@
         if (itemsListEl) {
             itemsListEl._lastItemsRef = null;
             itemsListEl._gridRef = null;
+            itemsListEl.classList.remove('poster-grid-mode');
             itemsListEl.innerHTML = '';
         }
         if (miniZapListEl) {
@@ -15806,12 +16425,23 @@
             var curTargetModeIdx = (modes[modeIdx] && modes[modeIdx].id !== 'settings' && modes[modeIdx].id !== 'search' && modes[modeIdx].id !== 'profiles')
                 ? modeIdx
                 : (targetModeIdx || 0);
-            switchMode(curTargetModeIdx);
+            if (modes[curTargetModeIdx] && isContentModeId(modes[curTargetModeIdx].id)) {
+                lastContentModeIdx = curTargetModeIdx;
+                modeIdx = curTargetModeIdx;
+            }
+            activeCol = 'cats';
+            renderModes();
+            updateColumnFocusClasses();
             return wakeLocalService().then(function() {
                 if (activeProfileId !== switchProfId) {
                     return;
                 }
                 return api.boot();
+            }).then(function() {
+                if (activeProfileId !== switchProfId) {
+                    return;
+                }
+                switchMode(curTargetModeIdx);
             });
         }).catch(function(err) {
             if (activeProfileId !== switchProfId) {
@@ -15930,7 +16560,7 @@
             safeSetStorage('cfg_pin', newPin);
             api.parentalPin = newPin;
         }
-        closeSettings();
+        closeSettings(true);
         activateProfileAndConnect(prof);
     }
     function createNewProfileInSettings() {
@@ -16018,7 +16648,7 @@
         renderProfileSelectOptions(true);
         loadProfileIntoSettingsInputs(editingProfileIndex, true);
         switchMode(lastContentModeIdx);
-        showToast('🗑 Profile & cached data deleted');
+        showToast('✕ Profile & cached data deleted');
     }
 
     function openSearch() {
@@ -16452,7 +17082,7 @@
             }
         });
         var innerBox = cfg.el.firstElementChild;
-        if (innerBox && !innerBox.querySelector('.modal-close-x')) {
+        if (!cfg.skipCloseX && innerBox && !innerBox.querySelector('.modal-close-x')) {
             var closeX = document.createElement('div');
             closeX.className = 'modal-close-x';
             closeX.textContent = '×';
@@ -16521,14 +17151,17 @@
             { el: filterModal, closeFn: closeFilterModal },
             { el: epgModal, closeFn: closeEpgModal },
             { el: pinModalEl, closeFn: closePinModal },
-            { el: tracksModalEl, closeFn: closeTracksModal }
+            { el: tracksModalEl, closeFn: closeTracksModal },
+            { el: document.getElementById('trailer-modal'), closeFn: closeTrailerModal, skipCloseX: true },
+            { el: document.getElementById('profile-picker-modal'), closeFn: closeProfilePickerModal, skipCloseX: true },
+            { el: document.getElementById('dvr-modal'), closeFn: closeDvrModal }
         ];
         for (var m = 0; m < modalConfigs.length; m++) {
             bindModalCloseHandlers(modalConfigs[m]);
         }
 
         document.addEventListener('dblclick', function(ev) {
-            if (settingsOpen || searchOpen || filterOpen || epgModalOpen || pinModalOpen || tracksModalOpen || miniZapOpen) {
+            if (settingsOpen || searchOpen || filterOpen || epgModalOpen || pinModalOpen || tracksModalOpen || miniZapOpen || trailerModalOpen || profilePickerOpen || dvrModalOpen) {
                 return;
             }
             if (ev.target === document.body || ev.target === overlayEl) {
@@ -16589,6 +17222,7 @@
                 return;
             }
             userInteractedSinceBoot = true;
+            syncModeCursorToActiveContent();
             activeCol = 'cats';
             var dir = ev.deltaY > 0 ? 1 : -1;
             catIdx = (catIdx + dir + currentCats.length) % currentCats.length;
@@ -16602,8 +17236,9 @@
                 return;
             }
             userInteractedSinceBoot = true;
+            syncModeCursorToActiveContent();
             activeCol = 'items';
-            var step = isPosterGridActive() ? (ev.deltaY > 0 ? 3 : -3) : (ev.deltaY > 0 ? 2 : -2);
+            var step = isPosterGridNavActive() ? (ev.deltaY > 0 ? 3 : -3) : (ev.deltaY > 0 ? 2 : -2);
             itemIdx = Math.max(0, Math.min(currentItems.length - 1, itemIdx + step));
             updateColumnFocusClasses();
             renderItems();
@@ -16677,7 +17312,8 @@
 
     function handleNumInput(digit) {
         if (digit === 0 && numBuffer === '') {
-            if (previousLiveChannel) {
+            var canRecallPrevLive = !isPlayingVod && !isPlayingCatchup && (!uiVisible || getActiveContentModeId() === 'live');
+            if (canRecallPrevLive && previousLiveChannel) {
                 if (miniZapOpen) {
                     closeMiniZapDrawer();
                 }
@@ -16700,7 +17336,7 @@
             if (numOsdEl) {
                 numOsdEl.classList.remove('visible');
             }
-            if (pinModalOpen || settingsOpen || searchOpen || filterOpen || epgModalOpen || tracksModalOpen) {
+            if (pinModalOpen || settingsOpen || searchOpen || filterOpen || epgModalOpen || tracksModalOpen || trailerModalOpen || profilePickerOpen || dvrModalOpen) {
                 return;
             }
             var fastMatch = channelByNumMap[String(targetNum)];
@@ -16828,14 +17464,27 @@
                     }
                 } else if (isDown) {
                     if (profilePickerIdx < manageBtnIdx) {
-                        lastProfileCardIdx = profilePickerIdx;
-                        profilePickerIdx = manageBtnIdx;
+                        var downTarget = computeProfileGridVerticalTarget(getProfilePickerCardMetrics(), profilePickerIdx, 1);
+                        if (downTarget !== -1) {
+                            profilePickerIdx = downTarget;
+                            lastProfileCardIdx = downTarget;
+                        } else {
+                            lastProfileCardIdx = profilePickerIdx;
+                            profilePickerIdx = manageBtnIdx;
+                        }
                         renderProfilePickerGrid();
                     }
                 } else if (isUp) {
                     if (profilePickerIdx === manageBtnIdx) {
                         profilePickerIdx = Math.min(cardCount - 1, Math.max(0, lastProfileCardIdx));
                         renderProfilePickerGrid();
+                    } else {
+                        var upTarget = computeProfileGridVerticalTarget(getProfilePickerCardMetrics(), profilePickerIdx, -1);
+                        if (upTarget !== -1) {
+                            profilePickerIdx = upTarget;
+                            lastProfileCardIdx = upTarget;
+                            renderProfilePickerGrid();
+                        }
                     }
                 } else if (isLeft) {
                     if (profilePickerIdx === manageBtnIdx) {
@@ -16886,8 +17535,57 @@
                 return;
             }
 
-            // 0c. Hardware Previous Channel Recall (PRE-CH / 10190)
-            if (isPreCh && !imeActive && !isInputFocused && !searchOpen && !filterOpen && !settingsOpen && !pinModalOpen) {
+            // 0c. DVR Recordings Manager Modal
+            if (dvrModalOpen) {
+                e.preventDefault();
+                var dvrBtns = getDvrActionButtons();
+                if (isBack) {
+                    closeDvrModal();
+                } else if (dvrModalFocusArea === 'list') {
+                    if (isUp && dvrModalItems.length > 0) {
+                        dvrModalIdx = (dvrModalIdx - 1 + dvrModalItems.length) % dvrModalItems.length;
+                        renderDvrModalList();
+                    } else if (isDown && dvrModalItems.length > 0) {
+                        dvrModalIdx = (dvrModalIdx + 1) % dvrModalItems.length;
+                        renderDvrModalList();
+                    } else if (isRight || dvrModalItems.length === 0) {
+                        dvrModalFocusArea = 'actions';
+                        dvrModalActionIdx = 0;
+                        renderDvrModalList();
+                    } else if (isEnter && dvrModalItems[dvrModalIdx]) {
+                        playSelectedDvrClip();
+                    }
+                } else {
+                    if (isUp && dvrBtns.length > 0) {
+                        dvrModalActionIdx = (dvrModalActionIdx - 1 + dvrBtns.length) % dvrBtns.length;
+                        updateDvrModalActions();
+                    } else if (isDown && dvrBtns.length > 0) {
+                        dvrModalActionIdx = (dvrModalActionIdx + 1) % dvrBtns.length;
+                        updateDvrModalActions();
+                    } else if (isLeft && dvrModalItems.length > 0) {
+                        dvrModalFocusArea = 'list';
+                        renderDvrModalList();
+                    } else if (isEnter && dvrBtns[dvrModalActionIdx]) {
+                        var actId = dvrBtns[dvrModalActionIdx].id;
+                        if (actId === 'btn-dvr-play') {
+                            playSelectedDvrClip();
+                        } else if (actId === 'btn-dvr-usb') {
+                            exportSelectedDvrClipToUsb();
+                        } else if (actId === 'btn-dvr-delete') {
+                            deleteSelectedDvrClip();
+                        } else if (actId === 'btn-dvr-stop') {
+                            toggleStreamRecording();
+                            setTimeout(refreshDvrModalList, 300);
+                        } else {
+                            closeDvrModal();
+                        }
+                    }
+                }
+                return;
+            }
+
+            // 0d. Hardware Previous Channel Recall (PRE-CH / 10190)
+            if (isPreCh && !imeActive && !isInputFocused && !searchOpen && !filterOpen && !settingsOpen && !pinModalOpen && !dvrModalOpen) {
                 e.preventDefault();
                 if (previousLiveChannel) {
                     if (miniZapOpen) {
@@ -16902,7 +17600,7 @@
                 return;
             }
 
-            if (!imeActive && !isInputFocused && !searchOpen && !filterOpen && !settingsOpen && !pinModalOpen && !epgModalOpen && !tracksModalOpen && !miniZapOpen) {
+            if (!imeActive && !isInputFocused && !searchOpen && !filterOpen && !settingsOpen && !pinModalOpen && !epgModalOpen && !tracksModalOpen && !miniZapOpen && !dvrModalOpen) {
                 if (key === 'm' || key === 'M') {
                     e.preventDefault();
                     toggleMute();
@@ -17677,7 +18375,7 @@
                         updateColumnFocusClasses();
                     }
                 } else if (activeCol === 'items') {
-                    if (isPosterGridActive() && currentItems.length > 0) {
+                    if (isPosterGridNavActive() && currentItems.length > 0) {
                         if (itemIdx % 3 === 0) {
                             if (!stepOutSeries()) {
                                 activeCol = 'cats';
@@ -17704,9 +18402,11 @@
                 }
             } else if (isRight) {
                 if (activeCol === 'modes') {
+                    syncModeCursorToActiveContent();
                     activeCol = 'cats';
                     updateColumnFocusClasses();
                 } else if (activeCol === 'cats') {
+                    syncModeCursorToActiveContent();
                     if (catHoverTimer) {
                         clearTimeout(catHoverTimer);
                         catHoverTimer = null;
@@ -17715,7 +18415,7 @@
                     updateColumnFocusClasses();
                     selectCategory(catIdx, false);
                 } else if (activeCol === 'items') {
-                    if (isPosterGridActive() && currentItems.length > 0) {
+                    if (isPosterGridNavActive() && currentItems.length > 0) {
                         if (itemIdx % 3 === 2 || itemIdx === currentItems.length - 1) {
                             if (quickActionButtons.length > 0) {
                                 activeCol = 'info';
@@ -17750,7 +18450,7 @@
                     var nowUpMs = Date.now();
                     var isFastRepeatUp = (nowUpMs - lastKeyRepeatTime) < 80;
                     lastKeyRepeatTime = nowUpMs;
-                    if (isPosterGridActive()) {
+                    if (isPosterGridNavActive()) {
                         itemIdx = Math.max(0, itemIdx - 3);
                     } else {
                         itemIdx = Math.max(0, itemIdx - 1);
@@ -17788,7 +18488,7 @@
                     var nowDownMs = Date.now();
                     var isFastRepeatDown = (nowDownMs - lastKeyRepeatTime) < 80;
                     lastKeyRepeatTime = nowDownMs;
-                    if (isPosterGridActive()) {
+                    if (isPosterGridNavActive()) {
                         itemIdx = Math.min(currentItems.length - 1, itemIdx + 3);
                     } else {
                         itemIdx = Math.min(currentItems.length - 1, itemIdx + 1);
@@ -17812,12 +18512,12 @@
                     updateInfoActionsFocus();
                 }
             } else if (isChUp && activeCol === 'items' && currentItems.length > 0) {
-                var pageStepUp = isPosterGridActive() ? 9 : 10;
+                var pageStepUp = isPosterGridNavActive() ? 9 : 10;
                 itemIdx = Math.max(0, itemIdx - pageStepUp);
                 renderItems();
                 updatePreviewPanel();
             } else if (isChDown && activeCol === 'items' && currentItems.length > 0) {
-                var pageStepDown = isPosterGridActive() ? 9 : 10;
+                var pageStepDown = isPosterGridNavActive() ? 9 : 10;
                 itemIdx = Math.min(currentItems.length - 1, itemIdx + pageStepDown);
                 renderItems();
                 updatePreviewPanel();
@@ -17997,7 +18697,7 @@
                     if (selBufferModeEl) {
                         selBufferModeEl.value = nextMode;
                     }
-                    showToast('🛡 Adaptive Buffer stepped up to ' + (nextMode === 'balanced' ? 'Balanced (2s)' : 'High Stability (4s)'));
+                    showToast('⚡ Adaptive Buffer stepped up to ' + (nextMode === 'balanced' ? 'Balanced (2s)' : 'High Stability (4s)'));
                 }
             }
         };
