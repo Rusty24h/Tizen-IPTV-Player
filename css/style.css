@@ -684,6 +684,14 @@ body {
     border-bottom-color: #dbeafe;
     color: #fff;
 }
+.qa-pill-icon {
+    width: 17px;
+    height: 17px;
+    margin-right: 6px;
+    flex-shrink: 0;
+    display: inline-block;
+    vertical-align: middle;
+}
 .quick-action-pill.toggle-more-pill {
     width: calc(100% - 8px);
     justify-content: center;
@@ -3111,6 +3119,7 @@ body.trailer-open #shaka-video {
     z-index: 120;
 }
 .profile-picker-container {
+    position: relative;
     width: 1640px;
     max-width: 94vw;
     display: flex;
@@ -3350,4 +3359,71 @@ body.trailer-open #shaka-video {
 @keyframes vodSpin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+/* DVR Recordings & Persistent Storage Modal (Tizen 4.0 M56 Flexbox Safe) */
+.dvr-modal-body {
+    display: flex;
+    flex-direction: row;
+    height: 620px;
+    margin-top: 14px;
+}
+#dvr-modal-list {
+    width: 780px;
+    height: 100%;
+    margin-right: 24px;
+    background: rgba(9, 13, 22, 0.85);
+    border: 1px solid #374151;
+    border-radius: 10px;
+    padding: 8px;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+#dvr-modal-side {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 22px;
+    box-sizing: border-box;
+}
+#dvr-detail-title {
+    font-size: 26px;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-bottom: 10px;
+    word-break: break-word;
+}
+#dvr-detail-meta {
+    font-size: 19px;
+    line-height: 1.5;
+    color: #cbd5e1;
+    white-space: pre-line;
+    margin-bottom: 22px;
+    min-height: 84px;
+}
+#dvr-modal .epg-modal-header-row {
+    padding-right: 64px;
+}
+.dvr-action-buttons {
+    display: flex;
+    flex-direction: column;
+}
+.dvr-action-buttons .btn {
+    flex: none;
+    width: 100%;
+    box-sizing: border-box;
+    margin-right: 0;
+    margin-bottom: 12px;
+    text-align: center;
+}
+#dvr-modal-hint {
+    margin-top: auto;
+    font-size: 16px;
+    line-height: 1.45;
+    color: #94a3b8;
+    border-top: 1px solid rgba(148, 163, 184, 0.2);
+    padding-top: 14px;
 }
