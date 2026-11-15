@@ -6,7 +6,6 @@
     <title>VortixTV v2.2.0 (MPEG-DASH + DRM)</title>
     <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
     <link rel="stylesheet" type="text/css" href="css/style.css" />
-    <link rel="stylesheet" type="text/css" href="style.css" />
 </head>
 <body class="theme-blue">
     <!-- Hardware Video Surface -->
@@ -453,7 +452,34 @@
             <div class="profile-picker-actions">
                 <div id="btn-manage-profiles" class="profile-manage-btn">Manage Profiles</div>
             </div>
-            <div id="profile-picker-hint" class="profile-picker-hint">LEFT / RIGHT: Select Profile &bull; DOWN: Manage Profiles &bull; OK: Watch &bull; YELLOW: Edit Profile &bull; BACK: Close</div>
+            <div id="profile-picker-hint" class="profile-picker-hint">D-PAD: Select Profile &bull; DOWN (Bottom Row): Manage Profiles &bull; OK: Watch &bull; YELLOW: Edit Profile &bull; BACK: Close</div>
+        </div>
+    </div>
+
+    <!-- DVR Recordings Manager Modal -->
+    <div id="dvr-modal" class="modal">
+        <div class="modal-box wide">
+            <div class="epg-modal-header-row">
+                <h2 id="dvr-modal-title" style="margin-bottom:0;">📼 DVR Recordings &amp; Storage</h2>
+                <div class="epg-header-actions">
+                    <span id="dvr-storage-info" class="epg-view-toggle-btn" style="cursor:default;">Persistent Storage</span>
+                </div>
+            </div>
+            <div id="dvr-modal-body" class="dvr-modal-body">
+                <div id="dvr-modal-list" class="col-list"></div>
+                <div id="dvr-modal-side">
+                    <div id="dvr-detail-title">No recording selected</div>
+                    <div id="dvr-detail-meta">Record a Live TV stream using "● Record Clip" to save .TS clips here.</div>
+                    <div class="dvr-action-buttons">
+                        <div id="btn-dvr-play" class="btn">▶ Play Clip</div>
+                        <div id="btn-dvr-usb" class="btn">💾 Export to USB</div>
+                        <div id="btn-dvr-delete" class="btn btn-danger">✕ Delete Clip</div>
+                        <div id="btn-dvr-stop" class="btn btn-warn" style="display:none;">■ Stop Recording</div>
+                        <div id="btn-dvr-close" class="btn">Close</div>
+                    </div>
+                    <div id="dvr-modal-hint">UP/DOWN: Select Clip &bull; LEFT/RIGHT: Action &bull; OK: Execute &bull; BACK: Close<br />Phone/PC LAN download also available at /setup with your 4-digit PIN.</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -466,7 +492,7 @@
     </div>
 
     <script type="text/javascript">if (typeof window.globalThis === "undefined") { window.globalThis = window; }</script>
-    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/shaka-player@5.3.5/dist/shaka-player.compiled.js"></script>
+    <script type="text/javascript" src="lib/shaka-player.compiled.js"></script>
     <script type="text/javascript" src="app.js"></script>
 </body>
 </html>
