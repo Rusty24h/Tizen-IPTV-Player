@@ -261,15 +261,17 @@ tizen run -s <TV_DEVICE_ID> -p smartstbv2.SmartSTBclone
 
 ```text
 public/tizen/
-├── config.xml                 # Tizen 4.0+ manifest (v2.1.0, 1080p, AVPlay + DRM + Background Service privileges)
-├── index.html                 # 1920x1080 Spatial UI layout, AVPlay <object>, Modals, EPG Grid, QR Setup & OSD overlays
-├── app.js                     # Core Tizen application engine (AVPlay + Multi-DRM, D-Pad spatial nav, EPG, DVR, RAM Enforcer)
-├── icon.png                   # 512x512 Smart TV launcher icon
-├── README.md                  # Packaging & deployment documentation
+├── config.xml                 
+├── index.html                 
+├── app.js
+├── lib/
+│   └── shaka-player.compiled.js    
+├── icon.png                   
+├── README.md                  
 ├── css/
-│   └── style.css              # Hardware-accelerated 1080p dark stylesheet (2:3 poster grid, 1.1fr Details & EPG column)
+│   └── style.css              
 └── service/
-    └── proxy.js               # Tizen Background Node.js Service (127.0.0.1:3001 Local Proxy, QR Web Setup & DVR Service)
+    └── proxy.js
 ```
 ---
 
