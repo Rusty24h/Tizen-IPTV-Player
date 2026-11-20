@@ -86,6 +86,8 @@ var FALLBACK_PORT = 3000;
 var activeListenPort = PROXY_PORT;
 var BACKUP_FILE_PATH = path.join(DATA_DIR, 'vortixtv_backup.json');
 var FAVORITES_M3U_PATH = path.join(DATA_DIR, 'vortixtv_favorites.m3u');
+var SUBTITLE_FILE_PATH = path.join(DATA_DIR, 'vortixtv_ext_subtitle.json');
+var SCHEDULED_DVR_PATH = path.join(DATA_DIR, 'scheduled_dvr.json');
 var endpointCache = {};
 var cookieJar = {};
 var lastPortalReferer = '';
@@ -99,12 +101,148 @@ var activeVideoStreamKey = '';
 var pendingRemoteSetup = null;
 var pendingRemoteRestoreJson = null;
 var pendingRemoteM3uContent = '';
+var pendingRemoteSubtitle = null;
+var memoryExternalSubtitle = null;
 var MAG_UA = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
 var VLC_UA = 'VLC/3.0.20 LibVLC/3.0.20';
 var streamTelemetryMap = {};
 var streamTelemetryKeys = [];
 var latestStreamTelemetryKey = '';
 var activeRecordingSession = null;
+var scheduledDvrJobs = [];
+var scheduledDvrTimer = null;
+
+function sanitizeHeaderValue(rawVal) {
+    if (rawVal === null || rawVal === undefined) {
+        return '';
+    }
+    return String(rawVal).replace(/[\r\n\0]+/g, ' ').trim().slice(0, 512);
+}
+
+function validateBackupPayload(rawOrObj) {
+    var obj = null;
+    if (typeof rawOrObj === 'string') {
+        var trimmed = rawOrObj.trim();
+        if (!trimmed) {
+            return { ok: false, error: 'Backup JSON is empty.' };
+        }
+        try {
+            obj = JSON.parse(trimmed);
+        } catch (eParseBk) {
+            return { ok: false, error: 'Invalid JSON syntax in backup payload.' };
+        }
+    } else if (rawOrObj && typeof rawOrObj === 'object') {
+        obj = rawOrObj;
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+        return { ok: false, error: 'Backup payload must be a JSON object.' };
+    }
+    var hasStorage = Boolean(obj.storage && typeof obj.storage === 'object' && !Array.isArray(obj.storage));
+    var hasProfiles = Array.isArray(obj.profiles) && obj.profiles.length > 0;
+    if (!hasStorage && !hasProfiles) {
+        return { ok: false, error: 'Backup JSON missing valid profiles or storage configuration.' };
+    }
+    var storageKeysCount = hasStorage ? Object.keys(obj.storage).length : 0;
+    var profileCount = Array.isArray(obj.profiles) ? obj.profiles.length : 0;
+    if (!profileCount && hasStorage && obj.storage.cfg_profiles) {
+        try {
+            var parsedProfs = JSON.parse(String(obj.storage.cfg_profiles));
+            if (Array.isArray(parsedProfs)) {
+                profileCount = parsedProfs.length;
+            }
+        } catch (ePc) {}
+    }
+    var jsonStr = '';
+    try {
+        jsonStr = JSON.stringify(obj, null, 2);
+    } catch (eStrBk) {
+        return { ok: false, error: 'Failed to serialize backup payload.' };
+    }
+    if (Buffer.byteLength(jsonStr, 'utf8') > 5242880) {
+        return { ok: false, error: 'Backup JSON exceeds 5 MB limit.' };
+    }
+    return {
+        ok: true,
+        payload: obj,
+        jsonStr: jsonStr,
+        summary: {
+            profileCount: profileCount,
+            storageKeys: storageKeysCount
+        }
+    };
+}
+
+function normalizeScheduledRecording(rawEntry) {
+    if (!rawEntry || typeof rawEntry !== 'object') {
+        return null;
+    }
+    var cleanUrl = String(rawEntry.url || '').trim();
+    if (!/^https?:\/\/.+/i.test(cleanUrl)) {
+        return null;
+    }
+    var startTs = Math.floor(Number(rawEntry.startTs || rawEntry.start_timestamp || 0));
+    var stopTs = Math.floor(Number(rawEntry.stopTs || rawEntry.stop_timestamp || 0));
+    if (!startTs || !stopTs || stopTs <= startTs) {
+        return null;
+    }
+    var maxEndTs = startTs + 14400;
+    if (stopTs > maxEndTs) {
+        stopTs = maxEndTs;
+    }
+    var chId = String(rawEntry.chId || rawEntry.channelId || '').trim();
+    var id = String(rawEntry.id || ('sched_' + (chId || 'ch') + '_' + startTs)).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    return {
+        id: id,
+        chId: chId,
+        chName: String(rawEntry.chName || 'Channel').trim().slice(0, 80) || 'Channel',
+        progName: String(rawEntry.progName || rawEntry.name || 'Scheduled Program').trim().slice(0, 120) || 'Scheduled Program',
+        url: cleanUrl,
+        startTs: startTs,
+        stopTs: stopTs,
+        timeLabel: String(rawEntry.timeLabel || '').trim().slice(0, 40),
+        ua: sanitizeHeaderValue(rawEntry.ua || ''),
+        referer: sanitizeHeaderValue(rawEntry.referer || ''),
+        status: String(rawEntry.status || 'pending').toLowerCase(),
+        fileName: String(rawEntry.fileName || ''),
+        error: String(rawEntry.error || ''),
+        createdAt: Number(rawEntry.createdAt || Date.now())
+    };
+}
+
+function loadScheduledDvrJobsSync() {
+    try {
+        if (fs.existsSync(SCHEDULED_DVR_PATH)) {
+            var raw = fs.readFileSync(SCHEDULED_DVR_PATH, 'utf8') || '[]';
+            var arr = JSON.parse(raw);
+            if (Array.isArray(arr)) {
+                var out = [];
+                for (var i = 0; i < arr.length; i++) {
+                    var norm = normalizeScheduledRecording(arr[i]);
+                    if (norm) {
+                        if (norm.status === 'recording') {
+                            norm.status = 'missed';
+                        }
+                        out.push(norm);
+                    }
+                }
+                scheduledDvrJobs = out;
+                return;
+            }
+        }
+    } catch (eLoadSched) {}
+    scheduledDvrJobs = [];
+}
+
+function saveScheduledDvrJobsSync() {
+    try {
+        ensureDirSyncSafe(DATA_DIR);
+        fs.writeFileSync(SCHEDULED_DVR_PATH, JSON.stringify(scheduledDvrJobs, null, 2), 'utf8');
+    } catch (eSaveSched) {
+        try {
+            fs.writeFile(SCHEDULED_DVR_PATH, JSON.stringify(scheduledDvrJobs, null, 2), 'utf8', function() {});
+        } catch (eSaveAsync) {}
+    }
+}
 
 try {
     if (fs.existsSync(BACKUP_FILE_PATH)) {
@@ -121,6 +259,7 @@ try {
         }
     }
 } catch (eInitFav) {}
+loadScheduledDvrJobsSync();
 
 // =========================================================================
 // v2.1.0: 4-Digit Cryptographic Pairing PIN & Brute-Force Rate Limiter
@@ -693,6 +832,41 @@ function getLocalLanIp() {
     return '127.0.0.1';
 }
 
+function validateAndNormalizeSubtitleUpload(fileName, rawText, label) {
+    var safeName = path.basename(String(fileName || 'subtitle.srt').trim()).replace(/[^a-zA-Z0-9._-]/g, '_') || 'subtitle.srt';
+    if (!/\.(srt|vtt)$/i.test(safeName)) {
+        return { ok: false, error: 'Unsupported subtitle format. Please upload a .srt or .vtt file.' };
+    }
+    var normalized = String(rawText || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (!normalized.trim()) {
+        return { ok: false, error: 'Subtitle file is empty.' };
+    }
+    var byteLen = Buffer.byteLength(normalized, 'utf8');
+    if (byteLen > 5242880) {
+        return { ok: false, error: 'Subtitle file exceeds 5 MB limit.' };
+    }
+    var hasCueArrow = /(?:^|\n)\s*(?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*(?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3}/.test(normalized);
+    if (!hasCueArrow) {
+        return { ok: false, error: 'Invalid subtitle content (no .SRT / .VTT cue timestamps found).' };
+    }
+    var isVtt = /\.vtt$/i.test(safeName) || /^WEBVTT(?:\s|$)/i.test(normalized.trim());
+    var displayLabel = String(label || '').trim();
+    if (!displayLabel) {
+        displayLabel = safeName.replace(/\.(srt|vtt)$/i, '') || 'External Subtitle';
+    }
+    displayLabel = displayLabel.slice(0, 80);
+    return {
+        ok: true,
+        id: 'ext_sub_' + Date.now(),
+        name: displayLabel,
+        fileName: safeName,
+        format: isVtt ? 'vtt' : 'srt',
+        rawText: normalized,
+        bytes: byteLen,
+        ts: Date.now()
+    };
+}
+
 function buildRemoteSetupHtml(endpointUrl) {
     return [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
@@ -744,23 +918,47 @@ function buildRemoteSetupHtml(endpointUrl) {
         '</div>',
         '<label>Custom XMLTV EPG URL (Optional)</label><input id="epgUrl" placeholder="http://example.com/epg.xml.gz">',
         '<label>EPG Time-Shift Offset (Hours)</label><select id="epgOffsetHours"><option value="-4">-4h</option><option value="-3">-3h</option><option value="-2">-2h</option><option value="-1">-1h</option><option value="0" selected>0h (Auto UTC)</option><option value="1">+1h</option><option value="2">+2h</option><option value="3">+3h</option><option value="4">+4h</option></select>',
+        '<div class="row">',
+        '<div style="flex:1;"><label>User-Agent Override (Optional)</label><input id="userAgent" placeholder="Default / VLC / TiviMate"></div>',
+        '<div style="flex:1;"><label>HTTP Referer Override (Optional)</label><input id="httpReferer" placeholder="https://example.com/"></div>',
+        '</div>',
         '<button id="sendBtn" onclick="pushCfg()">🚀 Push Profile / M3U to TV Now</button>',
         '<div id="status" class="msg"></div>',
         '</div>',
         '<div class="card">',
-        '<h3>📦 Phone Backup & Restore over LAN</h3>',
-        '<p style="font-size:13px;color:#94a3b8;margin-top:0;">One-click download or restore of your full TV JSON configuration (profiles, favorites, watch history, preferences) guarded by your 4-digit PIN.</p>',
+        '<h3>💬 External Subtitle Upload (.SRT / .VTT)</h3>',
+        '<p style="font-size:13px;color:#94a3b8;margin-top:0;">Send an external .SRT or .VTT subtitle file from your phone or PC directly to your TV player using the 4-digit PIN above.</p>',
+        '<label>Subtitle Track Label (Optional)</label><input id="subName" placeholder="e.g. English (External)">',
+        '<div class="m3u-drop">',
+        '<label style="margin-top:0;color:#93c5fd;">📄 Choose .SRT or .VTT File (Max 5 MB)</label>',
+        '<input id="subFile" type="file" accept=".srt,.vtt,text/vtt,application/x-subrip,text/plain" onchange="handleSubFileSelect()">',
+        '<div id="subFileInfo" style="font-size:12px;color:#cbd5e1;margin-top:6px;">No subtitle file selected</div>',
+        '</div>',
         '<div class="row">',
-        '<button class="sec" onclick="downloadBackup()">⬇ Download TV Backup</button>',
-        '<button class="amber" onclick="restoreBackup()">⬆ Restore JSON to TV</button>',
+        '<button id="sendSubBtn" onclick="pushSubtitle()">💬 Send Subtitle to TV</button>',
+        '<button class="danger" onclick="clearRemoteSubtitle()" style="max-width:130px;">✕ Clear</button>',
+        '</div>',
+        '<div id="subStatus" class="msg"></div>',
+        '</div>',
+        '<div class="card">',
+        '<h3>📦 Full Backup & Restore via LAN</h3>',
+        '<p style="font-size:13px;color:#94a3b8;margin-top:0;">Download a .JSON file of all TV profiles, favorites, watch history, &amp; preferences, or upload/paste a backup file to restore onto your TV.</p>',
+        '<div class="row">',
+        '<button class="sec" onclick="downloadBackup()">⬇ Download .JSON Backup</button>',
+        '<button class="amber" onclick="restoreBackup()">⬆ Restore Backup to TV</button>',
+        '</div>',
+        '<div class="m3u-drop">',
+        '<label style="margin-top:0;color:#93c5fd;">📄 Upload .JSON Backup File (Max 5 MB)</label>',
+        '<input id="backupFile" type="file" accept=".json,application/json" onchange="handleBackupFileSelect()">',
+        '<div id="backupFileInfo" style="font-size:12px;color:#cbd5e1;margin-top:6px;">No backup file selected (or paste JSON below)</div>',
         '</div>',
         '<label>Backup JSON Payload (Auto-filled on Download or Paste to Restore)</label>',
         '<textarea id="backupJson" rows="4" placeholder=\'{"version":2,"profiles":[...]}\'></textarea>',
         '<div id="backupStatus" class="msg"></div>',
         '</div>',
         '<div class="card">',
-        '<h3>📋 Favorites .M3U & 📼 DVR Recordings</h3>',
-        '<p style="font-size:13px;color:#94a3b8;margin-top:0;">Download your TV Favorites .M3U playlist or manage & download recorded .TS clips stored on the TV.</p>',
+        '<h3>📋 Favorites .M3U &amp; 📼 DVR Recordings</h3>',
+        '<p style="font-size:13px;color:#94a3b8;margin-top:0;">Download your TV Favorites .M3U playlist or manage &amp; download recorded .TS clips stored on the TV.</p>',
         '<div class="row">',
         '<button class="sec" onclick="downloadFavoritesM3u()">⬇ Download Favorites .M3U</button>',
         '<button onclick="refreshDvrList()">🔄 Load DVR Clips</button>',
@@ -769,30 +967,37 @@ function buildRemoteSetupHtml(endpointUrl) {
         '<div id="lanMediaStatus" class="msg"></div>',
         '</div>',
         '<script>',
-        'var uploadedM3uName="";var uploadedM3uRaw="";',
+        'var uploadedM3uName="";var uploadedM3uRaw="";var uploadedSubName="";var uploadedSubRaw="";var uploadedBackupRaw="";',
         'function syncType(){var t=document.getElementById("type").value;document.getElementById("grp-stalker").style.display=(t==="stalker"?"block":"none");document.getElementById("grp-xtream").style.display=(t==="xtream"?"block":"none");document.getElementById("grp-m3u").style.display=(t==="m3u"?"block":"none");}',
-        'function handleM3uFileSelect(){var inp=document.getElementById("m3uFile");var info=document.getElementById("m3uFileInfo");var f=inp&&inp.files?inp.files[0]:null;uploadedM3uName="";uploadedM3uRaw="";if(!f){if(info)info.textContent="No local playlist file selected";return;}if(!/\\.(m3u8?|txt)$/i.test(f.name)){if(info)info.textContent="⚠ Please choose a .m3u or .m3u8 file";return;}if(f.size>22020096){if(info)info.textContent="⚠ File exceeds 21 MB limit";return;}if(info)info.textContent="Reading "+f.name+"...";var r=new FileReader();r.onload=function(){var txt=String(r.result||"");if(txt.indexOf("#EXTM3U")===-1&&txt.indexOf("#EXTINF")===-1){if(info)info.textContent="⚠ Invalid M3U content (missing #EXTM3U / #EXTINF)";return;}uploadedM3uName=f.name;uploadedM3uRaw=txt;if(info)info.textContent="✅ Ready: "+f.name+" ("+Math.round(txt.length/1024)+" KB)";};r.readAsText(f);}',
+        'function handleM3uFileSelect(){var inp=document.getElementById("m3uFile");var info=document.getElementById("m3uFileInfo");var f=inp&&inp.files?inp.files[0]:null;uploadedM3uName="";uploadedM3uRaw="";if(!f){if(info)info.textContent="No local playlist file selected";return;}if(!/\\.(m3u8?|txt)$/i.test(f.name)){if(info)info.textContent="⚠ Please choose a .m3u or .m3u8 file";return;}if(f.size>22020096){if(info)info.textContent="⚠ File exceeds 21 MB limit";return;}if(info)info.textContent="Reading "+f.name+"...";var r=new FileReader();r.onload=function(){var txt=String(r.result||"");if(txt.indexOf("#EXTM3U")===-1&&txt.indexOf("#EXTINF")===-1){if(info)info.textContent="⚠ Invalid M3U content (missing #EXTM3U / #EXTINF)";return;}uploadedM3uName=f.name;uploadedM3uRaw=txt;if(info)info.textContent="✓ Ready: "+f.name+" ("+Math.round(txt.length/1024)+" KB)";};r.readAsText(f);}',
+        'function handleSubFileSelect(){var inp=document.getElementById("subFile");var info=document.getElementById("subFileInfo");var f=inp&&inp.files?inp.files[0]:null;uploadedSubName="";uploadedSubRaw="";if(!f){if(info)info.textContent="No subtitle file selected";return;}if(!/\\.(srt|vtt)$/i.test(f.name)){if(info)info.textContent="⚠ Please choose a .srt or .vtt file";return;}if(f.size>5242880){if(info)info.textContent="⚠ Subtitle file exceeds 5 MB limit";return;}if(info)info.textContent="Reading "+f.name+"...";var r=new FileReader();r.onload=function(){var txt=String(r.result||"");var cues=txt.match(/-->/g);if(!cues||cues.length===0){if(info)info.textContent="⚠ Invalid subtitle file (no cue timestamps found)";return;}uploadedSubName=f.name;uploadedSubRaw=txt;var lbl=document.getElementById("subName");if(lbl&&!lbl.value){lbl.value=f.name.replace(/\\.(srt|vtt)$/i,"");}if(info)info.textContent="✓ Ready: "+f.name+" ("+Math.max(1,Math.round(txt.length/1024))+" KB • ~"+cues.length+" cues)";};r.readAsText(f);}',
+        'function handleBackupFileSelect(){var inp=document.getElementById("backupFile");var info=document.getElementById("backupFileInfo");var f=inp&&inp.files?inp.files[0]:null;uploadedBackupRaw="";if(!f){if(info)info.textContent="No backup file selected (or paste JSON below)";return;}if(!/\\.json$/i.test(f.name)&&f.type!=="application/json"){if(info)info.textContent="⚠ Please select a .json backup file";return;}if(f.size>5242880){if(info)info.textContent="⚠ Backup file exceeds 5 MB limit";return;}if(info)info.textContent="Reading "+f.name+"...";var r=new FileReader();r.onload=function(){var txt=String(r.result||"");try{var parsed=JSON.parse(txt);if(!parsed||typeof parsed!=="object"||(!parsed.storage&&!Array.isArray(parsed.profiles))){throw new Error("Missing storage/profiles");}}catch(ex){if(info)info.textContent="⚠ Invalid VortixTV backup JSON: "+ex.message;return;}uploadedBackupRaw=txt;var ta=document.getElementById("backupJson");if(ta){ta.value=txt;}var pLen=Array.isArray(parsed.profiles)?parsed.profiles.length:0;if(info)info.textContent="✓ Ready: "+f.name+" ("+pLen+" profile(s))";};r.readAsText(f);}',
+        'function pushSubtitle(){var pin=document.getElementById("pin").value;var st=document.getElementById("subStatus");if(!uploadedSubRaw){st.textContent="⚠ Choose a valid .srt or .vtt file first.";return;}st.textContent="⏳ Uploading "+uploadedSubName+"...";fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"upload_subtitle",pin:pin,name:document.getElementById("subName").value,fileName:uploadedSubName,rawText:uploadedSubRaw})}).then(function(r){return r.json();}).then(function(d){st.textContent=d.ok?"✓ Subtitle sent to TV ("+d.fileName+")! Open Audio/Subs or play a video to display.":"✕ "+(d.error||"Upload failed");}).catch(function(e){st.textContent="✕ "+e.message;});}',
+        'function clearRemoteSubtitle(){var pin=document.getElementById("pin").value;var st=document.getElementById("subStatus");fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"clear_subtitle",pin:pin})}).then(function(r){return r.json();}).then(function(d){if(d.ok){uploadedSubName="";uploadedSubRaw="";var inp=document.getElementById("subFile");if(inp)inp.value="";var info=document.getElementById("subFileInfo");if(info)info.textContent="No subtitle file selected";st.textContent="✓ Cleared external subtitle on TV.";}else{st.textContent="✕ "+(d.error||"Clear failed");}}).catch(function(e){st.textContent="✕ "+e.message;});}',
         'function pushCfg(){',
-        'var pin=document.getElementById("pin").value;var pType=document.getElementById("type").value;var st=document.getElementById("status");',
-        'if(pType==="m3u"&&uploadedM3uRaw){st.textContent="⏳ Uploading "+uploadedM3uName+"...";fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"upload_m3u",pin:pin,name:document.getElementById("name").value,fileName:uploadedM3uName,rawText:uploadedM3uRaw,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0})}).then(function(r){return r.json();}).then(function(d){st.textContent=d.ok?"✅ Uploaded M3U playlist to TV! Loading catalog...":"❌ "+(d.error||"Upload failed");});return;}',
-        'var payload={pin:pin,name:document.getElementById("name").value,type:pType,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0};',
-        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(d){st.textContent=d.ok?"✅ Sent to TV! Settings will apply automatically.":"❌ "+(d.error||"Failed");});',
+        'var pin=document.getElementById("pin").value;var pType=document.getElementById("type").value;var st=document.getElementById("status");var uaVal=document.getElementById("userAgent").value;var refVal=document.getElementById("httpReferer").value;',
+        'if(pType==="m3u"&&uploadedM3uRaw){st.textContent="⏳ Uploading "+uploadedM3uName+"...";fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"upload_m3u",pin:pin,name:document.getElementById("name").value,fileName:uploadedM3uName,rawText:uploadedM3uRaw,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0,userAgent:uaVal,httpReferer:refVal})}).then(function(r){return r.json();}).then(function(d){st.textContent=d.ok?"✓ Uploaded M3U playlist to TV! Loading catalog...":"✕ "+(d.error||"Upload failed");});return;}',
+        'var payload={pin:pin,name:document.getElementById("name").value,type:pType,portal:document.getElementById("portal").value,mac:document.getElementById("mac").value,xtreamUrl:document.getElementById("xtreamUrl").value,xtreamUser:document.getElementById("xtreamUser").value,xtreamPass:document.getElementById("xtreamPass").value,m3uUrl:document.getElementById("m3uUrl").value,epgUrl:document.getElementById("epgUrl").value,epgOffsetHours:Number(document.getElementById("epgOffsetHours").value)||0,userAgent:uaVal,httpReferer:refVal};',
+        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(d){st.textContent=d.ok?"✓ Sent to TV! Settings will apply automatically.":"✕ "+(d.error||"Failed");});',
         '}',
         'function downloadBackup(){',
-        'var pin=document.getElementById("pin").value;',
-        'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"export_backup",pin:pin})}).then(function(r){return r.json();}).then(function(d){',
-        'if(d.ok&&d.backup){var str=typeof d.backup==="string"?d.backup:JSON.stringify(d.backup,null,2);document.getElementById("backupJson").value=str;document.getElementById("backupStatus").textContent="✅ TV Configuration Backup downloaded!";}else{document.getElementById("backupStatus").textContent="❌ "+(d.error||"Backup failed");}',
-        '});}',
+        'var pin=document.getElementById("pin").value;var st=document.getElementById("backupStatus");st.textContent="⏳ Fetching TV backup...";',
+        'fetch("/lan-download?type=backup",{headers:{"X-Vortix-Pin":pin}}).then(function(r){if(!r.ok){return r.json().then(function(e){throw new Error(e.error||("HTTP "+r.status));});}return r.text();}).then(function(txt){',
+        'document.getElementById("backupJson").value=txt;var fname="vortixtv-backup-"+(new Date().toISOString().slice(0,10))+".json";',
+        'triggerBlobDownload(new Blob([txt],{type:"application/json"}),fname);',
+        'var sumTxt="";try{var p=JSON.parse(txt);var pc=Array.isArray(p.profiles)?p.profiles.length:0;var sk=p.storage?Object.keys(p.storage).length:0;sumTxt=" ("+pc+" profiles, "+sk+" keys)";}catch(e){}st.textContent="✓ Backup downloaded: "+fname+sumTxt;',
+        '}).catch(function(e){st.textContent="✕ "+e.message;});}',
         'function restoreBackup(){',
-        'var pin=document.getElementById("pin").value;var raw=document.getElementById("backupJson").value;',
+        'var pin=document.getElementById("pin").value;var raw=(document.getElementById("backupJson").value||uploadedBackupRaw||"").trim();var st=document.getElementById("backupStatus");',
+        'if(!raw){st.textContent="⚠ Select a .json backup file or paste JSON first.";return;}',
         'fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"import_backup",pin:pin,backup:raw})}).then(function(r){return r.json();}).then(function(d){',
-        'document.getElementById("backupStatus").textContent=d.ok?"✅ Restore queued! TV will reload configuration automatically.":"❌ "+(d.error||"Restore failed");',
-        '});}',
+        'var sumInfo=(d.summary&&d.summary.profileCount)?" ("+d.summary.profileCount+" profiles)":"";st.textContent=d.ok?"✓ Restore queued"+sumInfo+"! TV is applying configuration...":"✕ "+(d.error||"Restore failed");',
+        '}).catch(function(e){st.textContent="✕ "+e.message;});}',
         'function triggerBlobDownload(blob,fname){var u=URL.createObjectURL(blob);var a=document.createElement("a");a.href=u;a.download=fname;document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},2000);}',
-        'function downloadFavoritesM3u(){var pin=document.getElementById("pin").value;var ms=document.getElementById("lanMediaStatus");fetch("/lan-download?type=favorites",{headers:{"X-Vortix-Pin":pin}}).then(function(r){if(!r.ok){return r.json().then(function(e){throw new Error(e.error||("HTTP "+r.status));});}return r.blob();}).then(function(b){triggerBlobDownload(b,"vortixtv-favorites.m3u");ms.textContent="✅ Favorites .M3U downloaded!";}).catch(function(e){ms.textContent="❌ "+e.message;});}',
-        'function refreshDvrList(){var pin=document.getElementById("pin").value;var box=document.getElementById("dvrList");var ms=document.getElementById("lanMediaStatus");fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"list_dvr",pin:pin})}).then(function(r){return r.json();}).then(function(d){if(!d.ok){ms.textContent="❌ "+(d.error||"Failed");return;}var list=d.recordings||[];box.innerHTML="";if(list.length===0){ms.textContent="No DVR clips recorded on TV yet.";return;}ms.textContent="✅ Found "+list.length+" DVR recording(s).";list.forEach(function(rec){var row=document.createElement("div");row.className="dvr-row";var meta=document.createElement("div");meta.className="dvr-meta";meta.textContent=(rec.isRecording?"🔴 ":"📼 ")+rec.title+" ("+(rec.sizeBytes/1048576).toFixed(1)+" MB)";var dl=document.createElement("button");dl.className="sec sm";dl.textContent="⬇ .TS";dl.onclick=function(){downloadDvrClip(rec.fileName);};var del=document.createElement("button");del.className="danger sm";del.textContent="🗑";del.onclick=function(){deleteDvrClip(rec.fileName);};row.appendChild(meta);row.appendChild(dl);row.appendChild(del);box.appendChild(row);});});}',
-        'function downloadDvrClip(fname){var pin=document.getElementById("pin").value;var ms=document.getElementById("lanMediaStatus");ms.textContent="⏳ Downloading "+fname+"...";fetch("/lan-download?type=dvr&file="+encodeURIComponent(fname),{headers:{"X-Vortix-Pin":pin}}).then(function(r){if(!r.ok){return r.json().then(function(e){throw new Error(e.error||("HTTP "+r.status));});}return r.blob();}).then(function(b){triggerBlobDownload(b,fname);ms.textContent="✅ Downloaded "+fname;syncType();}).catch(function(e){ms.textContent="❌ "+e.message;});}',
-        'function deleteDvrClip(fname){var pin=document.getElementById("pin").value;var ms=document.getElementById("lanMediaStatus");fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"delete_dvr",pin:pin,fileName:fname})}).then(function(r){return r.json();}).then(function(d){if(d.ok){ms.textContent="🗑 Deleted "+fname;refreshDvrList();}else{ms.textContent="❌ "+(d.error||"Delete failed");}});}',
+        'function downloadFavoritesM3u(){var pin=document.getElementById("pin").value;var ms=document.getElementById("lanMediaStatus");fetch("/lan-download?type=favorites",{headers:{"X-Vortix-Pin":pin}}).then(function(r){if(!r.ok){return r.json().then(function(e){throw new Error(e.error||("HTTP "+r.status));});}return r.blob();}).then(function(b){triggerBlobDownload(b,"vortixtv-favorites.m3u");ms.textContent="✓ Favorites .M3U downloaded!";}).catch(function(e){ms.textContent="✕ "+e.message;});}',
+        'function refreshDvrList(){var pin=document.getElementById("pin").value;var box=document.getElementById("dvrList");var ms=document.getElementById("lanMediaStatus");fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"list_dvr",pin:pin})}).then(function(r){return r.json();}).then(function(d){if(!d.ok){ms.textContent="✕ "+(d.error||"Failed");return;}var list=d.recordings||[];box.innerHTML="";if(list.length===0){ms.textContent="No DVR clips recorded on TV yet.";return;}ms.textContent="✓ Found "+list.length+" DVR recording(s).";list.forEach(function(rec){var row=document.createElement("div");row.className="dvr-row";var meta=document.createElement("div");meta.className="dvr-meta";meta.textContent=(rec.isRecording?"🔴 ":"📼 ")+rec.title+" ("+(rec.sizeBytes/1048576).toFixed(1)+" MB)";var dl=document.createElement("button");dl.className="sec sm";dl.textContent="⬇ .TS";dl.onclick=function(){downloadDvrClip(rec.fileName);};var del=document.createElement("button");del.className="danger sm";del.textContent="✕";del.onclick=function(){deleteDvrClip(rec.fileName);};row.appendChild(meta);row.appendChild(dl);row.appendChild(del);box.appendChild(row);});});}',
+        'function downloadDvrClip(fname){var pin=document.getElementById("pin").value;var ms=document.getElementById("lanMediaStatus");ms.textContent="⏳ Downloading "+fname+"...";fetch("/lan-download?type=dvr&file="+encodeURIComponent(fname),{headers:{"X-Vortix-Pin":pin}}).then(function(r){if(!r.ok){return r.json().then(function(e){throw new Error(e.error||("HTTP "+r.status));});}return r.blob();}).then(function(b){triggerBlobDownload(b,fname);ms.textContent="✓ Downloaded "+fname;syncType();}).catch(function(e){ms.textContent="✕ "+e.message;});}',
+        'function deleteDvrClip(fname){var pin=document.getElementById("pin").value;var ms=document.getElementById("lanMediaStatus");fetch("/remote-setup",{method:"POST",headers:{"Content-Type":"application/json","X-Vortix-Pin":pin},body:JSON.stringify({action:"delete_dvr",pin:pin,fileName:fname})}).then(function(r){return r.json();}).then(function(d){if(d.ok){ms.textContent="✕ Deleted "+fname;refreshDvrList();}else{ms.textContent="✕ "+(d.error||"Delete failed");}});}',
         '</script></body></html>'
     ].join('');
 }
@@ -1246,9 +1451,420 @@ function decodeBufferByEncoding(rawBuf, encoding, callback) {
                 });
             }
         });
+    } else if (enc.indexOf('br') !== -1 && typeof zlib.brotliDecompress === 'function') {
+        zlib.brotliDecompress(rawBuf, function(errBr, decodedBr) {
+            callback(errBr ? rawBuf : decodedBr);
+        });
     } else {
         callback(rawBuf);
     }
+}
+
+function isGzipMagicBuffer(buf) {
+    return Boolean(buf && buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b);
+}
+
+function isZipMagicBuffer(buf) {
+    return Boolean(buf && buf.length >= 30 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04);
+}
+
+function extractFirstTextEntryFromZipBuffer(zipBuf, callback) {
+    try {
+        var entries = [];
+        var eocdPos = -1;
+        var minEocd = Math.max(0, zipBuf.length - 65557);
+        for (var pos = zipBuf.length - 22; pos >= minEocd; pos--) {
+            if (zipBuf.readUInt32LE(pos) === 0x06054b50) {
+                eocdPos = pos;
+                break;
+            }
+        }
+        if (eocdPos !== -1) {
+            var cdSize = zipBuf.readUInt32LE(eocdPos + 12);
+            var cdOffset = zipBuf.readUInt32LE(eocdPos + 16);
+            var cdEnd = Math.min(zipBuf.length, cdOffset + cdSize);
+            var ptr = cdOffset;
+            while (ptr + 46 <= cdEnd) {
+                if (zipBuf.readUInt32LE(ptr) !== 0x02014b50) {
+                    break;
+                }
+                var method = zipBuf.readUInt16LE(ptr + 10);
+                var compSize = zipBuf.readUInt32LE(ptr + 20);
+                var nameLen = zipBuf.readUInt16LE(ptr + 28);
+                var extraLen = zipBuf.readUInt16LE(ptr + 30);
+                var commentLen = zipBuf.readUInt16LE(ptr + 32);
+                var localOff = zipBuf.readUInt32LE(ptr + 42);
+                var entryName = zipBuf.toString('utf8', ptr + 46, Math.min(zipBuf.length, ptr + 46 + nameLen));
+                entries.push({
+                    name: entryName,
+                    method: method,
+                    compSize: compSize,
+                    localOff: localOff
+                });
+                ptr += 46 + nameLen + extraLen + commentLen;
+            }
+        } else {
+            var lMethod = zipBuf.readUInt16LE(8);
+            var lCompSize = zipBuf.readUInt32LE(18);
+            var lNameLen = zipBuf.readUInt16LE(26);
+            var lName = zipBuf.toString('utf8', 30, Math.min(zipBuf.length, 30 + lNameLen));
+            entries.push({
+                name: lName,
+                method: lMethod,
+                compSize: lCompSize,
+                localOff: 0
+            });
+        }
+        var chosen = null;
+        var preferredRe = /\.(xml|xmltv|m3u8?|txt|gz)$/i;
+        for (var i = 0; i < entries.length; i++) {
+            var ent = entries[i];
+            var nm = String(ent.name || '');
+            if (!nm || nm.slice(-1) === '/' || nm.indexOf('__MACOSX/') === 0) {
+                continue;
+            }
+            if (preferredRe.test(nm)) {
+                chosen = ent;
+                break;
+            }
+            if (!chosen) {
+                chosen = ent;
+            }
+        }
+        if (!chosen || chosen.localOff + 30 > zipBuf.length || zipBuf.readUInt32LE(chosen.localOff) !== 0x04034b50) {
+            callback(zipBuf);
+            return;
+        }
+        var locNameLen = zipBuf.readUInt16LE(chosen.localOff + 26);
+        var locExtraLen = zipBuf.readUInt16LE(chosen.localOff + 28);
+        var dataStart = chosen.localOff + 30 + locNameLen + locExtraLen;
+        var dataEnd = chosen.compSize > 0 ? Math.min(zipBuf.length, dataStart + chosen.compSize) : zipBuf.length;
+        if (dataStart >= dataEnd) {
+            callback(zipBuf);
+            return;
+        }
+        var payloadSlice = zipBuf.slice(dataStart, dataEnd);
+        if (chosen.method === 0) {
+            callback(payloadSlice);
+        } else if (chosen.method === 8) {
+            zlib.inflateRaw(payloadSlice, function(errInf, outBuf) {
+                callback(errInf || !outBuf ? zipBuf : outBuf);
+            });
+        } else {
+            callback(zipBuf);
+        }
+    } catch (eZip) {
+        callback(zipBuf);
+    }
+}
+
+function decompressArchiveOrEncodingBuffer(rawBuf, encoding, callback) {
+    if (!rawBuf || !rawBuf.length) {
+        callback(rawBuf || allocBufferUtf8(''));
+        return;
+    }
+    decodeBufferByEncoding(rawBuf, encoding, function(step1Buf) {
+        var curBuf = step1Buf || rawBuf;
+        var passesLeft = 2;
+        function unwrapMagic(buf) {
+            if (!buf || !buf.length || passesLeft <= 0) {
+                callback(buf);
+                return;
+            }
+            if (isGzipMagicBuffer(buf)) {
+                passesLeft--;
+                zlib.gunzip(buf, function(errGz, decGz) {
+                    if (errGz || !decGz) {
+                        callback(buf);
+                        return;
+                    }
+                    unwrapMagic(decGz);
+                });
+                return;
+            }
+            if (isZipMagicBuffer(buf)) {
+                passesLeft--;
+                extractFirstTextEntryFromZipBuffer(buf, function(decZip) {
+                    if (!decZip || decZip === buf) {
+                        callback(buf);
+                        return;
+                    }
+                    unwrapMagic(decZip);
+                });
+                return;
+            }
+            callback(buf);
+        }
+        unwrapMagic(curBuf);
+    });
+}
+
+function decodeXmlEntitiesProxy(str) {
+    var s = String(str || '');
+    if (s.indexOf('&') === -1) {
+        return s;
+    }
+    return s
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&#(\d+);/g, function(_, dec) {
+            return String.fromCharCode(parseInt(dec, 10));
+        })
+        .replace(/&#x([0-9a-fA-F]+);/g, function(_, hex) {
+            return String.fromCharCode(parseInt(hex, 16));
+        });
+}
+
+function extractXmlElementTextProxy(rawInner) {
+    var s = String(rawInner || '');
+    if (!s) {
+        return '';
+    }
+    if (s.indexOf('<![CDATA[') !== -1) {
+        s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+    }
+    if (s.indexOf('<') !== -1) {
+        s = s.replace(/<[^>]+>/g, '');
+    }
+    return decodeXmlEntitiesProxy(s).trim();
+}
+
+function normalizeXmltvKeyProxy(val) {
+    return String(val || '')
+        .toLowerCase()
+        .replace(/[\s\u00A0\-_.:\/\\|()[\]{}'",+!?@#%^&*=~\x60<>]+/g, '');
+}
+
+function parseXmltvDateSecProxy(raw) {
+    var s = String(raw || '').trim();
+    if (!s) {
+        return 0;
+    }
+    var m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?(?:\s*(Z|UTC|GMT|[+-]\d{2}:?\d{2}|[+-]\d{2}))?/i);
+    if (!m) {
+        var iso = s.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:\s*(Z|UTC|GMT|[+-]\d{2}:?\d{2}|[+-]\d{2}))?/i);
+        if (!iso) {
+            return 0;
+        }
+        m = iso;
+    }
+    var year = parseInt(m[1], 10);
+    var month = parseInt(m[2], 10) - 1;
+    var day = parseInt(m[3], 10);
+    var hour = parseInt(m[4], 10);
+    var min = parseInt(m[5], 10);
+    var sec = m[6] ? parseInt(m[6], 10) : 0;
+    var utcMs = Date.UTC(year, month, day, hour, min, sec);
+    var tz = m[7] ? String(m[7]).toUpperCase() : '';
+    if (tz && tz !== 'Z' && tz !== 'UTC' && tz !== 'GMT') {
+        var sign = tz.charAt(0) === '-' ? -1 : 1;
+        var digits = tz.slice(1).replace(':', '');
+        var tzH = parseInt(digits.slice(0, 2), 10) || 0;
+        var tzM = digits.length >= 4 ? (parseInt(digits.slice(2, 4), 10) || 0) : 0;
+        utcMs -= sign * ((tzH * 60) + tzM) * 60000;
+    }
+    return Math.floor(utcMs / 1000);
+}
+
+function extractXmlAttrProxy(attrStr, attrName) {
+    var re = new RegExp('\\b' + attrName + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\')', 'i');
+    var m = attrStr.match(re);
+    return m ? decodeXmlEntitiesProxy(m[1] !== undefined ? m[1] : (m[2] || '')).trim() : '';
+}
+
+function compareXmltvProgByStartProxy(a, b) {
+    return a.start_timestamp - b.start_timestamp;
+}
+
+var xmltvCompactCache = {};
+var xmltvCompactCacheKeys = [];
+
+function parseXmltvCompact(xmlText, nowSecOverride) {
+    var text = String(xmlText || '');
+    if (text.charCodeAt(0) === 0xFEFF) {
+        text = text.slice(1);
+    }
+    var channelsById = {};
+    var aliasToChannelId = {};
+    var programsByChannel = {};
+    var fallbackByChannel = {};
+    var hasLowerProg = text.indexOf('<programme') !== -1;
+    var hasAnyProg = hasLowerProg || /<programme\b/i.test(text);
+    if (!text || !hasAnyProg) {
+        return {
+            ok: true,
+            channelsById: channelsById,
+            aliasToChannelId: aliasToChannelId,
+            programsByChannel: programsByChannel
+        };
+    }
+    var nowSec = typeof nowSecOverride === 'number' && nowSecOverride > 0 ? nowSecOverride : Math.floor(Date.now() / 1000);
+    var minStopSec = nowSec - 86400;
+    var maxStartSec = nowSec + 259200;
+    var dnRe = /<display-name\b[^>]*>([\s\S]*?)<\/display-name>/gi;
+    var chRe = /<channel\b([^>]*)>([\s\S]*?)<\/channel>/gi;
+    var chMatch;
+    while ((chMatch = chRe.exec(text)) !== null) {
+        var rawId = extractXmlAttrProxy(chMatch[1] || '', 'id');
+        if (!rawId) {
+            continue;
+        }
+        var chBody = chMatch[2] || '';
+        var names = [];
+        dnRe.lastIndex = 0;
+        var dnMatch;
+        while ((dnMatch = dnRe.exec(chBody)) !== null) {
+            var dn = extractXmlElementTextProxy(dnMatch[1]);
+            if (dn) {
+                names.push(dn);
+            }
+        }
+        channelsById[rawId] = { id: rawId, displayNames: names };
+    }
+
+    var titleRe = /<title\b[^>]*>([\s\S]*?)<\/title>/i;
+    var descRe = /<desc\b[^>]*>([\s\S]*?)<\/desc>/i;
+    var progIdx = 0;
+
+    function pushProgramme(attrsPart, pBody) {
+        var chId = extractXmlAttrProxy(attrsPart, 'channel');
+        if (!chId) {
+            return;
+        }
+        var startTs = parseXmltvDateSecProxy(extractXmlAttrProxy(attrsPart, 'start'));
+        if (!startTs) {
+            return;
+        }
+        var stopTs = parseXmltvDateSecProxy(extractXmlAttrProxy(attrsPart, 'stop'));
+        if (!stopTs || stopTs <= startTs) {
+            stopTs = startTs + 1800;
+        }
+        var inWindow = (stopTs >= minStopSec && startTs <= maxStartSec);
+        if (inWindow) {
+            if (!programsByChannel[chId]) {
+                programsByChannel[chId] = [];
+            }
+            if (programsByChannel[chId].length >= 160) {
+                return;
+            }
+        } else {
+            if (programsByChannel[chId] && programsByChannel[chId].length > 0) {
+                return;
+            }
+            if (!fallbackByChannel[chId]) {
+                fallbackByChannel[chId] = [];
+            }
+            if (fallbackByChannel[chId].length >= 40) {
+                return;
+            }
+        }
+        var tM = pBody.match(titleRe);
+        var dM = pBody.match(descRe);
+        var title = tM ? extractXmlElementTextProxy(tM[1]) : 'Program';
+        var descr = dM ? extractXmlElementTextProxy(dM[1]) : '';
+        progIdx++;
+        var entry = {
+            id: 'xmltv_' + progIdx,
+            name: title || 'Program',
+            descr: descr,
+            start_timestamp: startTs,
+            stop_timestamp: stopTs
+        };
+        if (inWindow) {
+            programsByChannel[chId].push(entry);
+        } else {
+            fallbackByChannel[chId].push(entry);
+        }
+    }
+
+    if (hasLowerProg) {
+        var cursor = 0;
+        var textLen = text.length;
+        while (cursor < textLen) {
+            var pStart = text.indexOf('<programme', cursor);
+            if (pStart === -1) {
+                break;
+            }
+            var afterTagChar = text.charAt(pStart + 10);
+            if (afterTagChar && afterTagChar !== ' ' && afterTagChar !== '\t' && afterTagChar !== '\r' && afterTagChar !== '\n' && afterTagChar !== '>') {
+                cursor = pStart + 10;
+                continue;
+            }
+            var gtIdx = text.indexOf('>', pStart + 10);
+            if (gtIdx === -1) {
+                break;
+            }
+            var closeIdx = text.indexOf('</programme>', gtIdx + 1);
+            if (closeIdx === -1) {
+                break;
+            }
+            pushProgramme(text.slice(pStart + 10, gtIdx), text.slice(gtIdx + 1, closeIdx));
+            cursor = closeIdx + 12;
+        }
+    } else {
+        var progRe = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/gi;
+        var progMatch;
+        while ((progMatch = progRe.exec(text)) !== null) {
+            pushProgramme(progMatch[1] || '', progMatch[2] || '');
+        }
+    }
+
+    var fbKeys = Object.keys(fallbackByChannel);
+    for (var fi = 0; fi < fbKeys.length; fi++) {
+        var fk = fbKeys[fi];
+        if (!programsByChannel[fk] || programsByChannel[fk].length === 0) {
+            programsByChannel[fk] = fallbackByChannel[fk];
+        }
+    }
+
+    var progKeyByNorm = {};
+    var pKeys = Object.keys(programsByChannel);
+    for (var pk = 0; pk < pKeys.length; pk++) {
+        var chKey = pKeys[pk];
+        var arr = programsByChannel[chKey];
+        if (!arr || arr.length === 0) {
+            delete programsByChannel[chKey];
+            continue;
+        }
+        arr.sort(compareXmltvProgByStartProxy);
+        var normPk = normalizeXmltvKeyProxy(chKey);
+        if (normPk && !progKeyByNorm[normPk]) {
+            progKeyByNorm[normPk] = chKey;
+        }
+        if (normPk && !aliasToChannelId[normPk]) {
+            aliasToChannelId[normPk] = chKey;
+        }
+    }
+
+    var cIds = Object.keys(channelsById);
+    for (var ci = 0; ci < cIds.length; ci++) {
+        var cid = cIds[ci];
+        var normCid = normalizeXmltvKeyProxy(cid);
+        var resolvedProgKey = programsByChannel[cid] ? cid : (normCid ? progKeyByNorm[normCid] : '');
+        if (!resolvedProgKey || !programsByChannel[resolvedProgKey]) {
+            continue;
+        }
+        if (normCid) {
+            aliasToChannelId[normCid] = resolvedProgKey;
+        }
+        var dNames = channelsById[cid].displayNames || [];
+        for (var dnIdx = 0; dnIdx < dNames.length; dnIdx++) {
+            var normDn = normalizeXmltvKeyProxy(dNames[dnIdx]);
+            if (normDn && !aliasToChannelId[normDn]) {
+                aliasToChannelId[normDn] = resolvedProgKey;
+            }
+        }
+    }
+
+    return {
+        ok: true,
+        channelsById: channelsById,
+        aliasToChannelId: aliasToChannelId,
+        programsByChannel: programsByChannel
+    };
 }
 
 function normalizePortalKey(rawPortal, mac) {
@@ -1793,13 +2409,16 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
             clientRes.end(JSON.stringify({ error: ssrfErr ? ssrfErr.message : 'Blocked target' }));
             return;
         }
+        var reqQuery = (url.parse(clientReq.url || '', true) && url.parse(clientReq.url || '', true).query) || {};
+        var overrideUa = sanitizeHeaderValue((clientReq.headers && clientReq.headers['x-proxy-ua']) || reqQuery.ua || '');
+        var overrideRef = sanitizeHeaderValue((clientReq.headers && clientReq.headers['x-proxy-referer']) || reqQuery.referer || reqQuery.ref || '');
         var isHttps = safeTarget.protocol === 'https:';
         var client = isHttps ? https : http;
         var isVodContainer = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(safeTarget.path || '') || /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(streamUrl || '');
         var isVodStream = isVodContainer || /\/(?:movie|series)\//i.test(safeTarget.path || '') || /\/(?:movie|series)\//i.test(streamUrl || '');
         var mergedCookie = getHostCookieHeader(safeTarget.hostname, '', lastActiveMac);
         var headers = {
-            'User-Agent': isVodStream ? VLC_UA : MAG_UA,
+            'User-Agent': overrideUa || (isVodStream ? VLC_UA : MAG_UA),
             'Accept': '*/*',
             'Connection': 'keep-alive',
             'Host': safeTarget.host
@@ -1807,7 +2426,9 @@ function proxyVideoStream(streamUrl, clientReq, clientRes, redirectsLeft, origin
         if (mergedCookie) {
             headers.Cookie = mergedCookie;
         }
-        if (lastPortalReferer && !isVodStream) {
+        if (overrideRef) {
+            headers.Referer = overrideRef;
+        } else if (lastPortalReferer && !isVodStream) {
             headers.Referer = lastPortalReferer;
         }
         if (clientReq.headers.range) {
@@ -2417,6 +3038,32 @@ function startProxyServer(port) {
                 res.end(favBuf);
                 return;
             }
+            if (dlType === 'backup') {
+                var bkText = memoryBackupJson;
+                if (!bkText || bkText === '{}') {
+                    try {
+                        if (fs.existsSync(BACKUP_FILE_PATH)) {
+                            bkText = fs.readFileSync(BACKUP_FILE_PATH, 'utf8') || '';
+                            memoryBackupJson = bkText;
+                        }
+                    } catch (eBkRd) {}
+                }
+                if (!bkText || bkText === '{}') {
+                    res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                    res.end(JSON.stringify({ ok: false, error: 'No TV configuration backup stored yet.' }));
+                    return;
+                }
+                var bkDate = new Date().toISOString().slice(0, 10);
+                var bkBuf = allocBufferUtf8(bkText);
+                res.writeHead(200, {
+                    'Content-Type': 'application/json; charset=utf-8',
+                    'Content-Disposition': 'attachment; filename="vortixtv-backup-' + bkDate + '.json"',
+                    'Content-Length': String(bkBuf.length),
+                    'Cache-Control': 'no-store'
+                });
+                res.end(bkBuf);
+                return;
+            }
             if (dlType === 'dvr') {
                 var reqDvrFile = sanitizeDvrFileName(parsedUrl.query && parsedUrl.query.file);
                 if (!reqDvrFile) {
@@ -2490,19 +3137,35 @@ function startProxyServer(port) {
                             return;
                         }
                         if (parsedCfg.action === 'export_backup') {
+                            var bkSummary = validateBackupPayload(memoryBackupJson || '{}');
                             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-                            res.end(JSON.stringify({ ok: true, backup: memoryBackupJson || '{}' }));
+                            res.end(JSON.stringify({
+                                ok: true,
+                                hasBackup: Boolean(bkSummary.ok),
+                                summary: bkSummary.ok ? bkSummary.summary : { profileCount: 0, storageKeys: 0 },
+                                backup: memoryBackupJson || '{}'
+                            }));
                             return;
                         }
-                        if (parsedCfg.action === 'import_backup' && parsedCfg.backup) {
-                            var rawBackupStr = typeof parsedCfg.backup === 'string' ? parsedCfg.backup : JSON.stringify(parsedCfg.backup);
-                            memoryBackupJson = rawBackupStr;
-                            pendingRemoteRestoreJson = { ts: Date.now(), backup: rawBackupStr };
+                        if (parsedCfg.action === 'import_backup') {
+                            var bkCheck = validateBackupPayload(parsedCfg.backup);
+                            if (!bkCheck.ok) {
+                                res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                                res.end(JSON.stringify({ ok: false, error: bkCheck.error }));
+                                return;
+                            }
+                            memoryBackupJson = bkCheck.jsonStr;
+                            pendingRemoteRestoreJson = { ts: Date.now(), backup: bkCheck.jsonStr };
                             try {
                                 fs.writeFile(BACKUP_FILE_PATH, memoryBackupJson, 'utf8', function() {});
                             } catch (eBw) {}
                             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-                            res.end(JSON.stringify({ ok: true, restored: true, ts: Date.now() }));
+                            res.end(JSON.stringify({
+                                ok: true,
+                                restored: true,
+                                summary: bkCheck.summary,
+                                ts: Date.now()
+                            }));
                             return;
                         }
                         if (parsedCfg.action === 'list_dvr') {
@@ -2534,6 +3197,51 @@ function startProxyServer(port) {
                             }
                             return;
                         }
+                        if (parsedCfg.action === 'upload_subtitle') {
+                            var subCheck = validateAndNormalizeSubtitleUpload(parsedCfg.fileName, parsedCfg.rawText, parsedCfg.name);
+                            if (!subCheck.ok) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ ok: false, error: subCheck.error }));
+                                return;
+                            }
+                            var subObj = {
+                                id: subCheck.id,
+                                name: subCheck.name,
+                                fileName: subCheck.fileName,
+                                format: subCheck.format,
+                                rawText: subCheck.rawText,
+                                bytes: subCheck.bytes,
+                                ts: subCheck.ts
+                            };
+                            pendingRemoteSubtitle = subObj;
+                            memoryExternalSubtitle = subObj;
+                            try {
+                                fs.writeFile(SUBTITLE_FILE_PATH, JSON.stringify(subObj), 'utf8', function() {});
+                            } catch (eSubW) {}
+                            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                            res.end(JSON.stringify({
+                                ok: true,
+                                id: subObj.id,
+                                name: subObj.name,
+                                fileName: subObj.fileName,
+                                format: subObj.format,
+                                bytes: subObj.bytes,
+                                ts: subObj.ts
+                            }));
+                            return;
+                        }
+                        if (parsedCfg.action === 'clear_subtitle') {
+                            pendingRemoteSubtitle = { cleared: true, ts: Date.now() };
+                            memoryExternalSubtitle = null;
+                            try {
+                                if (fs.existsSync(SUBTITLE_FILE_PATH)) {
+                                    fs.unlinkSync(SUBTITLE_FILE_PATH);
+                                }
+                            } catch (eSubDel) {}
+                            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                            res.end(JSON.stringify({ ok: true, cleared: true, ts: pendingRemoteSubtitle.ts }));
+                            return;
+                        }
                         if (parsedCfg.action === 'upload_m3u') {
                             var rawM3u = String(parsedCfg.rawText || '');
                             if (!rawM3u || (rawM3u.indexOf('#EXTM3U') === -1 && rawM3u.indexOf('#EXTINF') === -1)) {
@@ -2552,7 +3260,9 @@ function startProxyServer(port) {
                                     m3uFileName: m3uBaseName,
                                     hasUploadedM3u: true,
                                     epgUrl: String(parsedCfg.epgUrl || ''),
-                                    epgOffsetHours: Number(parsedCfg.epgOffsetHours) || 0
+                                    epgOffsetHours: Number(parsedCfg.epgOffsetHours) || 0,
+                                    userAgent: sanitizeHeaderValue(parsedCfg.userAgent || ''),
+                                    httpReferer: sanitizeHeaderValue(parsedCfg.httpReferer || '')
                                 }
                             };
                             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -2584,19 +3294,34 @@ function startProxyServer(port) {
                     res.end(JSON.stringify({ error: 'Polling restricted to TV loopback' }));
                     return;
                 }
+                var consumeSubOnly = Boolean(parsedUrl.query && parsedUrl.query.consume_sub === '1');
+                var consumeAll = Boolean(parsedUrl.query && parsedUrl.query.consume === '1');
+                var outSubtitle = pendingRemoteSubtitle;
+                if (consumeSubOnly) {
+                    pendingRemoteSubtitle = null;
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                    res.end(JSON.stringify({
+                        pendingSubtitle: outSubtitle,
+                        pin: currentPairingPin,
+                        pairingPin: currentPairingPin
+                    }));
+                    return;
+                }
                 var outSetup = pendingRemoteSetup;
                 var outRestore = pendingRemoteRestoreJson;
                 var outM3uText = pendingRemoteM3uContent;
-                if (parsedUrl.query && parsedUrl.query.consume === '1') {
+                if (consumeAll) {
                     pendingRemoteSetup = null;
                     pendingRemoteRestoreJson = null;
                     pendingRemoteM3uContent = '';
+                    pendingRemoteSubtitle = null;
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
                 res.end(JSON.stringify({
                     pending: outSetup,
                     pendingRestore: outRestore,
                     uploadedM3uText: outM3uText,
+                    pendingSubtitle: outSubtitle,
                     pin: currentPairingPin,
                     pairingPin: currentPairingPin
                 }));
@@ -2604,14 +3329,147 @@ function startProxyServer(port) {
             }
         }
 
+        if (parsedUrl.pathname === '/external-subtitle' && req.method === 'GET') {
+            if (!isLoopback) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'Restricted to TV loopback' }));
+                return;
+            }
+            if (!memoryExternalSubtitle) {
+                try {
+                    if (fs.existsSync(SUBTITLE_FILE_PATH)) {
+                        var rawSubJson = fs.readFileSync(SUBTITLE_FILE_PATH, 'utf8');
+                        if (rawSubJson) {
+                            memoryExternalSubtitle = JSON.parse(rawSubJson);
+                        }
+                    }
+                } catch (eSubLoad) {}
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ ok: Boolean(memoryExternalSubtitle), subtitle: memoryExternalSubtitle || null }));
+            return;
+        }
+
         if (parsedUrl.pathname === '/record') {
             var recAction = String((parsedUrl.query && parsedUrl.query.action) || 'status').toLowerCase();
+            if (recAction === 'schedule_list') {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({
+                    ok: true,
+                    schedules: scheduledDvrJobs
+                }));
+                return;
+            }
+            if (recAction === 'schedule_add') {
+                var handleScheduleAdd = function(rawObj) {
+                    var normJob = normalizeScheduledRecording(rawObj);
+                    if (!normJob) {
+                        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                        res.end(JSON.stringify({ ok: false, error: 'Missing valid url, startTs, or stopTs for scheduled DVR recording' }));
+                        return;
+                    }
+                    validateSafeUpstreamUrl(normJob.url, function(ssrfErr, safeTarget) {
+                        if (ssrfErr || !safeTarget) {
+                            res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                            res.end(JSON.stringify({ ok: false, error: ssrfErr ? ssrfErr.message : 'Blocked scheduled DVR URL' }));
+                            return;
+                        }
+                        var updatedList = [];
+                        for (var si = 0; si < scheduledDvrJobs.length; si++) {
+                            var exJob = scheduledDvrJobs[si];
+                            if (!exJob) {
+                                continue;
+                            }
+                            if (exJob.id === normJob.id || (exJob.chId && exJob.chId === normJob.chId && Number(exJob.startTs) === Number(normJob.startTs))) {
+                                continue;
+                            }
+                            updatedList.push(exJob);
+                        }
+                        updatedList.push(normJob);
+                        updatedList.sort(function(a, b) {
+                            return Number(a.startTs || 0) - Number(b.startTs || 0);
+                        });
+                        scheduledDvrJobs = updatedList;
+                        saveScheduledDvrJobsSync();
+                        var curSec = Math.floor(Date.now() / 1000);
+                        if (normJob.startTs <= curSec && curSec < (normJob.stopTs - 10)) {
+                            tickScheduledDvrJobs();
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                        res.end(JSON.stringify({ ok: true, schedule: normJob, schedules: scheduledDvrJobs }));
+                    });
+                };
+                if (req.method === 'POST') {
+                    var sParts = [];
+                    var sBytes = 0;
+                    var sTooBig = false;
+                    req.on('data', function(ch) {
+                        var bc = Buffer.isBuffer(ch) ? ch : allocBufferUtf8(ch);
+                        sBytes += bc.length;
+                        if (sBytes > 65536) {
+                            sTooBig = true;
+                            sParts = [];
+                            return;
+                        }
+                        sParts.push(bc);
+                    });
+                    req.on('end', function() {
+                        if (sTooBig) {
+                            res.writeHead(413, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: false, error: 'Payload too large' }));
+                            return;
+                        }
+                        try {
+                            var bodyObj = JSON.parse(Buffer.concat(sParts).toString('utf8') || '{}');
+                            sParts = [];
+                            handleScheduleAdd(bodyObj);
+                        } catch (eSb) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ok: false, error: 'Invalid JSON payload' }));
+                        }
+                    });
+                } else {
+                    handleScheduleAdd(parsedUrl.query || {});
+                }
+                return;
+            }
+            if (recAction === 'schedule_cancel') {
+                var cancelId = String((parsedUrl.query && parsedUrl.query.id) || '').trim();
+                var cancelChId = String((parsedUrl.query && parsedUrl.query.chId) || '').trim();
+                var cancelStartTs = Number((parsedUrl.query && parsedUrl.query.startTs) || 0);
+                var cancelMatchFn = function(job) {
+                    if (!job) return false;
+                    if (cancelId && job.id === cancelId) return true;
+                    if (cancelChId && cancelStartTs > 0 && job.chId === cancelChId && Number(job.startTs) === cancelStartTs) return true;
+                    return false;
+                };
+                var kept = [];
+                var removedAny = false;
+                for (var ci = 0; ci < scheduledDvrJobs.length; ci++) {
+                    if (cancelMatchFn(scheduledDvrJobs[ci])) {
+                        removedAny = true;
+                        if (activeRecordingSession && activeRecordingSession.scheduleId === scheduledDvrJobs[ci].id) {
+                            stopActiveRecordingSession();
+                        }
+                    } else {
+                        kept.push(scheduledDvrJobs[ci]);
+                    }
+                }
+                scheduledDvrJobs = kept;
+                if (removedAny) {
+                    saveScheduledDvrJobsSync();
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+                res.end(JSON.stringify({ ok: true, cancelled: removedAny, schedules: scheduledDvrJobs }));
+                return;
+            }
             if (recAction === 'list') {
                 res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
                 res.end(JSON.stringify({
                     ok: true,
                     dataDir: DVR_DIR,
                     recordings: listDvrRecordingsSync(),
+                    schedules: scheduledDvrJobs,
                     active: Boolean(activeRecordingSession && activeRecordingSession.active),
                     activeFile: (activeRecordingSession && activeRecordingSession.fileName) ? activeRecordingSession.fileName : ''
                 }));
@@ -2709,155 +3567,25 @@ function startProxyServer(port) {
             }
             if (recAction === 'start' && parsedUrl.query && parsedUrl.query.url) {
                 var recUrl = String(parsedUrl.query.url || '').trim();
-                validateSafeUpstreamUrl(recUrl, function(ssrfErr, initialTarget) {
-                    if (ssrfErr || !initialTarget) {
+                var recUaOverride = sanitizeHeaderValue((req.headers && req.headers['x-proxy-ua']) || parsedUrl.query.ua || '');
+                var recRefOverride = sanitizeHeaderValue((req.headers && req.headers['x-proxy-referer']) || parsedUrl.query.referer || parsedUrl.query.ref || '');
+                startDvrRecordingSession({
+                    url: recUrl,
+                    name: String(parsedUrl.query.name || 'channel'),
+                    ua: recUaOverride,
+                    referer: recRefOverride,
+                    maxDurationMs: 1800000
+                }, function(startErr, startedSess) {
+                    if (startErr || !startedSess) {
                         res.writeHead(403, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: ssrfErr ? ssrfErr.message : 'Blocked recording URL' }));
+                        res.end(JSON.stringify({ error: startErr ? startErr.message : 'Blocked recording URL' }));
                         return;
                     }
-                    stopActiveRecordingSession();
-                    ensureDirSyncSafe(DVR_DIR);
-                    pruneOldDvrRecordingsIfNeeded();
-                    var rawChName = String(parsedUrl.query.name || 'channel').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'channel';
-                    var recFileName = 'vortixtv_rec_' + rawChName + '_' + Date.now() + '.ts';
-                    var recFilePath = path.join(DVR_DIR, recFileName);
-                    var fStream = null;
-                    try {
-                        fStream = fs.createWriteStream(recFilePath);
-                        fStream.on('error', function() {});
-                    } catch (eFs) {
-                        fStream = null;
-                    }
-                    var newRecSess = {
-                        active: true,
-                        url: recUrl,
-                        name: rawChName,
-                        fileName: recFileName,
-                        filePath: recFilePath,
-                        startedAt: Date.now(),
-                        stoppedAt: 0,
-                        bytes: 0,
-                        fileStream: fStream,
-                        upReq: null
-                    };
-                    activeRecordingSession = newRecSess;
-                    var startRecordingUpstream = function(targetUrlStr, redirectsLeft, prevalidatedTarget) {
-                        if (!activeRecordingSession || activeRecordingSession !== newRecSess || redirectsLeft <= 0) {
-                            return;
-                        }
-                        var launchHop = function(safeTarget) {
-                            if (!activeRecordingSession || activeRecordingSession !== newRecSess) {
-                                return;
-                            }
-                            var isRecHttps = safeTarget.protocol === 'https:';
-                            var recClient = isRecHttps ? https : http;
-                            var isRecVod = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(safeTarget.path || '') ||
-                                /\/(?:movie|series)\//i.test(safeTarget.path || '');
-                            var recHeaders = {
-                                'User-Agent': isRecVod ? VLC_UA : MAG_UA,
-                                'Accept': '*/*',
-                                'Connection': 'keep-alive',
-                                'Host': safeTarget.host
-                            };
-                            var recCookie = getHostCookieHeader(safeTarget.hostname, '', lastActiveMac);
-                            if (recCookie) {
-                                recHeaders.Cookie = recCookie;
-                            }
-                            if (lastPortalReferer && !isRecVod) {
-                                recHeaders.Referer = lastPortalReferer;
-                            }
-                            var recUpReq = recClient.request({
-                                hostname: safeTarget.resolvedIp || safeTarget.hostname,
-                                port: safeTarget.port,
-                                path: safeTarget.path,
-                                method: 'GET',
-                                headers: recHeaders,
-                                servername: safeTarget.hostname,
-                                agent: isRecHttps ? httpsAgent : httpAgent,
-                                timeout: 20000,
-                                rejectUnauthorized: false
-                            }, function(recRes) {
-                                if (recRes.headers && recRes.headers['set-cookie']) {
-                                    storeSetCookies(safeTarget.hostname, recRes.headers['set-cookie'], lastActiveMac);
-                                }
-                                if (recRes.statusCode >= 300 && recRes.statusCode < 400 && recRes.headers.location && redirectsLeft > 1) {
-                                    var nextRecUrl = url.resolve(targetUrlStr, recRes.headers.location);
-                                    recRes.resume();
-                                    startRecordingUpstream(nextRecUrl, redirectsLeft - 1, null);
-                                    return;
-                                }
-                                if (recRes.statusCode && recRes.statusCode >= 400) {
-                                    recRes.resume();
-                                    if (activeRecordingSession === newRecSess) {
-                                        stopActiveRecordingSession();
-                                    }
-                                    return;
-                                }
-                                recRes.on('data', function(chunk) {
-                                    if (!activeRecordingSession || activeRecordingSession !== newRecSess) {
-                                        return;
-                                    }
-                                    var bChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
-                                    newRecSess.bytes += bChunk.length;
-                                    if (newRecSess.fileStream) {
-                                        try {
-                                            newRecSess.fileStream.write(bChunk);
-                                        } catch (eWr) {}
-                                    }
-                                    if (newRecSess.bytes >= 262144000 || (Date.now() - newRecSess.startedAt) >= 1800000) {
-                                        stopActiveRecordingSession();
-                                    }
-                                });
-                                recRes.on('end', function() {
-                                    if (activeRecordingSession === newRecSess) {
-                                        stopActiveRecordingSession();
-                                    }
-                                });
-                                recRes.on('error', function() {
-                                    if (activeRecordingSession === newRecSess) {
-                                        stopActiveRecordingSession();
-                                    }
-                                });
-                            });
-                            recUpReq.on('socket', function(sock) {
-                                guardUpstreamSocketLookup(sock, recUpReq);
-                            });
-                            recUpReq.on('timeout', function() {
-                                try {
-                                    recUpReq.abort();
-                                } catch (eRecTo) {}
-                                if (activeRecordingSession === newRecSess) {
-                                    stopActiveRecordingSession();
-                                }
-                            });
-                            recUpReq.on('error', function() {
-                                if (activeRecordingSession === newRecSess) {
-                                    stopActiveRecordingSession();
-                                }
-                            });
-                            recUpReq.end();
-                            newRecSess.upReq = recUpReq;
-                        };
-                        if (prevalidatedTarget) {
-                            launchHop(prevalidatedTarget);
-                        } else {
-                            validateSafeUpstreamUrl(targetUrlStr, function(hopErr, hopTarget) {
-                                if (hopErr || !hopTarget) {
-                                    if (activeRecordingSession === newRecSess) {
-                                        stopActiveRecordingSession();
-                                    }
-                                    return;
-                                }
-                                launchHop(hopTarget);
-                            });
-                        }
-                    };
-                    startRecordingUpstream(recUrl, 5, initialTarget);
                     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
                     res.end(JSON.stringify({
                         active: true,
-                        file: recFilePath,
-                        fileName: recFileName,
+                        file: startedSess.filePath,
+                        fileName: startedSess.fileName,
                         bytes: 0,
                         elapsedSec: 0
                     }));
@@ -3386,7 +4114,22 @@ function startProxyServer(port) {
 
         if ((parsedUrl.pathname === '/xtream' || parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv') && ((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'])) {
             var rawTargetUrl = String((parsedUrl.query && parsedUrl.query.url) || req.headers['x-target-url'] || '').trim();
-            var isTextRoute = (parsedUrl.pathname === '/m3u' || parsedUrl.pathname === '/xmltv');
+            var isXmltvRoute = (parsedUrl.pathname === '/xmltv');
+            var wantXmltvJson = isXmltvRoute && parsedUrl.query && String(parsedUrl.query.format || '').toLowerCase() === 'json';
+            var isTextRoute = (parsedUrl.pathname === '/m3u' || isXmltvRoute);
+            var remoteUaOverride = sanitizeHeaderValue(req.headers['x-proxy-ua'] || (parsedUrl.query && parsedUrl.query.ua) || '');
+            var remoteRefOverride = sanitizeHeaderValue(req.headers['x-proxy-referer'] || (parsedUrl.query && (parsedUrl.query.referer || parsedUrl.query.ref)) || '');
+            if (wantXmltvJson) {
+                var cachedXmlJson = xmltvCompactCache[rawTargetUrl];
+                if (cachedXmlJson && (Date.now() - cachedXmlJson.ts) < 600000) {
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Cache-Control': 'no-store'
+                    });
+                    res.end(cachedXmlJson.jsonStr);
+                    return;
+                }
+            }
             var remoteDone = false;
             var currentRemoteReq = null;
             var abortRemoteCatalogFn = function() {
@@ -3445,20 +4188,24 @@ function startProxyServer(port) {
                     }
                     var isHttpsTarget = safeTarget.protocol === 'https:';
                     var hClient = isHttpsTarget ? https : http;
+                    var rHdrs = {
+                        'User-Agent': remoteUaOverride || (isTextRoute ? VLC_UA : MAG_UA),
+                        'Accept': '*/*',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'Host': safeTarget.host
+                    };
+                    if (remoteRefOverride) {
+                        rHdrs.Referer = remoteRefOverride;
+                    }
                     var rReq = hClient.request({
                         hostname: safeTarget.resolvedIp || safeTarget.hostname,
                         port: safeTarget.port,
                         path: safeTarget.path,
                         method: 'GET',
-                        headers: {
-                            'User-Agent': isTextRoute ? VLC_UA : MAG_UA,
-                            'Accept': '*/*',
-                            'Accept-Encoding': 'gzip, deflate',
-                            'Host': safeTarget.host
-                        },
+                        headers: rHdrs,
                         servername: safeTarget.hostname,
                         agent: isHttpsTarget ? httpsAgent : httpAgent,
-                        timeout: 35000,
+                        timeout: isXmltvRoute ? 45000 : 35000,
                         rejectUnauthorized: false
                     }, function(rRes) {
                         if ([301, 302, 303, 307, 308].indexOf(rRes.statusCode) !== -1 && rRes.headers.location) {
@@ -3468,6 +4215,7 @@ function startProxyServer(port) {
                         }
                         var rChunks = [];
                         var totalLen = 0;
+                        var maxDownloadBytes = isTextRoute ? 104857600 : 67108864;
                         rRes.on('data', function(c) {
                             if (remoteDone) {
                                 rChunks = [];
@@ -3478,7 +4226,7 @@ function startProxyServer(port) {
                             }
                             var bufC = Buffer.isBuffer(c) ? c : allocBufferUtf8(c);
                             totalLen += bufC.length;
-                            if (totalLen <= 67108864) {
+                            if (totalLen <= maxDownloadBytes) {
                                 rChunks.push(bufC);
                             }
                         });
@@ -3490,15 +4238,37 @@ function startProxyServer(port) {
                             }
                             var bodyBuf = Buffer.concat(rChunks);
                             rChunks = [];
-                            decodeBufferByEncoding(bodyBuf, rRes.headers['content-encoding'], function(decodedBuf) {
+                            var decoderFn = isTextRoute ? decompressArchiveOrEncodingBuffer : decodeBufferByEncoding;
+                            decoderFn(bodyBuf, rRes.headers['content-encoding'], function(decodedBuf) {
                                 var finalBuf = decodedBuf || bodyBuf;
                                 bodyBuf = null;
                                 if (remoteDone) {
                                     return;
                                 }
                                 remoteDone = true;
+                                var upstreamStatus = rRes.statusCode || 200;
+                                if (wantXmltvJson && upstreamStatus >= 200 && upstreamStatus < 300) {
+                                    var compactObj = parseXmltvCompact(finalBuf.toString('utf8'));
+                                    var compactJsonStr = JSON.stringify(compactObj);
+                                    if (!xmltvCompactCache[rawTargetUrl]) {
+                                        xmltvCompactCacheKeys.push(rawTargetUrl);
+                                        if (xmltvCompactCacheKeys.length > 2) {
+                                            var evictUrl = xmltvCompactCacheKeys.shift();
+                                            delete xmltvCompactCache[evictUrl];
+                                        }
+                                    }
+                                    xmltvCompactCache[rawTargetUrl] = { ts: Date.now(), jsonStr: compactJsonStr };
+                                    if (!res.headersSent) {
+                                        res.writeHead(200, {
+                                            'Content-Type': 'application/json; charset=utf-8',
+                                            'Cache-Control': 'no-store'
+                                        });
+                                    }
+                                    res.end(compactJsonStr);
+                                    return;
+                                }
                                 if (!res.headersSent) {
-                                    res.writeHead(rRes.statusCode || 200, {
+                                    res.writeHead(upstreamStatus, {
                                         'Content-Type': isTextRoute ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
                                         'Cache-Control': 'no-store'
                                     });
@@ -3526,7 +4296,7 @@ function startProxyServer(port) {
                     });
                     rReq.end();
                 });
-            })(rawTargetUrl, 5);
+            })(rawTargetUrl, isXmltvRoute ? 8 : 5);
             return;
         }
 
@@ -3544,11 +4314,13 @@ function startProxyServer(port) {
         var portal = safeDecodeURIComponent(rawPortal).trim();
         var tz = safeDecodeURIComponent(rawTz).trim() || 'UTC';
         var portalKey = normalizePortalKey(portal, mac);
-        var refererUrl = getReferer(portal);
+        var stalkerUaOverride = sanitizeHeaderValue(req.headers['x-proxy-ua'] || '');
+        var stalkerRefOverride = sanitizeHeaderValue(req.headers['x-proxy-referer'] || '');
+        var refererUrl = stalkerRefOverride || getReferer(portal);
         lastPortalReferer = refererUrl;
         lastActiveMac = mac;
         var headers = {
-            'User-Agent': MAG_UA,
+            'User-Agent': stalkerUaOverride || MAG_UA,
             'X-User-Agent': 'Model: MAG250; Link: WiFi',
             'Accept': '*/*',
             'Accept-Encoding': 'gzip, deflate',
@@ -3625,6 +4397,14 @@ function startProxyServer(port) {
             startProxyServer(FALLBACK_PORT);
         }
     });
+    if (scheduledDvrTimer) {
+        clearInterval(scheduledDvrTimer);
+        scheduledDvrTimer = null;
+    }
+    scheduledDvrTimer = setInterval(tickScheduledDvrJobs, 15000);
+    if (scheduledDvrTimer && typeof scheduledDvrTimer.unref === 'function') {
+        scheduledDvrTimer.unref();
+    }
     server.listen(listenPort, '0.0.0.0', function() {
         activeListenPort = listenPort;
         console.log('Stalker proxy listening on http://127.0.0.1:' + listenPort);
@@ -3632,7 +4412,271 @@ function startProxyServer(port) {
     return server;
 }
 
+function startDvrRecordingSession(opts, cb) {
+    var recUrl = String((opts && opts.url) || '').trim();
+    var rawChName = String((opts && opts.name) || 'channel').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'channel';
+    var customUa = sanitizeHeaderValue((opts && opts.ua) || '');
+    var customRef = sanitizeHeaderValue((opts && opts.referer) || '');
+    var maxDurationMs = Math.max(60000, Number((opts && opts.maxDurationMs) || 1800000));
+    var scheduleId = String((opts && opts.scheduleId) || '');
+    var stopAtMs = Number((opts && opts.stopAtMs) || 0);
+    validateSafeUpstreamUrl(recUrl, function(ssrfErr, initialTarget) {
+        if (ssrfErr || !initialTarget) {
+            if (cb) {
+                cb(ssrfErr || new Error('Blocked recording URL'), null);
+            }
+            return;
+        }
+        stopActiveRecordingSession();
+        ensureDirSyncSafe(DVR_DIR);
+        pruneOldDvrRecordingsIfNeeded();
+        var recFileName = 'vortixtv_rec_' + rawChName + '_' + Date.now() + '.ts';
+        var recFilePath = path.join(DVR_DIR, recFileName);
+        var fStream = null;
+        try {
+            fStream = fs.createWriteStream(recFilePath);
+            fStream.on('error', function() {});
+        } catch (eFs) {
+            fStream = null;
+        }
+        var newRecSess = {
+            active: true,
+            url: recUrl,
+            name: rawChName,
+            fileName: recFileName,
+            filePath: recFilePath,
+            scheduleId: scheduleId,
+            stopAtMs: stopAtMs,
+            startedAt: Date.now(),
+            stoppedAt: 0,
+            bytes: 0,
+            fileStream: fStream,
+            upReq: null
+        };
+        activeRecordingSession = newRecSess;
+        var markSchedJobFinished = function(finalStatus, errText) {
+            if (!scheduleId) {
+                return;
+            }
+            for (var ji = 0; ji < scheduledDvrJobs.length; ji++) {
+                if (scheduledDvrJobs[ji] && scheduledDvrJobs[ji].id === scheduleId) {
+                    scheduledDvrJobs[ji].status = finalStatus;
+                    scheduledDvrJobs[ji].fileName = recFileName;
+                    if (errText) {
+                        scheduledDvrJobs[ji].error = String(errText);
+                    }
+                    saveScheduledDvrJobsSync();
+                    break;
+                }
+            }
+        };
+        var startRecordingUpstream = function(targetUrlStr, redirectsLeft, prevalidatedTarget) {
+            if (!activeRecordingSession || activeRecordingSession !== newRecSess || redirectsLeft <= 0) {
+                return;
+            }
+            var launchHop = function(safeTarget) {
+                if (!activeRecordingSession || activeRecordingSession !== newRecSess) {
+                    return;
+                }
+                var isRecHttps = safeTarget.protocol === 'https:';
+                var recClient = isRecHttps ? https : http;
+                var isRecVod = /\.(?:mkv|mp4|avi|mov)(?:\?|$)/i.test(safeTarget.path || '') ||
+                    /\/(?:movie|series)\//i.test(safeTarget.path || '');
+                var recHeaders = {
+                    'User-Agent': customUa || (isRecVod ? VLC_UA : MAG_UA),
+                    'Accept': '*/*',
+                    'Connection': 'keep-alive',
+                    'Host': safeTarget.host
+                };
+                var recCookie = getHostCookieHeader(safeTarget.hostname, '', lastActiveMac);
+                if (recCookie) {
+                    recHeaders.Cookie = recCookie;
+                }
+                if (customRef) {
+                    recHeaders.Referer = customRef;
+                } else if (lastPortalReferer && !isRecVod) {
+                    recHeaders.Referer = lastPortalReferer;
+                }
+                var recUpReq = recClient.request({
+                    hostname: safeTarget.resolvedIp || safeTarget.hostname,
+                    port: safeTarget.port,
+                    path: safeTarget.path,
+                    method: 'GET',
+                    headers: recHeaders,
+                    servername: safeTarget.hostname,
+                    agent: isRecHttps ? httpsAgent : httpAgent,
+                    timeout: 20000,
+                    rejectUnauthorized: false
+                }, function(recRes) {
+                    if (recRes.headers && recRes.headers['set-cookie']) {
+                        storeSetCookies(safeTarget.hostname, recRes.headers['set-cookie'], lastActiveMac);
+                    }
+                    if (recRes.statusCode >= 300 && recRes.statusCode < 400 && recRes.headers.location && redirectsLeft > 1) {
+                        var nextRecUrl = url.resolve(targetUrlStr, recRes.headers.location);
+                        recRes.resume();
+                        startRecordingUpstream(nextRecUrl, redirectsLeft - 1, null);
+                        return;
+                    }
+                    if (recRes.statusCode && recRes.statusCode >= 400) {
+                        recRes.resume();
+                        if (activeRecordingSession === newRecSess) {
+                            stopActiveRecordingSession();
+                            markSchedJobFinished('failed', 'HTTP ' + recRes.statusCode);
+                        }
+                        return;
+                    }
+                    recRes.on('data', function(chunk) {
+                        if (!activeRecordingSession || activeRecordingSession !== newRecSess) {
+                            return;
+                        }
+                        var bChunk = Buffer.isBuffer(chunk) ? chunk : allocBufferUtf8(chunk);
+                        newRecSess.bytes += bChunk.length;
+                        if (newRecSess.fileStream) {
+                            try {
+                                newRecSess.fileStream.write(bChunk);
+                            } catch (eWr) {}
+                        }
+                        var hitSizeCap = newRecSess.bytes >= 262144000;
+                        var hitDurationCap = (Date.now() - newRecSess.startedAt) >= maxDurationMs;
+                        var hitStopTime = stopAtMs > 0 && Date.now() >= stopAtMs;
+                        if (hitSizeCap || hitDurationCap || hitStopTime) {
+                            stopActiveRecordingSession();
+                            markSchedJobFinished('completed', '');
+                        }
+                    });
+                    recRes.on('end', function() {
+                        if (activeRecordingSession === newRecSess) {
+                            stopActiveRecordingSession();
+                            markSchedJobFinished('completed', '');
+                        }
+                    });
+                    recRes.on('error', function(recErr) {
+                        if (activeRecordingSession === newRecSess) {
+                            stopActiveRecordingSession();
+                            markSchedJobFinished('failed', recErr ? recErr.message : 'Stream error');
+                        }
+                    });
+                });
+                recUpReq.on('socket', function(sock) {
+                    guardUpstreamSocketLookup(sock, recUpReq);
+                });
+                recUpReq.on('timeout', function() {
+                    try {
+                        recUpReq.abort();
+                    } catch (eRecTo) {}
+                    if (activeRecordingSession === newRecSess) {
+                        stopActiveRecordingSession();
+                        markSchedJobFinished('failed', 'Timeout');
+                    }
+                });
+                recUpReq.on('error', function(eUp) {
+                    if (activeRecordingSession === newRecSess) {
+                        stopActiveRecordingSession();
+                        markSchedJobFinished('failed', eUp ? eUp.message : 'Connection error');
+                    }
+                });
+                recUpReq.end();
+                newRecSess.upReq = recUpReq;
+            };
+            if (prevalidatedTarget) {
+                launchHop(prevalidatedTarget);
+            } else {
+                validateSafeUpstreamUrl(targetUrlStr, function(hopErr, hopTarget) {
+                    if (hopErr || !hopTarget) {
+                        if (activeRecordingSession === newRecSess) {
+                            stopActiveRecordingSession();
+                            markSchedJobFinished('failed', hopErr ? hopErr.message : 'Redirect blocked');
+                        }
+                        return;
+                    }
+                    launchHop(hopTarget);
+                });
+            }
+        };
+        startRecordingUpstream(recUrl, 5, initialTarget);
+        if (cb) {
+            cb(null, newRecSess);
+        }
+    });
+}
+
+function tickScheduledDvrJobs() {
+    var nowMs = Date.now();
+    var nowSec = Math.floor(nowMs / 1000);
+    var changed = false;
+    if (activeRecordingSession && activeRecordingSession.active && activeRecordingSession.scheduleId && activeRecordingSession.stopAtMs > 0 && nowMs >= activeRecordingSession.stopAtMs) {
+        var finId = activeRecordingSession.scheduleId;
+        var finFile = activeRecordingSession.fileName || '';
+        stopActiveRecordingSession();
+        for (var k = 0; k < scheduledDvrJobs.length; k++) {
+            if (scheduledDvrJobs[k] && scheduledDvrJobs[k].id === finId) {
+                scheduledDvrJobs[k].status = 'completed';
+                scheduledDvrJobs[k].fileName = finFile;
+                changed = true;
+            }
+        }
+    }
+    var keptJobs = [];
+    for (var i = 0; i < scheduledDvrJobs.length; i++) {
+        var job = scheduledDvrJobs[i];
+        if (!job) {
+            changed = true;
+            continue;
+        }
+        if ((job.status === 'completed' || job.status === 'failed' || job.status === 'missed') && (nowSec - Number(job.stopTs || 0)) > 172800) {
+            changed = true;
+            continue;
+        }
+        if (job.status === 'pending' && nowSec >= Number(job.stopTs || 0)) {
+            job.status = 'missed';
+            changed = true;
+        }
+        keptJobs.push(job);
+    }
+    if (keptJobs.length !== scheduledDvrJobs.length) {
+        scheduledDvrJobs = keptJobs;
+        changed = true;
+    }
+    if (!activeRecordingSession) {
+        for (var j = 0; j < scheduledDvrJobs.length; j++) {
+            var cand = scheduledDvrJobs[j];
+            if (cand && cand.status === 'pending' && nowSec >= cand.startTs && nowSec < (cand.stopTs - 10)) {
+                cand.status = 'recording';
+                changed = true;
+                var remMs = Math.max(60000, Math.min(14400000, (cand.stopTs - nowSec) * 1000));
+                (function(targetJob) {
+                    startDvrRecordingSession({
+                        url: targetJob.url,
+                        name: targetJob.chName + '_' + targetJob.progName,
+                        ua: targetJob.ua,
+                        referer: targetJob.referer,
+                        scheduleId: targetJob.id,
+                        stopAtMs: targetJob.stopTs * 1000,
+                        maxDurationMs: remMs
+                    }, function(startErr, sessObj) {
+                        if (startErr || !sessObj) {
+                            targetJob.status = 'failed';
+                            targetJob.error = startErr ? startErr.message : 'Failed to start scheduled recording';
+                        } else {
+                            targetJob.fileName = sessObj.fileName || '';
+                        }
+                        saveScheduledDvrJobsSync();
+                    });
+                })(cand);
+                break;
+            }
+        }
+    }
+    if (changed) {
+        saveScheduledDvrJobsSync();
+    }
+}
+
 function stopProxyServer(cb) {
+    if (scheduledDvrTimer) {
+        clearInterval(scheduledDvrTimer);
+        scheduledDvrTimer = null;
+    }
     if (!server) {
         if (cb) {
             cb();
@@ -3657,8 +4701,14 @@ module.exports = {
     isLoopbackClient: isLoopbackClient,
     isBlockedUpstreamIp: isBlockedUpstreamIp,
     sanitizeDvrFileName: sanitizeDvrFileName,
+    sanitizeHeaderValue: sanitizeHeaderValue,
+    validateBackupPayload: validateBackupPayload,
+    normalizeScheduledRecording: normalizeScheduledRecording,
     sniffStreamPayload: sniffStreamPayload,
     computeStreamDiagnosticVerdict: computeStreamDiagnosticVerdict,
+    validateAndNormalizeSubtitleUpload: validateAndNormalizeSubtitleUpload,
+    decompressArchiveOrEncodingBuffer: decompressArchiveOrEncodingBuffer,
+    parseXmltvCompact: parseXmltvCompact,
     getPairingPin: function() {
         return currentPairingPin;
     },
