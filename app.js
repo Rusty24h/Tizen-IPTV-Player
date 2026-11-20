@@ -1,8 +1,8 @@
 /* jshint browser: true, devel: true, undef: true, unused: true, strict: true, esversion: 5 */
 /* global tizen, webapis, shaka, Promise, Intl, Blob, URL, FileReader */
 /*
- * VortixTV for Samsung Tizen TV
  * Complete Application Controller (app.js)
+ * Compatible with Tizen 4.0+ WebEngine & Desktop Browsers (ES5/ES6 safe)
  */
 (function() {
     'use strict';
@@ -12,8 +12,8 @@
     var modes = [
         { id: 'live', title: 'Live TV', icon: '📺' },
         { id: 'vod', title: 'Movies', icon: '🎬' },
-        { id: 'series', title: 'TV Series', icon: '📁' },
-        { id: 'search', title: 'Global Search', icon: '🔍' },
+        { id: 'series', title: 'Series', icon: '📁' },
+        { id: 'search', title: 'Search', icon: '🔍' },
         { id: 'profiles', title: 'Profiles', icon: '👤' },
         { id: 'settings', title: 'Settings', icon: '⚙' }
     ];
@@ -101,6 +101,9 @@
     var nextEpDismissedForId = null;
     var uiVisible = true;
     var zapTimeout = null;
+    var pendingZapIdx = -1;
+    var pendingZapListRef = null;
+    var pendingZapTargetId = '';
     var osdTimeout = null;
     var previewEpgTimeout = null;
     var numBuffer = '';
@@ -179,12 +182,20 @@
     var searchResults = [];
     var searchDebounce = null;
     var searchSeq = 0;
+    var searchScopeFilter = 'all';
+    var searchScopeIdx = 0;
+    var searchAsyncPending = false;
+    var searchCountsSummary = null;
 
     // Filter Modal 2D Grid State
     var filterOpen = false;
     var filterRow = 0;
     var filterCol = 0;
     var filterTargetCol = 'items';
+    var filterInitialText = '';
+    var xmltvAutoRefreshTimer = null;
+    var XMLTV_BACKGROUND_REFRESH_MS = 21600000;
+    var XMLTV_CHECK_INTERVAL_MS = 1800000;
 
     // Full EPG Modal State
     var epgModalOpen = false;
@@ -197,9 +208,13 @@
     var epgGridChIdx = 0;
     var epgGridSlotIdx = 0;
     var epgGridWindowStartSec = 0;
+    var scheduledDvrList = [];
+    var backupSyncTimer = null;
+    var settingsRightStartRow = 5;
 
     // Interactive Audio & Subtitle Track Picker Modal State
     var tracksModalOpen = false;
+    var tracksModalMode = 'audio';
     var tracksModalItems = [];
     var tracksModalIdx = 0;
     var subtitleColor = localStorage.getItem('cfg_sub_color') || 'white';
@@ -208,10 +223,22 @@
     window._subtitleDelayMs = subtitleDelayMs;
     var subtitleDelayTimer = null;
     var lanSetupPollTimer = null;
+    var externalSubtitleData = null;
+    var externalSubtitleAutoSelectPending = false;
+    var currentExternalSubActive = false;
+    var externalSubtitleTickTimer = null;
+    var externalSubtitleLastText = '';
+    var playbackSubtitlePollTimer = null;
+    var prefAudioLang = localStorage.getItem('cfg_pref_audio_lang') || '';
+    var prefSubLang = localStorage.getItem('cfg_pref_sub_lang');
+    if (prefSubLang === null) {
+        prefSubLang = '';
+    }
 
     // Fullscreen Quick Channel Zapper Drawer State
     var miniZapOpen = false;
     var miniZapIdx = 0;
+    var miniZapFavOnly = false;
 
     // Sleep Timer, Reminders, Playback Speed, Bookmarks & DVR Recording State
     var sleepTimerMinutes = 0;
@@ -358,6 +385,9 @@
         document.body.appendChild(inpM3uFileHiddenEl);
     }
     var inpEpgUrlEl = document.getElementById('inp-epg-url');
+    var selUaPresetEl = document.getElementById('sel-ua-preset');
+    var inpProfileUaEl = document.getElementById('inp-profile-ua');
+    var inpProfileRefererEl = document.getElementById('inp-profile-referer');
     var selEpgOffsetEl = document.getElementById('sel-epg-offset');
     var selBufferModeEl = document.getElementById('sel-buffer-mode');
     var lanSetupUrlEl = document.getElementById('lan-setup-url');
@@ -365,6 +395,8 @@
     var inpPinEl = document.getElementById('inp-pin');
     var selStartupModeEl = document.getElementById('sel-startup-mode');
     var selOsdTimeoutEl = document.getElementById('sel-osd-timeout');
+    var selPrefAudioLangEl = document.getElementById('sel-pref-audio-lang');
+    var selPrefSubLangEl = document.getElementById('sel-pref-sub-lang');
     var btnSaveEl = document.getElementById('btn-save');
     var btnProfileNewEl = document.getElementById('btn-profile-new');
     var btnProfileDelEl = document.getElementById('btn-profile-del');
@@ -373,6 +405,13 @@
     var btnBackupExportEl = document.getElementById('btn-backup-export');
     var btnBackupImportEl = document.getElementById('btn-backup-import');
     var m3uRawMemoryCache = {};
+    var UA_PRESET_VALUES = {
+        'default': '',
+        vlc: 'VLC/3.0.20 LibVLC/3.0.20',
+        tivimate: 'TiviMate/4.7.0 (Linux; Android 11)',
+        chrome: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        tizen: 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.5 TV Safari/537.36'
+    };
 
     if (!subtitleBoxEl) {
         subtitleBoxEl = document.createElement('div');
@@ -427,8 +466,10 @@
         inpPortalEl, inpMacEl,
         inpXtreamUrlEl, inpXtreamUserEl, inpXtreamPassEl, btnXtreamPassToggleEl,
         inpM3uUrlEl, btnM3uFileEl, btnM3uClearEl,
-        inpEpgUrlEl, selEpgOffsetEl, selBufferModeEl,
+        inpEpgUrlEl, selUaPresetEl, inpProfileUaEl, inpProfileRefererEl,
+        selEpgOffsetEl, selBufferModeEl,
         selThemeEl, inpPinEl, selStartupModeEl, selOsdTimeoutEl,
+        selPrefAudioLangEl, selPrefSubLangEl,
         btnSaveEl, btnProfileNewEl, btnProfileDelEl,
         btnTestConnEl, btnRestartEl, btnCancelEl, btnBackupExportEl, btnBackupImportEl
     ].filter(Boolean);
@@ -486,8 +527,17 @@
         if (inpEpgUrlEl) {
             rows.push([inpEpgUrlEl]);
         }
+        var hdrRow = [selUaPresetEl, inpProfileUaEl, inpProfileRefererEl].filter(Boolean);
+        if (hdrRow.length > 0) {
+            rows.push(hdrRow);
+        }
+        settingsRightStartRow = rows.length;
         rows.push([selThemeEl, inpPinEl].filter(Boolean));
         rows.push([selEpgOffsetEl, selBufferModeEl, selStartupModeEl, selOsdTimeoutEl].filter(Boolean));
+        var langRow = [selPrefAudioLangEl, selPrefSubLangEl].filter(Boolean);
+        if (langRow.length > 0) {
+            rows.push(langRow);
+        }
         rows.push([btnSaveEl, btnProfileNewEl, btnProfileDelEl, btnCancelEl].filter(Boolean));
         rows.push([typeof btnTestConnEl !== 'undefined' ? btnTestConnEl : null, btnBackupExportEl, btnBackupImportEl, btnRestartEl].filter(Boolean));
         settingsGrid = rows.filter(function(r) { return r.length > 0; });
@@ -535,11 +585,16 @@
     var pinEls = [inpPinVerifyEl, btnPinUnlockEl, btnPinCancelEl].filter(Boolean);
 
     var searchModal = document.getElementById('search-modal');
+    var searchScopeBarEl = document.getElementById('search-scope-bar');
+    var searchScopeTabs = searchScopeBarEl ? Array.prototype.slice.call(searchScopeBarEl.querySelectorAll('.search-scope-tab')) : [];
     var searchInput = document.getElementById('inp-search');
+    var btnSearchClearEl = document.getElementById('btn-search-clear');
+    var searchStatusBarEl = document.getElementById('search-status-bar');
     var searchResultsContainer = document.getElementById('search-results');
     var filterModal = document.getElementById('filter-modal');
     var filterModalTitle = document.getElementById('filter-modal-title');
     var inpFilterEl = document.getElementById('inp-filter');
+    var filterStatusMsgEl = document.getElementById('filter-status-msg');
     var btnFilterApplyEl = document.getElementById('btn-filter-apply');
     var btnFilterClearEl = document.getElementById('btn-filter-clear');
     var filterGrid = [
@@ -550,6 +605,7 @@
 
     var epgModal = document.getElementById('epg-modal');
     var epgModalTitle = document.getElementById('epg-modal-title');
+    var btnEpgRecEl = document.getElementById('btn-epg-rec');
     var btnEpgOffsetEl = document.getElementById('btn-epg-offset');
     var btnEpgViewToggleEl = document.getElementById('btn-epg-view-toggle');
     var epgModalList = document.getElementById('epg-modal-list');
@@ -650,6 +706,10 @@
             }
         } catch (ePos) {}
         applySubtitleAppearance();
+        if (currentExternalSubActive) {
+            externalSubtitleLastText = '';
+            renderExternalSubtitleAtPlaybackTime();
+        }
         showToast('⏱ Subtitle Sync: ' + formatSubtitleDelayLabel(subtitleDelayMs));
     }
 
@@ -737,6 +797,323 @@
             adjustedDur = Math.max(500, adjustedDur + subtitleDelayMs);
         }
         showSubtitleCueNow(cleaned, adjustedDur);
+    }
+
+    function parseExternalSubtitleTimeMs(tsStr) {
+        var m = String(tsStr || '').trim().match(/^(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})$/);
+        if (!m) {
+            return -1;
+        }
+        var hrs = m[1] !== undefined ? parseInt(m[1], 10) : 0;
+        var mins = parseInt(m[2], 10);
+        var secs = parseInt(m[3], 10);
+        var msRaw = m[4];
+        while (msRaw.length < 3) {
+            msRaw += '0';
+        }
+        var ms = parseInt(msRaw.slice(0, 3), 10);
+        if (!isFinite(hrs) || !isFinite(mins) || !isFinite(secs) || !isFinite(ms)) {
+            return -1;
+        }
+        return ((hrs * 3600) + (mins * 60) + secs) * 1000 + ms;
+    }
+
+    function cleanExternalSubtitleCueText(rawText) {
+        return String(rawText || '')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/\{[^}]*\}/g, '')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, '\'')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    function parseExternalSubtitleCues(rawText) {
+        var normalized = String(rawText || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+        if (!normalized) {
+            return [];
+        }
+        var blocks = normalized.split(/\n{2,}/);
+        var cues = [];
+        for (var b = 0; b < blocks.length; b++) {
+            var block = blocks[b];
+            if (!block) {
+                continue;
+            }
+            var lines = block.split('\n');
+            var firstLineTrim = String(lines[0] || '').trim();
+            if (/^WEBVTT(?:\s|$)/i.test(firstLineTrim) || /^(?:NOTE|STYLE|REGION)(?:\s|$)/i.test(firstLineTrim)) {
+                if (block.indexOf('-->') === -1) {
+                    continue;
+                }
+            }
+            var arrowIdx = -1;
+            for (var li = 0; li < lines.length; li++) {
+                if (lines[li].indexOf('-->') !== -1) {
+                    arrowIdx = li;
+                    break;
+                }
+            }
+            if (arrowIdx === -1) {
+                continue;
+            }
+            var timeLine = String(lines[arrowIdx] || '');
+            var arrowMatch = timeLine.match(/((?:\d{1,3}:)?\d{1,2}:\d{2}[,.]\d{1,3})\s*-->\s*((?:\d{1,3}:)?\d{1,2}:\d{2}[,.]\d{1,3})/);
+            if (!arrowMatch) {
+                continue;
+            }
+            var startMs = parseExternalSubtitleTimeMs(arrowMatch[1]);
+            var endMs = parseExternalSubtitleTimeMs(arrowMatch[2]);
+            if (startMs < 0 || endMs <= startMs) {
+                continue;
+            }
+            var textLines = lines.slice(arrowIdx + 1);
+            var cleaned = cleanExternalSubtitleCueText(textLines.join('\n'));
+            if (!cleaned) {
+                continue;
+            }
+            cues.push({
+                startMs: startMs,
+                endMs: endMs,
+                text: cleaned
+            });
+        }
+        cues.sort(function(a, b) {
+            return a.startMs - b.startMs;
+        });
+        return cues;
+    }
+
+    function getActivePlaybackTimeMs() {
+        if (activePlaybackBackend === 'shaka' && shakaVideoEl) {
+            var sSec = Number(shakaVideoEl.currentTime);
+            if (isFinite(sSec) && sSec >= 0) {
+                return Math.floor(sSec * 1000);
+            }
+        }
+        try {
+            if (typeof webapis !== 'undefined' && webapis.avplay && avplaySessionOpened && typeof webapis.avplay.getCurrentTime === 'function') {
+                var avMs = Number(webapis.avplay.getCurrentTime());
+                if (isFinite(avMs) && avMs >= 0) {
+                    return avMs;
+                }
+            }
+        } catch (eAvSubTime) {}
+        return Number(vodCurrentMs) || 0;
+    }
+
+    function renderExternalSubtitleAtPlaybackTime() {
+        if (!currentExternalSubActive || !subtitlesEnabled || !externalSubtitleData || !Array.isArray(externalSubtitleData.cues) || externalSubtitleData.cues.length === 0 || !currentPlayingItem) {
+            return;
+        }
+        var cues = externalSubtitleData.cues;
+        var lookupMs = getActivePlaybackTimeMs() - (Number(subtitleDelayMs) || 0);
+        var lo = 0;
+        var hi = cues.length - 1;
+        while (lo <= hi) {
+            var mid = (lo + hi) >> 1;
+            if (cues[mid].startMs <= lookupMs) {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        var activeLines = [];
+        var startScan = Math.max(0, hi - 8);
+        for (var i = startScan; i < cues.length; i++) {
+            var c = cues[i];
+            if (c.startMs > lookupMs) {
+                break;
+            }
+            if (c.startMs <= lookupMs && lookupMs < c.endMs) {
+                if (activeLines.indexOf(c.text) === -1) {
+                    activeLines.push(c.text);
+                }
+            }
+        }
+        var joined = activeLines.join('\n').trim();
+        if (joined !== externalSubtitleLastText) {
+            externalSubtitleLastText = joined;
+            if (joined) {
+                showSubtitleCueNow(joined, 0);
+            } else {
+                clearSubtitleBox();
+            }
+        }
+    }
+
+    function stopExternalSubtitleTicker() {
+        if (externalSubtitleTickTimer) {
+            clearInterval(externalSubtitleTickTimer);
+            externalSubtitleTickTimer = null;
+        }
+        externalSubtitleLastText = '';
+    }
+
+    function startExternalSubtitleTicker() {
+        stopExternalSubtitleTicker();
+        if (!currentExternalSubActive || !externalSubtitleData || !externalSubtitleData.cues || externalSubtitleData.cues.length === 0) {
+            return;
+        }
+        renderExternalSubtitleAtPlaybackTime();
+        externalSubtitleTickTimer = setInterval(function() {
+            renderExternalSubtitleAtPlaybackTime();
+        }, 120);
+    }
+
+    function findExternalSubtitleTrackIndex() {
+        for (var i = 0; i < textTracks.length; i++) {
+            if (textTracks[i] && textTracks[i]._isExternal) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    function applyReceivedExternalSubtitle(subPayload, quiet) {
+        if (!subPayload) {
+            return false;
+        }
+        if (subPayload.cleared) {
+            clearReceivedExternalSubtitle(quiet);
+            return true;
+        }
+        var cues = parseExternalSubtitleCues(subPayload.rawText || '');
+        if (!cues || cues.length === 0) {
+            if (!quiet) {
+                showToast('⚠ Uploaded subtitle had no readable cues');
+            }
+            return false;
+        }
+        var subName = String(subPayload.name || subPayload.fileName || 'External Subtitle').trim() || 'External Subtitle';
+        var subFormat = String(subPayload.format || 'srt').toLowerCase() === 'vtt' ? 'vtt' : 'srt';
+        externalSubtitleData = {
+            id: String(subPayload.id || ('ext_sub_' + Date.now())),
+            name: subName,
+            fileName: String(subPayload.fileName || (subName + '.' + subFormat)),
+            format: subFormat,
+            cues: cues,
+            receivedAt: Number(subPayload.ts) || Date.now()
+        };
+        if (subPayload.rawText && String(subPayload.rawText).length <= 900000) {
+            try {
+                safeSetStorage('vortixtv_ext_sub_v1', JSON.stringify({
+                    id: externalSubtitleData.id,
+                    name: externalSubtitleData.name,
+                    fileName: externalSubtitleData.fileName,
+                    format: externalSubtitleData.format,
+                    rawText: String(subPayload.rawText),
+                    ts: externalSubtitleData.receivedAt
+                }));
+            } catch (eSaveSub) {}
+        }
+        refreshTrackLists();
+        if (currentPlayingItem) {
+            var extIdx = findExternalSubtitleTrackIndex();
+            if (extIdx !== -1) {
+                externalSubtitleAutoSelectPending = false;
+                selectSubtitleTrackByArrayIndex(extIdx, Boolean(quiet));
+            }
+            if (!quiet) {
+                showToast('💬 External Subtitle Loaded: ' + externalSubtitleData.name + ' (' + cues.length + ' cues)');
+            }
+        } else {
+            externalSubtitleAutoSelectPending = !quiet;
+            if (!quiet) {
+                showToast('💬 Subtitle Ready: ' + externalSubtitleData.name + ' (' + cues.length + ' cues) — Play a video to use it');
+            }
+        }
+        if (tracksModalOpen) {
+            openTracksModal('sub');
+        }
+        return true;
+    }
+
+    function clearReceivedExternalSubtitle(quiet) {
+        var wasExtActive = currentExternalSubActive;
+        externalSubtitleData = null;
+        externalSubtitleAutoSelectPending = false;
+        currentExternalSubActive = false;
+        stopExternalSubtitleTicker();
+        if (wasExtActive) {
+            textIdx = -1;
+            clearSubtitleBox();
+        }
+        try {
+            localStorage.removeItem('vortixtv_ext_sub_v1');
+        } catch (eRmSub) {}
+        refreshTrackLists();
+        if (!quiet) {
+            showToast('✕ Removed External LAN Subtitle');
+        }
+        if (tracksModalOpen) {
+            openTracksModal('sub');
+        }
+    }
+
+    function restoreSavedExternalSubtitle() {
+        if (externalSubtitleData) {
+            return;
+        }
+        try {
+            var rawStored = localStorage.getItem('vortixtv_ext_sub_v1');
+            if (rawStored) {
+                var parsed = JSON.parse(rawStored);
+                if (parsed && parsed.rawText) {
+                    applyReceivedExternalSubtitle(parsed, true);
+                    return;
+                }
+            }
+        } catch (eRestSub) {}
+        if (api && api.proxyUrl) {
+            proxyFetch(api.proxyUrl + '/external-subtitle', { method: 'GET' }).then(function(r) {
+                return r.json();
+            }).then(function(d) {
+                if (!externalSubtitleData && d && d.ok && d.subtitle && d.subtitle.rawText) {
+                    applyReceivedExternalSubtitle(d.subtitle, true);
+                }
+            }).catch(function() {});
+        }
+    }
+
+    function checkPendingRemoteSubtitleOnce() {
+        if (!api || !api.proxyUrl) {
+            return;
+        }
+        proxyFetch(api.proxyUrl + '/remote-setup?consume_sub=1', { method: 'GET' }).then(function(r) {
+            return r.json();
+        }).then(function(data) {
+            if (data && data.pendingSubtitle) {
+                applyReceivedExternalSubtitle(data.pendingSubtitle, false);
+            }
+        }).catch(function() {});
+    }
+
+    function stopPlaybackSubtitlePoll() {
+        if (playbackSubtitlePollTimer) {
+            clearInterval(playbackSubtitlePollTimer);
+            playbackSubtitlePollTimer = null;
+        }
+    }
+
+    function startPlaybackSubtitlePoll() {
+        stopPlaybackSubtitlePoll();
+        checkPendingRemoteSubtitleOnce();
+        playbackSubtitlePollTimer = setInterval(function() {
+            if (!currentPlayingItem) {
+                stopPlaybackSubtitlePoll();
+                return;
+            }
+            if (!settingsOpen) {
+                checkPendingRemoteSubtitleOnce();
+            }
+        }, 4000);
     }
 
     var lastIndexedChannelsRef = null;
@@ -871,6 +1248,49 @@
         return fallback;
     }
 
+    function sanitizeHeaderString(val) {
+        return String(val || '').replace(/[\r\n]+/g, ' ').trim();
+    }
+    function detectUaPresetKey(uaVal) {
+        var clean = sanitizeHeaderString(uaVal);
+        if (!clean) {
+            return 'default';
+        }
+        var keys = Object.keys(UA_PRESET_VALUES);
+        for (var i = 0; i < keys.length; i++) {
+            if (keys[i] !== 'default' && UA_PRESET_VALUES[keys[i]] === clean) {
+                return keys[i];
+            }
+        }
+        return 'custom';
+    }
+    function resolveEffectivePortalHeaders(profile, item) {
+        var hdrs = (item && item.streamHeaders && typeof item.streamHeaders === 'object') ? item.streamHeaders : {};
+        var itemUa = sanitizeHeaderString((item && item.userAgent) || hdrs['User-Agent'] || hdrs['user-agent'] || '');
+        var itemRef = sanitizeHeaderString((item && item.httpReferer) || hdrs.Referer || hdrs.referer || hdrs.Referrer || hdrs.referrer || '');
+        var profUa = sanitizeHeaderString((profile && profile.userAgent) || '');
+        var profRef = sanitizeHeaderString((profile && profile.httpReferer) || '');
+        return {
+            userAgent: itemUa || profUa || '',
+            httpReferer: itemRef || profRef || ''
+        };
+    }
+    function appendProxyHeaderQuery(urlStr, hdrObj) {
+        if (!urlStr || !hdrObj) {
+            return urlStr;
+        }
+        var out = String(urlStr);
+        var ua = sanitizeHeaderString(hdrObj.userAgent);
+        var ref = sanitizeHeaderString(hdrObj.httpReferer);
+        if (ua && out.indexOf('ua=') === -1) {
+            out += (out.indexOf('?') === -1 ? '?' : '&') + 'ua=' + encodeURIComponent(ua);
+        }
+        if (ref && out.indexOf('referer=') === -1) {
+            out += (out.indexOf('?') === -1 ? '?' : '&') + 'referer=' + encodeURIComponent(ref);
+        }
+        return out;
+    }
+
     function loadProfiles() {
         var saved = safeGetJson('cfg_profiles', null);
         var legacyPortal = localStorage.getItem('cfg_portal') || '';
@@ -887,7 +1307,9 @@
                 xtreamPass: '',
                 m3uUrl: '',
                 m3uName: '',
-                epgUrl: ''
+                epgUrl: '',
+                userAgent: '',
+                httpReferer: ''
             }];
             safeSetStorage('cfg_profiles', JSON.stringify(saved));
         }
@@ -900,6 +1322,12 @@
             }
             if (saved[p].epgOffsetHours === undefined) {
                 saved[p].epgOffsetHours = 0;
+            }
+            if (saved[p].userAgent === undefined) {
+                saved[p].userAgent = '';
+            }
+            if (saved[p].httpReferer === undefined) {
+                saved[p].httpReferer = '';
             }
         }
         profiles = saved;
@@ -938,6 +1366,8 @@
         safeSetStorage('cfg_m3u_url', prof.m3uUrl || '');
         safeSetStorage('cfg_epg_url', prof.epgUrl || '');
         safeSetStorage('cfg_epg_offset', String(offsetHours));
+        safeSetStorage('cfg_user_agent', sanitizeHeaderString(prof.userAgent));
+        safeSetStorage('cfg_http_referer', sanitizeHeaderString(prof.httpReferer));
         if (profileBadgeEl) {
             var typeTag = pType === 'xtream' ? ' [XC]' : ((pType === 'm3u') ? ' [M3U]' : '');
             profileBadgeEl.textContent = '⚡ ' + (prof.name || 'Default') + typeTag;
@@ -953,7 +1383,7 @@
                 return profiles[i];
             }
         }
-        return profiles[0] || { id: 'prof_default', name: 'Main Portal', type: 'stalker', portal: '', mac: '' };
+        return profiles[0] || { id: 'prof_default', name: 'Main Portal', type: 'stalker', portal: '', mac: '', userAgent: '', httpReferer: '' };
     }
     function isProfileConfigured(prof) {
         if (!prof) {
@@ -1299,6 +1729,42 @@
         return attrs;
     }
 
+    function parseM3uHeaderAttributesMap(attrLine) {
+        var attrs = {};
+        var regex = /([a-zA-Z0-9_.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))/g;
+        var match;
+        while ((match = regex.exec(attrLine)) !== null) {
+            var key = match[1].toLowerCase();
+            var val = match[2] !== undefined ? match[2] : (match[3] !== undefined ? match[3] : (match[4] || ''));
+            attrs[key] = val.trim();
+        }
+        return attrs;
+    }
+
+    function splitXmltvUrlList(rawVal) {
+        var s = String(rawVal || '').trim();
+        if (!s) {
+            return [];
+        }
+        var parts = s.split(/[\s,;]+/);
+        var out = [];
+        var seen = {};
+        for (var i = 0; i < parts.length; i++) {
+            var u = String(parts[i] || '').replace(/^["']+|["']+$/g, '').trim();
+            if (!u || !/^https?:\/\/.+/i.test(u)) {
+                continue;
+            }
+            if (!seen[u]) {
+                seen[u] = true;
+                out.push(u);
+                if (out.length >= 6) {
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
     function splitM3uPipeHeaders(rawUrlLine) {
         var str = String(rawUrlLine || '').trim();
         var pipeIdx = str.indexOf('|');
@@ -1625,7 +2091,11 @@
     }
 
     function createM3uParserState(rawText) {
-        var lines = String(rawText || '').split(/\r?\n/);
+        var cleanRaw = String(rawText || '');
+        if (cleanRaw.charCodeAt(0) === 0xFEFF) {
+            cleanRaw = cleanRaw.slice(1);
+        }
+        var lines = cleanRaw.split(/\r?\n/);
         var liveGenresList = [];
         var liveGenresSeen = {};
         var vodCatsList = [];
@@ -1639,6 +2109,8 @@
         var pendingInf = null;
         var currentExtGrp = '';
         var headerEpgUrl = '';
+        var headerEpgUrls = [];
+        var headerEpgSeen = {};
         var pendingDrm = {
             drmType: '',
             drmLicenseUrl: '',
@@ -1651,6 +2123,19 @@
             streamHeaders: {},
             userAgent: ''
         };
+
+        function addHeaderEpgCandidates(rawSpec) {
+            var parsedUrls = splitXmltvUrlList(rawSpec);
+            for (var u = 0; u < parsedUrls.length; u++) {
+                if (!headerEpgSeen[parsedUrls[u]] && headerEpgUrls.length < 6) {
+                    headerEpgSeen[parsedUrls[u]] = true;
+                    headerEpgUrls.push(parsedUrls[u]);
+                }
+            }
+            if (!headerEpgUrl && headerEpgUrls.length > 0) {
+                headerEpgUrl = headerEpgUrls[0];
+            }
+        }
 
         function resetPendingDrm() {
             pendingDrm = {
@@ -1674,16 +2159,22 @@
 
         function processRange(startLine, endLine) {
             for (var i = startLine; i < endLine; i++) {
-                var line = lines[i].trim();
+                var line = lines[i].replace(/^\uFEFF/, '').trim();
                 if (!line) {
                     continue;
                 }
-                if (line.indexOf('#EXTM3U') === 0) {
-                    var hdrAttrs = parseM3uAttributesMap(line.slice(7));
-                    var candidateEpg = hdrAttrs['url-tvg'] || hdrAttrs['x-tvg-url'] || hdrAttrs['tvg-url'] || '';
-                    if (candidateEpg) {
-                        headerEpgUrl = String(candidateEpg).split(',')[0].trim();
+                if (/^#EXTM3U\b/i.test(line)) {
+                    var hdrAttrs = parseM3uHeaderAttributesMap(line.slice(7));
+                    var epgAttrKeys = ['url-tvg', 'x-tvg-url', 'tvg-url', 'epg-url', 'url-epg', 'x-epg-url'];
+                    for (var ek = 0; ek < epgAttrKeys.length; ek++) {
+                        if (hdrAttrs[epgAttrKeys[ek]]) {
+                            addHeaderEpgCandidates(hdrAttrs[epgAttrKeys[ek]]);
+                        }
                     }
+                    continue;
+                }
+                if (/^#EXT-X-TVG-URL:/i.test(line)) {
+                    addHeaderEpgCandidates(line.slice(14));
                     continue;
                 }
                 if (line.indexOf('#EXTINF:') === 0) {
@@ -1815,7 +2306,8 @@
 
                 var groupTitle = String(info.groupTitle || 'General').trim() || 'General';
                 var logo = info.attrs['tvg-logo'] || info.attrs.logo || '';
-                var tvgId = info.attrs['tvg-id'] || '';
+                var tvgId = info.attrs['tvg-id'] || info.attrs['channel-id'] || info.attrs['epg-id'] || '';
+                var tvgName = info.attrs['tvg-name'] || '';
                 var chnoAttr = info.attrs['tvg-chno'] || info.attrs['channel-number'] || '';
                 var catchupDays = Number(info.attrs['catchup-days'] || info.attrs['tvg-rec'] || 0);
                 var catchupSource = info.attrs['catchup-source'] || '';
@@ -1838,6 +2330,7 @@
                     var seriesKey = sCatId + '__' + seriesTitle.toLowerCase();
                     if (!seriesGroupsMap[seriesKey]) {
                         var seriesId = 'm3u_ser_' + (seriesGroupsKeys.length + 1);
+                        var serYearMatch = seriesTitle.match(/\((\d{4})\)/);
                         var seriesItem = {
                             id: seriesId,
                             name: seriesTitle,
@@ -1847,6 +2340,8 @@
                             poster: logo,
                             logo: logo,
                             desc: groupTitle,
+                            year: String(info.attrs['tvg-year'] || info.attrs.year || (serYearMatch ? serYearMatch[1] : '')),
+                            rating: String(info.attrs['tvg-rating'] || info.attrs.rating || ''),
                             censored: isCensored ? 1 : 0,
                             isVod: true,
                             isSeries: true,
@@ -1926,7 +2421,8 @@
                         poster: logo,
                         logo: logo,
                         desc: groupTitle,
-                        year: vodYearMatch ? vodYearMatch[1] : '',
+                        year: String(info.attrs['tvg-year'] || info.attrs.year || (vodYearMatch ? vodYearMatch[1] : '')),
+                        rating: String(info.attrs['tvg-rating'] || info.attrs.rating || ''),
                         censored: isCensored ? 1 : 0,
                         isVod: true,
                         isSeries: false
@@ -1961,6 +2457,7 @@
                     id: 'm3u_ch_' + (liveChannels.length + 1),
                     num: chnoAttr ? (parseInt(chnoAttr, 10) || (liveChannels.length + 1)) : (liveChannels.length + 1),
                     name: info.title,
+                    tvgName: tvgName,
                     cmd: streamUrl,
                     directUrl: true,
                     useTmpLink: 0,
@@ -2016,7 +2513,8 @@
                     { id: 'rec', title: '⏱ History', censored: false }
                 ].concat(seriesCatsList),
                 seriesItems: seriesItems,
-                epgUrl: headerEpgUrl
+                epgUrl: headerEpgUrl,
+                epgUrls: headerEpgUrls
             };
         }
 
@@ -2060,7 +2558,11 @@
     }
 
     function decodeXmlTextEntities(str) {
-        return String(str || '')
+        var s = String(str || '');
+        if (s.indexOf('&') === -1) {
+            return s;
+        }
+        return s
             .replace(/&amp;/g, '&')
             .replace(/&lt;/g, '<')
             .replace(/&gt;/g, '>')
@@ -2074,49 +2576,133 @@
             });
     }
 
+    function extractXmlElementText(rawInner) {
+        var s = String(rawInner || '');
+        if (!s) {
+            return '';
+        }
+        if (s.indexOf('<![CDATA[') !== -1) {
+            s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+        }
+        if (s.indexOf('<') !== -1) {
+            s = s.replace(/<[^>]+>/g, '');
+        }
+        return decodeXmlTextEntities(s).trim();
+    }
+
     function normalizeXmltvLookupKey(val) {
-        return String(val || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        return String(val || '')
+            .toLowerCase()
+            .replace(/[\s\u00A0\-_.:\/\\|()[\]{}'",+!?@#%^&*=~\x60<>]+/g, '');
     }
 
     function parseXmltvDateSec(raw) {
         var s = String(raw || '').trim();
-        var m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-]\d{4}|Z))?/);
-        if (!m) {
+        if (!s) {
             return 0;
+        }
+        var m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?(?:\s*(Z|UTC|GMT|[+-]\d{2}:?\d{2}|[+-]\d{2}))?/i);
+        if (!m) {
+            var iso = s.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:\s*(Z|UTC|GMT|[+-]\d{2}:?\d{2}|[+-]\d{2}))?/i);
+            if (!iso) {
+                return 0;
+            }
+            m = iso;
         }
         var year = parseInt(m[1], 10);
         var month = parseInt(m[2], 10) - 1;
         var day = parseInt(m[3], 10);
         var hour = parseInt(m[4], 10);
         var min = parseInt(m[5], 10);
-        var sec = parseInt(m[6], 10);
+        var sec = m[6] ? parseInt(m[6], 10) : 0;
         var utcMs = Date.UTC(year, month, day, hour, min, sec);
-        var tz = m[7];
-        if (tz && tz !== 'Z') {
+        var tz = m[7] ? String(m[7]).toUpperCase() : '';
+        if (tz && tz !== 'Z' && tz !== 'UTC' && tz !== 'GMT') {
             var sign = tz.charAt(0) === '-' ? -1 : 1;
-            var tzH = parseInt(tz.slice(1, 3), 10) || 0;
-            var tzM = parseInt(tz.slice(3, 5), 10) || 0;
+            var digits = tz.slice(1).replace(':', '');
+            var tzH = parseInt(digits.slice(0, 2), 10) || 0;
+            var tzM = digits.length >= 4 ? (parseInt(digits.slice(2, 4), 10) || 0) : 0;
             var offsetMs = sign * ((tzH * 60) + tzM) * 60000;
             utcMs -= offsetMs;
         }
         return Math.floor(utcMs / 1000);
     }
 
-    function parseXmltvDocument(xmlText) {
-        var text = String(xmlText || '');
-        var channelsById = {};
+    function finalizeXmltvCatalog(channelsById, programsByChannel, fallbackByChannel) {
         var aliasToChannelId = {};
+        if (fallbackByChannel) {
+            var fbKeys = Object.keys(fallbackByChannel);
+            for (var fi = 0; fi < fbKeys.length; fi++) {
+                var fk = fbKeys[fi];
+                if (!programsByChannel[fk] || programsByChannel[fk].length === 0) {
+                    programsByChannel[fk] = fallbackByChannel[fk];
+                }
+            }
+        }
+        var progKeyByNorm = {};
+        var chKeys = Object.keys(programsByChannel);
+        for (var k = 0; k < chKeys.length; k++) {
+            var pKey = chKeys[k];
+            var list = programsByChannel[pKey];
+            if (!Array.isArray(list) || list.length === 0) {
+                delete programsByChannel[pKey];
+                continue;
+            }
+            list.sort(compareXmltvProgByStart);
+            var normPk = normalizeXmltvLookupKey(pKey);
+            if (normPk && !progKeyByNorm[normPk]) {
+                progKeyByNorm[normPk] = pKey;
+            }
+            if (normPk && !aliasToChannelId[normPk]) {
+                aliasToChannelId[normPk] = pKey;
+            }
+        }
+        var cIds = Object.keys(channelsById);
+        for (var ci = 0; ci < cIds.length; ci++) {
+            var cid = cIds[ci];
+            var normCid = normalizeXmltvLookupKey(cid);
+            var resolvedProgKey = programsByChannel[cid] ? cid : (normCid ? progKeyByNorm[normCid] : '');
+            if (!resolvedProgKey || !programsByChannel[resolvedProgKey]) {
+                continue;
+            }
+            if (normCid) {
+                aliasToChannelId[normCid] = resolvedProgKey;
+            }
+            var dNames = (channelsById[cid] && channelsById[cid].displayNames) || [];
+            for (var n = 0; n < dNames.length; n++) {
+                var normDn = normalizeXmltvLookupKey(dNames[n]);
+                if (normDn && !aliasToChannelId[normDn]) {
+                    aliasToChannelId[normDn] = resolvedProgKey;
+                }
+            }
+        }
+        return {
+            channelsById: channelsById,
+            aliasToChannelId: aliasToChannelId,
+            programsByChannel: programsByChannel
+        };
+    }
+
+    function parseXmltvDocument(xmlText, nowSecOverride) {
+        var text = String(xmlText || '');
+        if (text.charCodeAt(0) === 0xFEFF) {
+            text = text.slice(1);
+        }
+        var channelsById = {};
         var programsByChannel = {};
-        if (!text || text.indexOf('<programme') === -1) {
+        var fallbackByChannel = {};
+        if (!text || !/<programme\b/i.test(text)) {
             return {
                 channelsById: channelsById,
-                aliasToChannelId: aliasToChannelId,
+                aliasToChannelId: {},
                 programsByChannel: programsByChannel
             };
         }
+        var nowSec = typeof nowSecOverride === 'number' && nowSecOverride > 0 ? nowSecOverride : Math.floor(Date.now() / 1000);
+        var minStopSec = nowSec - 86400;
+        var maxStartSec = nowSec + 259200;
         var chRe = /<channel\b[^>]*\bid\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/channel>/gi;
-        var dnRe = /<display-name[^>]*>([\s\S]*?)<\/display-name>/gi;
-        var stripTagsRe = /<[^>]+>/g;
+        var dnRe = /<display-name\b[^>]*>([\s\S]*?)<\/display-name>/gi;
         var chMatch;
         while ((chMatch = chRe.exec(text)) !== null) {
             var rawId = decodeXmlTextEntities(chMatch[1] || chMatch[2] || '').trim();
@@ -2128,29 +2714,19 @@
             dnRe.lastIndex = 0;
             var dnMatch;
             while ((dnMatch = dnRe.exec(body)) !== null) {
-                var dn = decodeXmlTextEntities(dnMatch[1].replace(stripTagsRe, '')).trim();
+                var dn = extractXmlElementText(dnMatch[1]);
                 if (dn) {
                     names.push(dn);
                 }
             }
             channelsById[rawId] = { id: rawId, displayNames: names };
-            var normId = normalizeXmltvLookupKey(rawId);
-            if (normId) {
-                aliasToChannelId[normId] = rawId;
-            }
-            for (var n = 0; n < names.length; n++) {
-                var normName = normalizeXmltvLookupKey(names[n]);
-                if (normName && !aliasToChannelId[normName]) {
-                    aliasToChannelId[normName] = rawId;
-                }
-            }
         }
         var progRe = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/gi;
         var chAttrRe = /\bchannel\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
         var startAttrRe = /\bstart\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
         var stopAttrRe = /\bstop\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
-        var titleTagRe = /<title[^>]*>([\s\S]*?)<\/title>/i;
-        var descTagRe = /<desc[^>]*>([\s\S]*?)<\/desc>/i;
+        var titleTagRe = /<title\b[^>]*>([\s\S]*?)<\/title>/i;
+        var descTagRe = /<desc\b[^>]*>([\s\S]*?)<\/desc>/i;
         var progMatch;
         var idx = 0;
         while ((progMatch = progRe.exec(text)) !== null) {
@@ -2168,38 +2744,44 @@
             if (!stopTs || stopTs <= startTs) {
                 stopTs = startTs + 1800;
             }
+            var inWindow = (stopTs >= minStopSec && startTs <= maxStartSec);
+            if (inWindow) {
+                if (!programsByChannel[chId]) {
+                    programsByChannel[chId] = [];
+                }
+                if (programsByChannel[chId].length >= 160) {
+                    continue;
+                }
+            } else {
+                if (programsByChannel[chId] && programsByChannel[chId].length > 0) {
+                    continue;
+                }
+                if (!fallbackByChannel[chId]) {
+                    fallbackByChannel[chId] = [];
+                }
+                if (fallbackByChannel[chId].length >= 40) {
+                    continue;
+                }
+            }
             var titleMatch = pBody.match(titleTagRe);
             var descMatch = pBody.match(descTagRe);
-            var title = titleMatch ? decodeXmlTextEntities(titleMatch[1].replace(stripTagsRe, '')).trim() : 'Program';
-            var descr = descMatch ? decodeXmlTextEntities(descMatch[1].replace(stripTagsRe, '')).trim() : '';
-            if (!programsByChannel[chId]) {
-                programsByChannel[chId] = [];
-            }
-            if (programsByChannel[chId].length >= 120) {
-                continue;
-            }
+            var title = titleMatch ? extractXmlElementText(titleMatch[1]) : 'Program';
+            var descr = descMatch ? extractXmlElementText(descMatch[1]) : '';
             idx++;
-            programsByChannel[chId].push({
+            var pItem = {
                 id: 'xmltv_' + idx,
                 name: title || 'Program',
                 descr: descr,
                 start_timestamp: startTs,
                 stop_timestamp: stopTs
-            });
-            var normCh = normalizeXmltvLookupKey(chId);
-            if (normCh && !aliasToChannelId[normCh]) {
-                aliasToChannelId[normCh] = chId;
+            };
+            if (inWindow) {
+                programsByChannel[chId].push(pItem);
+            } else {
+                fallbackByChannel[chId].push(pItem);
             }
         }
-        var chKeys = Object.keys(programsByChannel);
-        for (var k = 0; k < chKeys.length; k++) {
-            programsByChannel[chKeys[k]].sort(compareXmltvProgByStart);
-        }
-        return {
-            channelsById: channelsById,
-            aliasToChannelId: aliasToChannelId,
-            programsByChannel: programsByChannel
-        };
+        return finalizeXmltvCatalog(channelsById, programsByChannel, fallbackByChannel);
     }
 
     function compareXmltvProgByStart(a, b) {
@@ -2208,24 +2790,29 @@
 
     function parseXmltvDocumentAsync(xmlText) {
         var text = String(xmlText || '');
+        if (text.charCodeAt(0) === 0xFEFF) {
+            text = text.slice(1);
+        }
         if (text.length <= 200000) {
             return Promise.resolve(parseXmltvDocument(text));
         }
         return new Promise(function(resolve) {
             var channelsById = {};
-            var aliasToChannelId = {};
             var programsByChannel = {};
-            if (!text || text.indexOf('<programme') === -1) {
+            var fallbackByChannel = {};
+            if (!text || !/<programme\b/i.test(text)) {
                 resolve({
                     channelsById: channelsById,
-                    aliasToChannelId: aliasToChannelId,
+                    aliasToChannelId: {},
                     programsByChannel: programsByChannel
                 });
                 return;
             }
+            var nowSec = Math.floor(Date.now() / 1000);
+            var minStopSec = nowSec - 86400;
+            var maxStartSec = nowSec + 259200;
             var chRe = /<channel\b[^>]*\bid\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/channel>/gi;
-            var dnRe = /<display-name[^>]*>([\s\S]*?)<\/display-name>/gi;
-            var stripTagsRe = /<[^>]+>/g;
+            var dnRe = /<display-name\b[^>]*>([\s\S]*?)<\/display-name>/gi;
             var chMatch;
             while ((chMatch = chRe.exec(text)) !== null) {
                 var rawId = decodeXmlTextEntities(chMatch[1] || chMatch[2] || '').trim();
@@ -2237,29 +2824,19 @@
                 dnRe.lastIndex = 0;
                 var dnMatch;
                 while ((dnMatch = dnRe.exec(body)) !== null) {
-                    var dn = decodeXmlTextEntities(dnMatch[1].replace(stripTagsRe, '')).trim();
+                    var dn = extractXmlElementText(dnMatch[1]);
                     if (dn) {
                         names.push(dn);
                     }
                 }
                 channelsById[rawId] = { id: rawId, displayNames: names };
-                var normId = normalizeXmltvLookupKey(rawId);
-                if (normId) {
-                    aliasToChannelId[normId] = rawId;
-                }
-                for (var n = 0; n < names.length; n++) {
-                    var normName = normalizeXmltvLookupKey(names[n]);
-                    if (normName && !aliasToChannelId[normName]) {
-                        aliasToChannelId[normName] = rawId;
-                    }
-                }
             }
             var progRe = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/gi;
             var chAttrRe = /\bchannel\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
             var startAttrRe = /\bstart\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
             var stopAttrRe = /\bstop\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
-            var titleTagRe = /<title[^>]*>([\s\S]*?)<\/title>/i;
-            var descTagRe = /<desc[^>]*>([\s\S]*?)<\/desc>/i;
+            var titleTagRe = /<title\b[^>]*>([\s\S]*?)<\/title>/i;
+            var descTagRe = /<desc\b[^>]*>([\s\S]*?)<\/desc>/i;
             var idx = 0;
             function processProgrammeSlice() {
                 var count = 0;
@@ -2280,45 +2857,78 @@
                     if (!stopTs || stopTs <= startTs) {
                         stopTs = startTs + 1800;
                     }
+                    var inWindow = (stopTs >= minStopSec && startTs <= maxStartSec);
+                    if (inWindow) {
+                        if (!programsByChannel[chId]) {
+                            programsByChannel[chId] = [];
+                        }
+                        if (programsByChannel[chId].length >= 160) {
+                            continue;
+                        }
+                    } else {
+                        if (programsByChannel[chId] && programsByChannel[chId].length > 0) {
+                            continue;
+                        }
+                        if (!fallbackByChannel[chId]) {
+                            fallbackByChannel[chId] = [];
+                        }
+                        if (fallbackByChannel[chId].length >= 40) {
+                            continue;
+                        }
+                    }
                     var titleMatch = pBody.match(titleTagRe);
                     var descMatch = pBody.match(descTagRe);
-                    var title = titleMatch ? decodeXmlTextEntities(titleMatch[1].replace(stripTagsRe, '')).trim() : 'Program';
-                    var descr = descMatch ? decodeXmlTextEntities(descMatch[1].replace(stripTagsRe, '')).trim() : '';
-                    if (!programsByChannel[chId]) {
-                        programsByChannel[chId] = [];
-                    }
-                    if (programsByChannel[chId].length >= 120) {
-                        continue;
-                    }
+                    var title = titleMatch ? extractXmlElementText(titleMatch[1]) : 'Program';
+                    var descr = descMatch ? extractXmlElementText(descMatch[1]) : '';
                     idx++;
-                    programsByChannel[chId].push({
+                    var pItem = {
                         id: 'xmltv_' + idx,
                         name: title || 'Program',
                         descr: descr,
                         start_timestamp: startTs,
                         stop_timestamp: stopTs
-                    });
-                    var normCh = normalizeXmltvLookupKey(chId);
-                    if (normCh && !aliasToChannelId[normCh]) {
-                        aliasToChannelId[normCh] = chId;
+                    };
+                    if (inWindow) {
+                        programsByChannel[chId].push(pItem);
+                    } else {
+                        fallbackByChannel[chId].push(pItem);
                     }
                 }
                 if (count === 1500) {
                     setTimeout(processProgrammeSlice, 0);
                 } else {
-                    var chKeys = Object.keys(programsByChannel);
-                    for (var k = 0; k < chKeys.length; k++) {
-                        programsByChannel[chKeys[k]].sort(compareXmltvProgByStart);
-                    }
-                    resolve({
-                        channelsById: channelsById,
-                        aliasToChannelId: aliasToChannelId,
-                        programsByChannel: programsByChannel
-                    });
+                    resolve(finalizeXmltvCatalog(channelsById, programsByChannel, fallbackByChannel));
                 }
             }
             setTimeout(processProgrammeSlice, 0);
         });
+    }
+
+    function stripChannelNameForEpgLookup(rawName) {
+        return String(rawName || '')
+            .replace(/^\s*(?:\[[A-Z0-9]{2,6}\]|\([A-Z0-9]{2,6}\)|\|[A-Z0-9]{2,6}\||[A-Z]{2,3}\s*[:|\-])\s*/i, '')
+            .replace(/[\[\(]\s*(?:FHD|UHD|4K|HD|SD|1080p|720p|480p|HEVC|H\.?265|H\.?264|RAW|VIP|DRM|BACKUP|MULTI|AUTO|LQ|HQ|50FPS|60FPS|LIVE)\s*[\]\)]/gi, ' ')
+            .replace(/\b(?:FHD|UHD|4K|HD|SD|1080p|720p|480p|HEVC|H265|H264|RAW|VIP|DRM|BACKUP|MULTI|AUTO|LQ|HQ|50FPS|60FPS)\b/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function resolveXmltvKeyCandidate(catalog, candidate) {
+        var raw = String(candidate || '').trim();
+        if (!raw) {
+            return '';
+        }
+        if (catalog.programsByChannel[raw] && catalog.programsByChannel[raw].length > 0) {
+            return raw;
+        }
+        var norm = normalizeXmltvLookupKey(raw);
+        if (norm && catalog.aliasToChannelId) {
+            var mapped = catalog.aliasToChannelId[norm];
+            if (mapped && catalog.programsByChannel[mapped] && catalog.programsByChannel[mapped].length > 0) {
+                return mapped;
+            }
+        }
+        return '';
     }
 
     function lookupXmltvChannelPrograms(catalog, channelObj) {
@@ -2330,29 +2940,32 @@
         }
         var resolvedKey = '';
         var tvgId = String(channelObj.epgChannelId || '').trim();
-        if (tvgId && catalog.programsByChannel[tvgId]) {
-            resolvedKey = tvgId;
-        } else if (tvgId) {
-            var normTvg = normalizeXmltvLookupKey(tvgId);
-            var mappedByTvg = normTvg ? catalog.aliasToChannelId[normTvg] : '';
-            if (mappedByTvg && catalog.programsByChannel[mappedByTvg]) {
-                resolvedKey = mappedByTvg;
+        if (tvgId) {
+            resolvedKey = resolveXmltvKeyCandidate(catalog, tvgId);
+            if (!resolvedKey && tvgId.indexOf('.') !== -1) {
+                var noTld = tvgId.replace(/\.[a-z]{2,4}$/i, '').trim();
+                if (noTld && noTld !== tvgId) {
+                    resolvedKey = resolveXmltvKeyCandidate(catalog, noTld);
+                }
             }
         }
-        if (!resolvedKey) {
+        if (!resolvedKey && channelObj.tvgName) {
+            var tvgName = String(channelObj.tvgName || '').trim();
+            resolvedKey = resolveXmltvKeyCandidate(catalog, tvgName);
+            if (!resolvedKey) {
+                var strippedTvgName = stripChannelNameForEpgLookup(tvgName);
+                if (strippedTvgName && strippedTvgName !== tvgName) {
+                    resolvedKey = resolveXmltvKeyCandidate(catalog, strippedTvgName);
+                }
+            }
+        }
+        if (!resolvedKey && channelObj.name) {
             var chName = String(channelObj.name || '').trim();
-            if (chName) {
-                var normName = normalizeXmltvLookupKey(chName);
-                var mappedByName = normName ? catalog.aliasToChannelId[normName] : '';
-                if (mappedByName && catalog.programsByChannel[mappedByName]) {
-                    resolvedKey = mappedByName;
-                } else {
-                    var stripped = chName.replace(/^[A-Z]{2,3}\s*[:|\-]\s*/i, '').replace(/\b(FHD|UHD|4K|HD|SD|HEVC|RAW)\b/gi, '').trim();
-                    var normStripped = normalizeXmltvLookupKey(stripped);
-                    var mappedStripped = normStripped ? catalog.aliasToChannelId[normStripped] : '';
-                    if (mappedStripped && catalog.programsByChannel[mappedStripped]) {
-                        resolvedKey = mappedStripped;
-                    }
+            resolvedKey = resolveXmltvKeyCandidate(catalog, chName);
+            if (!resolvedKey) {
+                var stripped = stripChannelNameForEpgLookup(chName);
+                if (stripped && stripped !== chName) {
+                    resolvedKey = resolveXmltvKeyCandidate(catalog, stripped);
                 }
             }
         }
@@ -2437,6 +3050,213 @@
         }
         return extractNumericIdForSort(b) - extractNumericIdForSort(a);
     }
+    function parseNumericRatingForSort(it) {
+        if (!it) {
+            return -1;
+        }
+        if (typeof it._sortRating === 'number') {
+            return it._sortRating;
+        }
+        var raw = String(it.rating || '').replace(',', '.').match(/(\d+(?:\.\d+)?)/);
+        var val = raw ? parseFloat(raw[1]) : -1;
+        if (!isFinite(val)) {
+            val = -1;
+        }
+        it._sortRating = val;
+        return val;
+    }
+    function parseReleaseYearForSort(it) {
+        if (!it) {
+            return 0;
+        }
+        if (typeof it._sortYear === 'number' && it._sortYear > 0) {
+            return it._sortYear;
+        }
+        var rawStr = String(it.year || '') + ' ' + String(it.name || '');
+        var ym = rawStr.match(/\b((?:19|20)\d{2})\b/);
+        var y = ym ? parseInt(ym[1], 10) : 0;
+        it._sortYear = y;
+        return y;
+    }
+    function compareItemsByRating(a, b) {
+        var ra = parseNumericRatingForSort(a);
+        var rb = parseNumericRatingForSort(b);
+        if (rb !== ra) {
+            return rb - ra;
+        }
+        var ya = parseReleaseYearForSort(a);
+        var yb = parseReleaseYearForSort(b);
+        if (yb !== ya) {
+            return yb - ya;
+        }
+        return compareItemsByNameAsc(a, b);
+    }
+    function compareItemsByYear(a, b) {
+        var ya = parseReleaseYearForSort(a);
+        var yb = parseReleaseYearForSort(b);
+        if (yb !== ya) {
+            return yb - ya;
+        }
+        var ra = parseNumericRatingForSort(a);
+        var rb = parseNumericRatingForSort(b);
+        if (rb !== ra) {
+            return rb - ra;
+        }
+        return compareItemsByNameAsc(a, b);
+    }
+    function getAvailableSortModesForMode(modeId) {
+        if (modeId === 'vod' || modeId === 'series') {
+            return ['added', 'title_asc', 'title_desc', 'rating', 'year'];
+        }
+        return ['added', 'title_asc', 'title_desc'];
+    }
+    function formatSortModeLabel(sortKey) {
+        if (sortKey === 'title_asc') {
+            return 'A-Z';
+        }
+        if (sortKey === 'title_desc') {
+            return 'Z-A';
+        }
+        if (sortKey === 'rating') {
+            return 'RATING';
+        }
+        if (sortKey === 'year') {
+            return 'YEAR';
+        }
+        return 'ADDED';
+    }
+    function filterColumnEntries(list, filterQuery, sortKey, isCategory, lookupEpgFn) {
+        var arr = Array.isArray(list) ? list : [];
+        var q = String(filterQuery || '').trim().toLowerCase();
+        var sKey = String(sortKey || 'added');
+        var out;
+        if (q) {
+            var scored = [];
+            for (var i = 0; i < arr.length; i++) {
+                var entry = arr[i];
+                if (!entry) {
+                    continue;
+                }
+                var primaryText = isCategory ? (entry.title || '') : (entry.name || '');
+                var metaText = '';
+                if (!isCategory) {
+                    metaText = (entry.year || '') + ' ' + (entry.genre || '') + ' ' + (entry.cast || '') + ' ' + (entry.director || '') + ' ' + (entry.desc || '');
+                    if (!entry.isVod && !entry.isSeries && typeof lookupEpgFn === 'function') {
+                        var epgTxt = lookupEpgFn(entry);
+                        if (epgTxt) {
+                            metaText += ' ' + epgTxt;
+                        }
+                    }
+                }
+                var sc = scoreSearchTextMatch(q, primaryText, metaText);
+                if (sc > 0) {
+                    scored.push({ item: entry, score: sc, idx: i });
+                }
+            }
+            scored.sort(function(a, b) {
+                if (!isCategory && sKey === 'title_asc') {
+                    var ca = compareItemsByNameAsc(a.item, b.item);
+                    if (ca !== 0) { return ca; }
+                } else if (!isCategory && sKey === 'title_desc') {
+                    var cd = compareItemsByNameDesc(a.item, b.item);
+                    if (cd !== 0) { return cd; }
+                } else if (!isCategory && sKey === 'rating') {
+                    var cr = compareItemsByRating(a.item, b.item);
+                    if (cr !== 0) { return cr; }
+                } else if (!isCategory && sKey === 'year') {
+                    var cy = compareItemsByYear(a.item, b.item);
+                    if (cy !== 0) { return cy; }
+                }
+                if (b.score !== a.score) {
+                    return b.score - a.score;
+                }
+                return a.idx - b.idx;
+            });
+            out = [];
+            for (var j = 0; j < scored.length; j++) {
+                out.push(scored[j].item);
+            }
+            return out;
+        }
+        if (!isCategory && (sKey === 'title_asc' || sKey === 'title_desc' || sKey === 'rating' || sKey === 'year')) {
+            out = arr.slice();
+            if (sKey === 'title_asc') {
+                out.sort(compareItemsByNameAsc);
+            } else if (sKey === 'title_desc') {
+                out.sort(compareItemsByNameDesc);
+            } else if (sKey === 'rating') {
+                out.sort(compareItemsByRating);
+            } else if (sKey === 'year') {
+                out.sort(compareItemsByYear);
+            }
+            return out;
+        }
+        return arr;
+    }
+    function normalizeSearchComparable(str) {
+        return String(str || '')
+            .toLowerCase()
+            .replace(/[\u2013\u2014\-_|/:.,!?()\[\]{}'"•]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+    function scoreSearchTextMatch(query, primaryText, secondaryText) {
+        var qRaw = String(query || '').trim().toLowerCase();
+        if (!qRaw) {
+            return 0;
+        }
+        var pRaw = String(primaryText || '').toLowerCase();
+        var pNorm = normalizeSearchComparable(pRaw);
+        var qNorm = normalizeSearchComparable(qRaw);
+        var tokens = (qNorm || qRaw).split(' ').filter(Boolean);
+        if (tokens.length === 0) {
+            return 0;
+        }
+        if (pRaw === qRaw || (qNorm && pNorm === qNorm)) {
+            return 1000;
+        }
+        if (pRaw.indexOf(qRaw) === 0 || (qNorm && pNorm.indexOf(qNorm) === 0)) {
+            return 800;
+        }
+        if (qNorm && (' ' + pNorm + ' ').indexOf(' ' + qNorm + ' ') !== -1) {
+            return 650;
+        }
+        if (pRaw.indexOf(qRaw) !== -1 || (qNorm && pNorm.indexOf(qNorm) !== -1)) {
+            return 500;
+        }
+        var allTokensInPrimary = true;
+        for (var i = 0; i < tokens.length; i++) {
+            var tok = tokens[i];
+            if (pRaw.indexOf(tok) === -1 && pNorm.indexOf(tok) === -1) {
+                allTokensInPrimary = false;
+                break;
+            }
+        }
+        if (allTokensInPrimary) {
+            return 350;
+        }
+        if (secondaryText) {
+            var sRaw = String(secondaryText || '').toLowerCase();
+            var sNorm = normalizeSearchComparable(sRaw);
+            var combinedRaw = pRaw + ' ' + sRaw;
+            var combinedNorm = pNorm + ' ' + sNorm;
+            if (sRaw.indexOf(qRaw) !== -1 || (qNorm && sNorm.indexOf(qNorm) !== -1)) {
+                return 220;
+            }
+            var allInCombined = true;
+            for (var j = 0; j < tokens.length; j++) {
+                var cTok = tokens[j];
+                if (combinedRaw.indexOf(cTok) === -1 && combinedNorm.indexOf(cTok) === -1) {
+                    allInCombined = false;
+                    break;
+                }
+            }
+            if (allInCombined) {
+                return 150;
+            }
+        }
+        return 0;
+    }
     function filterAndPaginateLocalList(allList, categoryId, page, searchQuery, sortBy) {
         var list = Array.isArray(allList) ? allList : [];
         var q = String(searchQuery || '').trim().toLowerCase();
@@ -2454,6 +3274,40 @@
             Array.isArray(localPaginationCache.filtered)
         ) {
             filtered = localPaginationCache.filtered;
+        } else if (q) {
+            var scoredMatches = [];
+            for (var si = 0; si < list.length; si++) {
+                var sit = list[si];
+                if (!sit) {
+                    continue;
+                }
+                if (catId !== '*' && !isNewVirtualCat && String(sit.genreId) !== catId) {
+                    continue;
+                }
+                var metaText = (sit.year || '') + ' ' + (sit.genre || '') + ' ' + (sit.cast || '') + ' ' + (sit.director || '') + ' ' + (sit.desc || '');
+                var sc = scoreSearchTextMatch(q, sit.name || '', metaText);
+                if (sc > 0) {
+                    scoredMatches.push({ item: sit, score: sc, idx: si });
+                }
+            }
+            scoredMatches.sort(function(a, b) {
+                if (b.score !== a.score) {
+                    return b.score - a.score;
+                }
+                return a.idx - b.idx;
+            });
+            filtered = [];
+            for (var sj = 0; sj < scoredMatches.length; sj++) {
+                filtered.push(scoredMatches[sj].item);
+            }
+            if (Array.isArray(allList)) {
+                localPaginationCache.listRef = allList;
+                localPaginationCache.listLen = list.length;
+                localPaginationCache.catId = catId;
+                localPaginationCache.query = q;
+                localPaginationCache.sortBy = sortKey;
+                localPaginationCache.filtered = filtered;
+            }
         } else {
             filtered = [];
             for (var i = 0; i < list.length; i++) {
@@ -2464,9 +3318,6 @@
                 if (catId !== '*' && !isNewVirtualCat && String(it.genreId) !== catId) {
                     continue;
                 }
-                if (q && getItemLowerName(it).indexOf(q) === -1) {
-                    continue;
-                }
                 filtered.push(it);
             }
             if (isNewVirtualCat) {
@@ -2475,6 +3326,10 @@
                 filtered.sort(compareItemsByNameAsc);
             } else if (sortKey === 'title_desc') {
                 filtered.sort(compareItemsByNameDesc);
+            } else if (sortKey === 'rating') {
+                filtered.sort(compareItemsByRating);
+            } else if (sortKey === 'year') {
+                filtered.sort(compareItemsByYear);
             }
             if (Array.isArray(allList)) {
                 localPaginationCache.listRef = allList;
@@ -2994,7 +3849,8 @@
             }
         }
         var targetUrl = baseUrl + '/player_api.php?' + qs.join('&');
-        var proxiedUrl = this.proxyUrl + '/xtream?url=' + encodeURIComponent(targetUrl);
+        var effHdrs = resolveEffectivePortalHeaders(prof, null);
+        var proxiedUrl = appendProxyHeaderQuery(this.proxyUrl + '/xtream?url=' + encodeURIComponent(targetUrl), effHdrs);
         var controller = (typeof window !== 'undefined' && typeof window.AbortController !== 'undefined') ? new window.AbortController() : null;
         if (action === 'get_short_epg' && !keepInFlight) {
             this.abortShortEpg();
@@ -3012,6 +3868,11 @@
             }
         }, action === 'get_short_epg' ? 6000 : 35000);
         var fetchOpts = { method: 'GET' };
+        if (effHdrs.userAgent || effHdrs.httpReferer) {
+            fetchOpts.headers = {};
+            if (effHdrs.userAgent) { fetchOpts.headers['x-proxy-ua'] = effHdrs.userAgent; }
+            if (effHdrs.httpReferer) { fetchOpts.headers['x-proxy-referer'] = effHdrs.httpReferer; }
+        }
         if (controller) {
             fetchOpts.signal = controller.signal;
         }
@@ -3072,13 +3933,6 @@
                 return Promise.reject(new Error('Invalid or empty M3U playlist'));
             }
             return parseM3uPlaylistCatalogAsync(rawText).then(function(parsed) {
-                if (parsed.epgUrl && !prof.epgUrl) {
-                    prof.epgUrl = parsed.epgUrl;
-                    if (activeProfileId === prof.id) {
-                        safeSetStorage('cfg_epg_url', parsed.epgUrl);
-                    }
-                    safeSetStorage('cfg_profiles', JSON.stringify(profiles));
-                }
                 self.m3uCatalogCache = {
                     profileId: prof.id,
                     catalog: parsed
@@ -3122,8 +3976,15 @@
         if (!m3uUrl) {
             return Promise.reject(new Error('M3U Playlist URL or Local File not configured'));
         }
-        var proxiedM3u = this.proxyUrl + '/m3u?url=' + encodeURIComponent(m3uUrl);
-        return proxyFetch(proxiedM3u, { method: 'GET' }).then(function(r) {
+        var effM3uHdrs = resolveEffectivePortalHeaders(prof, null);
+        var proxiedM3u = appendProxyHeaderQuery(this.proxyUrl + '/m3u?url=' + encodeURIComponent(m3uUrl), effM3uHdrs);
+        var m3uFetchOpts = { method: 'GET' };
+        if (effM3uHdrs.userAgent || effM3uHdrs.httpReferer) {
+            m3uFetchOpts.headers = {};
+            if (effM3uHdrs.userAgent) { m3uFetchOpts.headers['x-proxy-ua'] = effM3uHdrs.userAgent; }
+            if (effM3uHdrs.httpReferer) { m3uFetchOpts.headers['x-proxy-referer'] = effM3uHdrs.httpReferer; }
+        }
+        return proxyFetch(proxiedM3u, m3uFetchOpts).then(function(r) {
             if (!r.ok) {
                 throw new Error('HTTP ' + r.status);
             }
@@ -3225,6 +4086,13 @@
             'x-stalker-tz': encodeURIComponent(getDeviceTimezone()),
             'x-stalker-search': queryString
         };
+        var effStalkerHdrs = resolveEffectivePortalHeaders(activeProf, null);
+        if (effStalkerHdrs.userAgent) {
+            headers['x-proxy-ua'] = effStalkerHdrs.userAgent;
+        }
+        if (effStalkerHdrs.httpReferer) {
+            headers['x-proxy-referer'] = effStalkerHdrs.httpReferer;
+        }
         if (this.token && fullParams.action !== 'handshake') {
             headers['x-stalker-token'] = encodeURIComponent(this.token);
         }
@@ -4186,7 +5054,7 @@
             action: 'get_ordered_list',
             category: (isRecentlyAddedVod || !categoryId) ? '*' : categoryId,
             p: curPage,
-            sortby: isRecentlyAddedVod ? 'added' : (sortBy || 'added')
+            sortby: isRecentlyAddedVod ? 'added' : (sortBy === 'rating' ? 'rating' : ((sortBy === 'title_asc' || sortBy === 'title_desc') ? 'name' : 'added'))
         };
         if (searchQuery) {
             params.search = searchQuery;
@@ -4219,6 +5087,14 @@
             }
             if (isRecentlyAddedVod && (!sortBy || sortBy === 'added')) {
                 out.sort(compareItemsByNewestAdded);
+            } else if (sortBy === 'title_asc') {
+                out.sort(compareItemsByNameAsc);
+            } else if (sortBy === 'title_desc') {
+                out.sort(compareItemsByNameDesc);
+            } else if (sortBy === 'rating') {
+                out.sort(compareItemsByRating);
+            } else if (sortBy === 'year') {
+                out.sort(compareItemsByYear);
             }
             return out;
         }
@@ -4458,7 +5334,7 @@
             action: 'get_ordered_list',
             category: (isRecentlyAddedSeries || !categoryId) ? '*' : categoryId,
             p: curPage,
-            sortby: isRecentlyAddedSeries ? 'added' : (sortBy || 'added')
+            sortby: isRecentlyAddedSeries ? 'added' : (sortBy === 'rating' ? 'rating' : ((sortBy === 'title_asc' || sortBy === 'title_desc') ? 'name' : 'added'))
         };
         if (searchQuery) {
             params.search = searchQuery;
@@ -4480,7 +5356,7 @@
                     cmd: String(s.cmd || ''),
                     desc: String(s.description || ''),
                     year: String(s.year || ''),
-                    rating: String(s.rating_imdb || ''),
+                    rating: String(s.rating_imdb || s.rating_kinopoisk || s.rating || ''),
                     poster: String(s.screenshot_uri || s.pic || ''),
                     genreId: String(s.category_id || categoryId || '*'),
                     censored: String(s.censored) === '1' ? 1 : 0,
@@ -4491,6 +5367,14 @@
             }
             if (isRecentlyAddedSeries && (!sortBy || sortBy === 'added')) {
                 out.sort(compareItemsByNewestAdded);
+            } else if (sortBy === 'title_asc') {
+                out.sort(compareItemsByNameAsc);
+            } else if (sortBy === 'title_desc') {
+                out.sort(compareItemsByNameDesc);
+            } else if (sortBy === 'rating') {
+                out.sort(compareItemsByRating);
+            } else if (sortBy === 'year') {
+                out.sort(compareItemsByYear);
             }
             return out;
         }
@@ -4671,65 +5555,218 @@
         }
         return out;
     }
-    StalkerAPI.prototype.getEffectiveXmltvUrl = function() {
-        var prof = getActiveProfile();
-        var customUrl = String((prof && prof.epgUrl) || localStorage.getItem('cfg_epg_url') || '').trim();
-        if (customUrl && /^https?:\/\/.+/i.test(customUrl)) {
-            return customUrl;
+    function mergeXmltvCatalogs(catalogList) {
+        var mergedChannels = {};
+        var mergedPrograms = {};
+        var mergedAliases = {};
+        var list = Array.isArray(catalogList) ? catalogList : [];
+        for (var i = 0; i < list.length; i++) {
+            var cat = list[i];
+            if (!cat || !cat.programsByChannel) {
+                continue;
+            }
+            var cKeys = Object.keys(cat.channelsById || {});
+            for (var c = 0; c < cKeys.length; c++) {
+                if (!mergedChannels[cKeys[c]]) {
+                    mergedChannels[cKeys[c]] = cat.channelsById[cKeys[c]];
+                }
+            }
+            var pKeys = Object.keys(cat.programsByChannel);
+            for (var p = 0; p < pKeys.length; p++) {
+                var pk = pKeys[p];
+                var arr = cat.programsByChannel[pk];
+                if (Array.isArray(arr) && arr.length > 0 && (!mergedPrograms[pk] || mergedPrograms[pk].length === 0)) {
+                    mergedPrograms[pk] = arr;
+                }
+            }
+            var aKeys = Object.keys(cat.aliasToChannelId || {});
+            for (var a = 0; a < aKeys.length; a++) {
+                var ak = aKeys[a];
+                var targetKey = cat.aliasToChannelId[ak];
+                if (!mergedAliases[ak] && targetKey && mergedPrograms[targetKey] && mergedPrograms[targetKey].length > 0) {
+                    mergedAliases[ak] = targetKey;
+                }
+            }
         }
-        if (this.m3uCatalogCache && this.m3uCatalogCache.catalog && this.m3uCatalogCache.catalog.epgUrl) {
-            return this.m3uCatalogCache.catalog.epgUrl;
+        return {
+            channelsById: mergedChannels,
+            aliasToChannelId: mergedAliases,
+            programsByChannel: mergedPrograms
+        };
+    }
+
+    StalkerAPI.prototype.getEffectiveXmltvUrls = function() {
+        var prof = getActiveProfile();
+        var urls = [];
+        var seen = {};
+        function pushUrlList(rawSpec) {
+            var parsed = Array.isArray(rawSpec) ? rawSpec : splitXmltvUrlList(rawSpec);
+            for (var i = 0; i < parsed.length; i++) {
+                var u = String(parsed[i] || '').trim();
+                if (u && /^https?:\/\/.+/i.test(u) && !seen[u] && urls.length < 6) {
+                    seen[u] = true;
+                    urls.push(u);
+                }
+            }
+        }
+        var customRaw = prof ? String(prof.epgUrl || '').trim() : String(localStorage.getItem('cfg_epg_url') || '').trim();
+        if (customRaw) {
+            pushUrlList(customRaw);
+        }
+        if (this.m3uCatalogCache && this.m3uCatalogCache.catalog && (!prof || this.m3uCatalogCache.profileId === prof.id)) {
+            if (Array.isArray(this.m3uCatalogCache.catalog.epgUrls) && this.m3uCatalogCache.catalog.epgUrls.length > 0) {
+                pushUrlList(this.m3uCatalogCache.catalog.epgUrls);
+            } else if (this.m3uCatalogCache.catalog.epgUrl) {
+                pushUrlList(this.m3uCatalogCache.catalog.epgUrl);
+            }
         }
         if (this.getProviderType() === 'xtream' && prof && prof.xtreamUrl && prof.xtreamUser && prof.xtreamPass) {
             var xBase = normalizeXtreamServerUrl(prof.xtreamUrl);
             if (xBase) {
-                return xBase + '/xmltv.php?username=' + encodeURIComponent(prof.xtreamUser) + '&password=' + encodeURIComponent(prof.xtreamPass);
+                pushUrlList(xBase + '/xmltv.php?username=' + encodeURIComponent(prof.xtreamUser) + '&password=' + encodeURIComponent(prof.xtreamPass));
             }
         }
-        return '';
+        return urls;
     };
-    StalkerAPI.prototype.ensureXmltvLoaded = function() {
-        var xmlUrl = this.getEffectiveXmltvUrl();
-        if (!xmlUrl) {
+
+    StalkerAPI.prototype.getEffectiveXmltvUrl = function() {
+        var urls = this.getEffectiveXmltvUrls();
+        return urls.length > 0 ? urls[0] : '';
+    };
+
+    StalkerAPI.prototype.getLoadedXmltvCatalogSync = function() {
+        var urls = this.getEffectiveXmltvUrls();
+        if (urls.length === 0) {
+            return null;
+        }
+        var cacheKey = urls.join('||');
+        var cached = xmltvCache[cacheKey];
+        if (cached && cached.catalog && (Date.now() - cached.ts) < XMLTV_BACKGROUND_REFRESH_MS) {
+            return cached.catalog;
+        }
+        return null;
+    };
+
+    StalkerAPI.prototype.fetchSingleXmltvCatalog = function(xmlUrl) {
+        var effXmlHdrs = resolveEffectivePortalHeaders(getActiveProfile(), null);
+        var proxiedJsonUrl = appendProxyHeaderQuery(this.proxyUrl + '/xmltv?url=' + encodeURIComponent(xmlUrl) + '&format=json', effXmlHdrs);
+        var xmlFetchOpts = { method: 'GET' };
+        if (effXmlHdrs.userAgent || effXmlHdrs.httpReferer) {
+            xmlFetchOpts.headers = {};
+            if (effXmlHdrs.userAgent) { xmlFetchOpts.headers['x-proxy-ua'] = effXmlHdrs.userAgent; }
+            if (effXmlHdrs.httpReferer) { xmlFetchOpts.headers['x-proxy-referer'] = effXmlHdrs.httpReferer; }
+        }
+        return proxyFetch(proxiedJsonUrl, xmlFetchOpts).then(function(r) {
+            if (!r.ok) {
+                throw new Error('HTTP ' + r.status);
+            }
+            var ct = '';
+            try {
+                ct = (r.headers && typeof r.headers.get === 'function') ? String(r.headers.get('content-type') || '').toLowerCase() : '';
+            } catch (eCt) {}
+            if (ct.indexOf('application/json') !== -1) {
+                return r.json().then(function(parsedJson) {
+                    if (parsedJson && parsedJson.programsByChannel && typeof parsedJson.programsByChannel === 'object') {
+                        return parsedJson;
+                    }
+                    throw new Error('Invalid JSON EPG payload');
+                });
+            }
+            return r.text().then(function(rawBody) {
+                var trimmed = String(rawBody || '').trim();
+                if (trimmed.charAt(0) === '{') {
+                    try {
+                        var maybeObj = JSON.parse(trimmed);
+                        if (maybeObj && maybeObj.programsByChannel && typeof maybeObj.programsByChannel === 'object') {
+                            return maybeObj;
+                        }
+                    } catch (eMaybeJson) {}
+                }
+                return parseXmltvDocumentAsync(rawBody);
+            });
+        }).catch(function() {
+            var plainFetchFn = typeof window !== 'undefined' && typeof window.fetch === 'function' ? window.fetch : fetch;
+            return plainFetchFn(xmlUrl, { method: 'GET' }).then(function(r2) {
+                if (!r2.ok) {
+                    throw new Error('HTTP ' + r2.status);
+                }
+                return r2.text();
+            }).then(function(rawXml2) {
+                return parseXmltvDocumentAsync(rawXml2);
+            });
+        });
+    };
+
+    StalkerAPI.prototype.ensureXmltvLoaded = function(forceRefresh) {
+        var self = this;
+        var urls = this.getEffectiveXmltvUrls();
+        if (urls.length === 0) {
             return Promise.resolve(null);
         }
-        var cached = xmltvCache[xmlUrl];
-        if (cached && cached.catalog && (Date.now() - cached.ts) < 1800000) {
+        var cacheKey = urls.join('||');
+        var cached = xmltvCache[cacheKey];
+        if (!forceRefresh && cached && cached.catalog && (Date.now() - cached.ts) < XMLTV_BACKGROUND_REFRESH_MS) {
             return Promise.resolve(cached.catalog);
+        }
+        if (!forceRefresh && cached && !cached.catalog && !cached.promise && (Date.now() - cached.ts) < 15000) {
+            return Promise.resolve(null);
         }
         if (cached && cached.promise) {
             return cached.promise;
         }
-        if (!xmltvCache[xmlUrl]) {
+        if (!xmltvCache[cacheKey]) {
             var xKeys = Object.keys(xmltvCache);
             if (xKeys.length >= 2) {
                 delete xmltvCache[xKeys[0]];
             }
         }
-        var proxiedUrl = this.proxyUrl + '/xmltv?url=' + encodeURIComponent(xmlUrl);
-        var p = proxyFetch(proxiedUrl, { method: 'GET' }).then(function(r) {
-            if (!r.ok) {
-                throw new Error('HTTP ' + r.status);
-            }
-            return r.text();
-        }).catch(function() {
-            return proxyFetch(xmlUrl, { method: 'GET' }).then(function(r2) {
-                if (!r2.ok) {
-                    throw new Error('HTTP ' + r2.status);
-                }
-                return r2.text();
+        var prevCatalog = (cached && cached.catalog) ? cached.catalog : null;
+        var prevTs = (cached && cached.ts) ? cached.ts : Date.now();
+        var p = Promise.all(urls.map(function(u) {
+            return self.fetchSingleXmltvCatalog(u).catch(function() {
+                return null;
             });
-        }).then(function(rawXml) {
-            return parseXmltvDocumentAsync(rawXml);
-        }).then(function(parsed) {
-            xmltvCache[xmlUrl] = { ts: Date.now(), catalog: parsed, promise: null };
-            return parsed;
+        })).then(function(results) {
+            var validCats = [];
+            for (var i = 0; i < results.length; i++) {
+                if (results[i] && results[i].programsByChannel && Object.keys(results[i].programsByChannel).length > 0) {
+                    validCats.push(results[i]);
+                }
+            }
+            if (validCats.length === 0) {
+                xmltvCache[cacheKey] = { ts: prevCatalog ? prevTs : Date.now(), catalog: prevCatalog, promise: null };
+                return prevCatalog;
+            }
+            var finalCatalog = validCats.length === 1 ? validCats[0] : mergeXmltvCatalogs(validCats);
+            xmltvCache[cacheKey] = { ts: Date.now(), catalog: finalCatalog, promise: null };
+            return finalCatalog;
         }).catch(function() {
-            xmltvCache[xmlUrl] = { ts: Date.now(), catalog: null, promise: null };
+            xmltvCache[cacheKey] = { ts: prevCatalog ? prevTs : Date.now(), catalog: prevCatalog, promise: null };
+            return prevCatalog;
+        });
+        xmltvCache[cacheKey] = { ts: prevTs, catalog: prevCatalog, promise: p };
+        return p;
+    };
+    StalkerAPI.prototype.refreshStaleXmltvIfNeeded = function(force) {
+        var self = this;
+        var urls = this.getEffectiveXmltvUrls();
+        if (urls.length === 0) {
+            return Promise.resolve(null);
+        }
+        var cacheKey = urls.join('||');
+        var cached = xmltvCache[cacheKey];
+        var isStale = Boolean(force) || !cached || !cached.catalog || (Date.now() - cached.ts) >= XMLTV_BACKGROUND_REFRESH_MS;
+        if (!isStale) {
+            return Promise.resolve(cached.catalog);
+        }
+        return this.ensureXmltvLoaded(true).then(function(catalog) {
+            if (catalog && typeof refreshUiAfterXmltvUpdate === 'function') {
+                refreshUiAfterXmltvUpdate();
+            }
+            return catalog;
+        }).catch(function() {
             return null;
         });
-        xmltvCache[xmlUrl] = { ts: Date.now(), catalog: null, promise: p };
-        return p;
     };
     StalkerAPI.prototype.fetchShortEpg = function(channelId, keepInFlight) {
         var self = this;
@@ -4742,7 +5779,9 @@
         if (this.getProviderType() === 'm3u') {
             return this.ensureXmltvLoaded().then(function(xmlCat) {
                 var list = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
-                storeShortEpgEntry(key, list);
+                if (xmlCat !== null) {
+                    storeShortEpgEntry(key, list);
+                }
                 return list;
             });
         }
@@ -4754,19 +5793,29 @@
                     storeShortEpgEntry(key, list);
                     return list;
                 }
-                var customEpg = String((getActiveProfile() && getActiveProfile().epgUrl) || '').trim();
-                if (!customEpg) {
+                if (self.getEffectiveXmltvUrls().length === 0) {
                     storeShortEpgEntry(key, []);
                     return [];
                 }
                 return self.ensureXmltvLoaded().then(function(xmlCat) {
                     var xmlList = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
-                    storeShortEpgEntry(key, xmlList);
+                    if (xmlCat !== null) {
+                        storeShortEpgEntry(key, xmlList);
+                    }
                     return xmlList;
                 });
             }).catch(function(err) {
                 if (err && (err.isAborted || err.name === 'AbortError' || /abort/i.test(String(err.message || '')))) {
                     return [];
+                }
+                if (self.getEffectiveXmltvUrls().length > 0) {
+                    return self.ensureXmltvLoaded().then(function(xmlCat) {
+                        var xmlList = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
+                        if (xmlCat !== null) {
+                            storeShortEpgEntry(key, xmlList);
+                        }
+                        return xmlList;
+                    });
                 }
                 storeShortEpgEntry(key, []);
                 return [];
@@ -4789,19 +5838,29 @@
                 storeShortEpgEntry(key, list);
                 return list;
             }
-            var customEpg = String((getActiveProfile() && getActiveProfile().epgUrl) || '').trim();
-            if (!customEpg) {
+            if (self.getEffectiveXmltvUrls().length === 0) {
                 storeShortEpgEntry(key, []);
                 return [];
             }
             return self.ensureXmltvLoaded().then(function(xmlCat) {
                 var xmlList = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
-                storeShortEpgEntry(key, xmlList);
+                if (xmlCat !== null) {
+                    storeShortEpgEntry(key, xmlList);
+                }
                 return xmlList;
             });
         }).catch(function(err) {
             if (err && (err.isAborted || err.name === 'AbortError' || /abort/i.test(String(err.message || '')))) {
                 return [];
+            }
+            if (self.getEffectiveXmltvUrls().length > 0) {
+                return self.ensureXmltvLoaded().then(function(xmlCat) {
+                    var xmlList = xmlCat ? lookupXmltvChannelPrograms(xmlCat, chObj) : [];
+                    if (xmlCat !== null) {
+                        storeShortEpgEntry(key, xmlList);
+                    }
+                    return xmlList;
+                });
             }
             storeShortEpgEntry(key, []);
             return [];
@@ -5212,6 +6271,7 @@
         renderCats();
         renderItems();
         updatePreviewPanel();
+        scheduleBackupSyncToProxy();
     }
     function isContentModeId(modeId) {
         return modeId === 'live' || modeId === 'vod' || modeId === 'series';
@@ -5295,6 +6355,7 @@
         }
         renderItems();
         updatePreviewPanel();
+        scheduleBackupSyncToProxy();
         showToast((delta < 0 ? '⬆ Moved Up: ' : '⬇ Moved Down: ') + selItem.name);
     }
     function writeTextToTizenStorage(fileName, content, onDone) {
@@ -5719,7 +6780,11 @@
                 showToast('⚠ Could not resolve stream URL for recording');
                 return;
             }
-            var recEndpoint = api.proxyUrl + '/record?action=start&url=' + encodeURIComponent(cleanUrl) + '&name=' + encodeURIComponent(target.name || 'channel');
+            var effRecHdrs = resolveEffectivePortalHeaders(getActiveProfile(), target);
+            var recEndpoint = appendProxyHeaderQuery(
+                api.proxyUrl + '/record?action=start&url=' + encodeURIComponent(cleanUrl) + '&name=' + encodeURIComponent(target.name || 'channel'),
+                effRecHdrs
+            );
             return proxyFetch(recEndpoint, { method: 'GET' }).then(function(r) { return r.json(); }).then(function(d) {
                 if (d && (d.active || d.ok || d.recording)) {
                     updateRecBadge(d);
@@ -5739,6 +6804,159 @@
             });
         }).catch(function(err) {
             showToast('⚠ Recording error: ' + err.message);
+        });
+    }
+    function syncScheduledDvrList() {
+        return proxyFetch(api.proxyUrl + '/record?action=schedule_list', { method: 'GET' })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d && Array.isArray(d.schedules)) {
+                    scheduledDvrList = d.schedules;
+                    if (epgModalOpen) {
+                        if (epgViewMode === 'grid') {
+                            renderEpgGridView();
+                        } else {
+                            if (epgModalList) { epgModalList._forceRebuild = true; }
+                            renderEpgModalList();
+                        }
+                    }
+                }
+                return scheduledDvrList;
+            })
+            .catch(function() {
+                return scheduledDvrList;
+            });
+    }
+    function findScheduledDvrJob(chId, startTs) {
+        var cId = String(chId || '');
+        var sTs = Number(startTs || 0);
+        if (!cId || !sTs || !Array.isArray(scheduledDvrList)) {
+            return null;
+        }
+        for (var i = 0; i < scheduledDvrList.length; i++) {
+            var job = scheduledDvrList[i];
+            if (job && String(job.chId) === cId && Number(job.startTs) === sTs && job.status !== 'cancelled') {
+                return job;
+            }
+        }
+        return null;
+    }
+    function syncEpgRecButtonState(channel, prog) {
+        if (!btnEpgRecEl) {
+            return;
+        }
+        var isScheduled = Boolean(channel && prog && findScheduledDvrJob(channel.id, prog.start_timestamp));
+        if (isScheduled) {
+            btnEpgRecEl.classList.add('scheduled');
+            btnEpgRecEl.textContent = '✕ Cancel Rec [RED]';
+        } else {
+            btnEpgRecEl.classList.remove('scheduled');
+            btnEpgRecEl.textContent = '● Schedule Rec [RED]';
+        }
+    }
+    function toggleScheduledDvrForEpgProgram(channel, prog) {
+        if (!channel || !prog || !prog.start_timestamp) {
+            showToast('● Select a Live TV program in EPG first');
+            return;
+        }
+        if (prog.isPast) {
+            showToast('⚠ Past programs cannot be scheduled — press OK to play Catch-Up if available');
+            return;
+        }
+        var startTs = Number(prog.start_timestamp || 0);
+        var stopTs = Number(prog.stop_timestamp || (startTs + 3600));
+        if (stopTs <= startTs) {
+            stopTs = startTs + 3600;
+        }
+        var existing = findScheduledDvrJob(channel.id, startTs);
+        if (existing) {
+            proxyFetch(api.proxyUrl + '/record?action=schedule_cancel&id=' + encodeURIComponent(existing.id) + '&chId=' + encodeURIComponent(String(channel.id)) + '&startTs=' + encodeURIComponent(String(startTs)), { method: 'GET' })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d && Array.isArray(d.schedules)) {
+                        scheduledDvrList = d.schedules;
+                    }
+                    if (existing.status === 'recording' || isRecordingStream) {
+                        proxyFetch(api.proxyUrl + '/record?action=status', { method: 'GET' })
+                            .then(function(rs) { return rs.json(); })
+                            .then(function(st) { updateRecBadge(st); })
+                            .catch(function() { updateRecBadge({ active: false }); });
+                    }
+                    showToast('✕ Cancelled Scheduled Rec: ' + (prog.name || 'Program'));
+                    if (epgModalOpen) {
+                        if (epgViewMode === 'grid') {
+                            renderEpgGridView();
+                        } else {
+                            if (epgModalList) { epgModalList._forceRebuild = true; }
+                            renderEpgModalList();
+                        }
+                    }
+                    if (dvrModalOpen) {
+                        refreshDvrModalList();
+                    }
+                })
+                .catch(function() {
+                    showToast('⚠ Failed to cancel scheduled recording');
+                });
+            return;
+        }
+        showToast('● Scheduling DVR Recording: ' + (prog.name || channel.name) + '...');
+        api.resolveStream(channel, false).then(function(url) {
+            var cleanUrl = unwrapProxyStreamUrl(String(url || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim());
+            if (!cleanUrl) {
+                throw new Error('Could not resolve stream URL');
+            }
+            var effHdrs = resolveEffectivePortalHeaders(getActiveProfile(), channel);
+            var reqBody = {
+                chId: String(channel.id),
+                chName: String(channel.name || 'Channel'),
+                progName: String(prog.name || 'Scheduled Program'),
+                url: cleanUrl,
+                startTs: startTs,
+                stopTs: stopTs,
+                userAgent: effHdrs.userAgent || '',
+                httpReferer: effHdrs.httpReferer || ''
+            };
+            return proxyFetch(api.proxyUrl + '/record?action=schedule_add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reqBody)
+            }).then(function(r) { return r.json(); });
+        }).then(function(d) {
+            if (!d || !d.ok) {
+                throw new Error((d && d.error) || 'Proxy rejected schedule');
+            }
+            if (Array.isArray(d.schedules)) {
+                scheduledDvrList = d.schedules;
+            }
+            if (d.schedule && d.schedule.status === 'recording') {
+                updateRecBadge({ active: true, elapsedSec: 0, bytes: 0 });
+                if (recordingPollTimer) {
+                    clearInterval(recordingPollTimer);
+                }
+                recordingPollTimer = setInterval(function() {
+                    proxyFetch(api.proxyUrl + '/record?action=status', { method: 'GET' })
+                        .then(function(r2) { return r2.json(); })
+                        .then(function(st) { updateRecBadge(st); })
+                        .catch(function() {});
+                }, 2000);
+                showToast('● Recording Scheduled Show Now: ' + (prog.name || channel.name));
+            } else {
+                showToast('● Scheduled DVR Rec: ' + (prog.name || channel.name) + ' (' + (prog.timeLabel || '') + ')');
+            }
+            if (epgModalOpen) {
+                if (epgViewMode === 'grid') {
+                    renderEpgGridView();
+                } else {
+                    if (epgModalList) { epgModalList._forceRebuild = true; }
+                    renderEpgModalList();
+                }
+            }
+            if (dvrModalOpen) {
+                refreshDvrModalList();
+            }
+        }).catch(function(err) {
+            showToast('⚠ Schedule failed: ' + (err && err.message ? err.message : 'Proxy error'));
         });
     }
     function formatDvrSize(bytes) {
@@ -5768,6 +6986,41 @@
         if (stopBtn) {
             stopBtn.style.display = isRecordingStream ? '' : 'none';
         }
+        var playBtn = document.getElementById('btn-dvr-play');
+        var usbBtn = document.getElementById('btn-dvr-usb');
+        var delBtn = document.getElementById('btn-dvr-delete');
+        var curItem = dvrModalItems[dvrModalIdx] || null;
+        var isRecordingSched = Boolean(curItem && curItem.isScheduledJob && curItem.status === 'recording');
+        var isPendingSched = Boolean(curItem && curItem.isScheduledJob && !curItem.fileName && !isRecordingSched);
+        if (playBtn) {
+            if (isPendingSched) {
+                if (curItem && curItem.url) {
+                    playBtn.textContent = '⚡ Watch Live Channel';
+                    playBtn.classList.remove('btn-disabled-pending');
+                } else {
+                    playBtn.textContent = '▶ Play Clip (Pending)';
+                    playBtn.classList.add('btn-disabled-pending');
+                }
+            } else if (isRecordingSched && !curItem.fileName) {
+                playBtn.textContent = '⚡ Watch Live Channel';
+                playBtn.classList.remove('btn-disabled-pending');
+            } else {
+                playBtn.textContent = '▶ Play Clip';
+                playBtn.classList.remove('btn-disabled-pending');
+            }
+        }
+        if (usbBtn) {
+            if (isPendingSched || isRecordingSched) {
+                usbBtn.textContent = '💾 Export (Pending)';
+                usbBtn.classList.add('btn-disabled-pending');
+            } else {
+                usbBtn.textContent = '💾 Export to USB';
+                usbBtn.classList.remove('btn-disabled-pending');
+            }
+        }
+        if (delBtn) {
+            delBtn.textContent = (curItem && curItem.isScheduledJob) ? '✕ Cancel Schedule' : '✕ Delete Clip';
+        }
         var btns = getDvrActionButtons();
         if (dvrModalActionIdx >= btns.length) {
             dvrModalActionIdx = Math.max(0, btns.length - 1);
@@ -5789,7 +7042,20 @@
                 titleEl.textContent = 'No saved DVR clips';
             }
             if (metaEl) {
-                metaEl.textContent = 'Use "● Record Clip" on any Live TV channel to save persistent .TS recordings here.';
+                metaEl.textContent = 'Use "● Record Clip" on Live TV or RED in EPG Guide to record or schedule shows here.';
+            }
+            return;
+        }
+        if (item.isScheduledJob) {
+            var sDate = item.startTs ? new Date(Number(item.startTs) * 1000).toLocaleString() : '';
+            var eDate = item.stopTs ? formatUnixTimeHM(Number(item.stopTs)) : '';
+            var isRecSched = item.status === 'recording';
+            if (titleEl) {
+                titleEl.textContent = (isRecSched ? '🔴 [REC SCHED] ' : '🔴 [SCHEDULED] ') + (item.progName || item.title || 'Program');
+            }
+            if (metaEl) {
+                var sizeLine = item.fileName ? ('\nFile: ' + item.fileName + (item.sizeBytes ? (' (' + formatDvrSize(item.sizeBytes) + ')') : '')) : '';
+                metaEl.textContent = 'Channel: ' + (item.chName || 'Channel') + '\nWindow: ' + sDate + (eDate ? (' - ' + eDate) : '') + '\nStatus: ' + String(item.status || 'scheduled').toUpperCase() + sizeLine;
             }
             return;
         }
@@ -5821,6 +7087,11 @@
             });
         }
         renderList(listEl, dvrModalItems, dvrModalIdx, function(clip) {
+            if (clip.isScheduledJob) {
+                var sClock = clip.startTs ? formatUnixTimeHM(Number(clip.startTs)) : '';
+                var sizeTag = (clip.status === 'recording' && clip.sizeBytes) ? (' • ' + formatDvrSize(clip.sizeBytes)) : '';
+                return '🔴 [SCHED ' + sClock + '] ' + (clip.progName || clip.title || 'Program') + ' • ' + (clip.chName || '') + ' (' + String(clip.status || 'scheduled').toUpperCase() + sizeTag + ')';
+            }
             return (clip.isRecording ? '🔴 ' : '📼 ') + (clip.title || clip.fileName) + '  (' + formatDvrSize(clip.sizeBytes) + ')';
         }, 12);
         if (dvrModalFocusArea !== 'list' && listEl.children) {
@@ -5836,12 +7107,49 @@
         return proxyFetch(api.proxyUrl + '/record?action=list', { method: 'GET' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                dvrModalItems = (data && Array.isArray(data.recordings)) ? data.recordings : [];
+                var recClips = (data && Array.isArray(data.recordings)) ? data.recordings : [];
+                var schedRaw = (data && Array.isArray(data.schedules)) ? data.schedules : [];
+                scheduledDvrList = schedRaw;
+                if (data && data.active !== undefined) {
+                    isRecordingStream = Boolean(data.active);
+                }
+                var recByFile = {};
+                for (var rf = 0; rf < recClips.length; rf++) {
+                    if (recClips[rf] && recClips[rf].fileName) {
+                        recByFile[recClips[rf].fileName] = recClips[rf];
+                    }
+                }
+                var mergedFiles = {};
+                var combined = [];
+                var schedCount = 0;
+                for (var s = 0; s < schedRaw.length; s++) {
+                    var sj = schedRaw[s];
+                    if (sj && sj.status !== 'completed' && sj.status !== 'cancelled') {
+                        var matchRec = (sj.fileName && recByFile[sj.fileName]) ? recByFile[sj.fileName] : null;
+                        if (matchRec && sj.fileName) {
+                            mergedFiles[sj.fileName] = true;
+                        }
+                        combined.push(extendObj(sj, {
+                            isScheduledJob: true,
+                            sizeBytes: matchRec ? matchRec.sizeBytes : (sj.sizeBytes || 0),
+                            createdAt: matchRec ? matchRec.createdAt : (sj.createdAt || 0)
+                        }));
+                        schedCount++;
+                    }
+                }
+                for (var rIdx = 0; rIdx < recClips.length; rIdx++) {
+                    var rc = recClips[rIdx];
+                    if (rc && rc.fileName && mergedFiles[rc.fileName]) {
+                        continue;
+                    }
+                    combined.push(rc);
+                }
+                dvrModalItems = combined;
                 if (dvrModalIdx >= dvrModalItems.length) {
                     dvrModalIdx = Math.max(0, dvrModalItems.length - 1);
                 }
                 if (storageEl) {
-                    storageEl.textContent = dvrModalItems.length + ' clip(s)' + (data && data.dataDir ? ' • Persistent' : '');
+                    storageEl.textContent = recClips.length + ' clip(s)' + (schedCount > 0 ? (' • ' + schedCount + ' scheduled') : '') + (data && data.dataDir ? ' • Persistent' : '');
                 }
                 if (dvrModalItems.length === 0) {
                     dvrModalFocusArea = 'actions';
@@ -5863,6 +7171,31 @@
     }
     function playSelectedDvrClip() {
         var clip = dvrModalItems[dvrModalIdx];
+        if (clip && clip.isScheduledJob && !clip.fileName) {
+            if (clip.url) {
+                closeDvrModal();
+                setOverlayVisible(false);
+                var knownCh = (clip.chId && channelByIdMap[String(clip.chId)]) ? channelByIdMap[String(clip.chId)] : null;
+                if (knownCh) {
+                    playItem(knownCh);
+                    syncLiveChannelCursorOnZap(knownCh);
+                } else {
+                    playItem({
+                        id: clip.chId ? String(clip.chId) : 'sched_live',
+                        name: clip.chName || clip.progName || 'Live Channel',
+                        cmd: clip.url,
+                        directUrl: true,
+                        userAgent: clip.ua || '',
+                        httpReferer: clip.referer || '',
+                        isVod: false,
+                        isSeries: false
+                    });
+                }
+                return;
+            }
+            showToast('🔴 Scheduled for ' + (clip.startTs ? formatUnixTimeHM(Number(clip.startTs)) : 'later') + ' — clip not recorded yet');
+            return;
+        }
         if (!clip || !clip.fileName) {
             showToast('📼 Select a DVR recording first');
             return;
@@ -5883,6 +7216,10 @@
     }
     function exportSelectedDvrClipToUsb() {
         var clip = dvrModalItems[dvrModalIdx];
+        if (clip && clip.isScheduledJob) {
+            showToast('💾 Wait until the scheduled recording completes before exporting');
+            return;
+        }
         if (!clip || !clip.fileName) {
             showToast('💾 Select a DVR recording first');
             return;
@@ -5947,7 +7284,31 @@
     }
     function deleteSelectedDvrClip() {
         var clip = dvrModalItems[dvrModalIdx];
-        if (!clip || !clip.fileName) {
+        if (!clip) {
+            return;
+        }
+        if (clip.isScheduledJob) {
+            proxyFetch(api.proxyUrl + '/record?action=schedule_cancel&id=' + encodeURIComponent(clip.id || ''), { method: 'GET' })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d && Array.isArray(d.schedules)) {
+                        scheduledDvrList = d.schedules;
+                    }
+                    if (clip.status === 'recording' || isRecordingStream) {
+                        proxyFetch(api.proxyUrl + '/record?action=status', { method: 'GET' })
+                            .then(function(rs) { return rs.json(); })
+                            .then(function(st) { updateRecBadge(st); })
+                            .catch(function() { updateRecBadge({ active: false }); });
+                    }
+                    showToast('✕ Cancelled scheduled recording: ' + (clip.progName || 'Program'));
+                    refreshDvrModalList();
+                })
+                .catch(function() {
+                    showToast('⚠ Could not cancel scheduled recording');
+                });
+            return;
+        }
+        if (!clip.fileName) {
             return;
         }
         proxyFetch(api.proxyUrl + '/record?action=delete&file=' + encodeURIComponent(clip.fileName), { method: 'GET' })
@@ -6034,8 +7395,9 @@
                     }
                 }
             }
-            var uaHdr = target.userAgent || mergedHdrs['user-agent'] || '';
-            var refHdr = target.httpReferer || mergedHdrs.referer || mergedHdrs.referrer || '';
+            var effProbeHdrs = resolveEffectivePortalHeaders(getActiveProfile(), extendObj(target, { streamHeaders: mergedHdrs }));
+            var uaHdr = effProbeHdrs.userAgent;
+            var refHdr = effProbeHdrs.httpReferer;
             var ckHdr = mergedHdrs.cookie || '';
             var origHdr = mergedHdrs.origin || '';
             var diagUrl = api.proxyUrl + '/stream-diag?probe=1&url=' + encodeURIComponent(cleanUrl);
@@ -6755,6 +8117,33 @@
         return payload;
     }
 
+    function syncBackupToProxyNow() {
+        try {
+            var payload = buildBackupPayload();
+            var jsonStr = JSON.stringify(payload);
+            if (jsonStr.length <= 500000) {
+                safeSetStorage('vortixtv_local_backup', jsonStr);
+            }
+            return proxyFetch(api.proxyUrl + '/backup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: jsonStr
+            }).catch(function() {});
+        } catch (eBkSync) {
+            return Promise.resolve();
+        }
+    }
+
+    function scheduleBackupSyncToProxy() {
+        if (backupSyncTimer) {
+            clearTimeout(backupSyncTimer);
+        }
+        backupSyncTimer = setTimeout(function() {
+            backupSyncTimer = null;
+            syncBackupToProxyNow();
+        }, 800);
+    }
+
     function exportBackupJson() {
         var payload = buildBackupPayload();
         var jsonStr = JSON.stringify(payload, null, 2);
@@ -6789,19 +8178,64 @@
         } catch (ex) {}
     }
 
-    function applyRestoredBackupData(data) {
-        if (data && data.storage && typeof data.storage === 'object') {
-            var keys = Object.keys(data.storage);
-            for (var i = 0; i < keys.length; i++) {
-                safeSetStorage(keys[i], data.storage[keys[i]]);
+    function applyRestoredBackupData(data, skipReload) {
+        var parsed = data;
+        if (typeof parsed === 'string') {
+            try {
+                parsed = JSON.parse(parsed);
+            } catch (eParseStr) {
+                return false;
             }
-            showToast('⬆ Backup restored! Rebooting...');
+        }
+        if (parsed && typeof parsed === 'object' && parsed.backup !== undefined && !parsed.storage && !parsed.profiles) {
+            var inner = parsed.backup;
+            if (typeof inner === 'string') {
+                try {
+                    inner = JSON.parse(inner);
+                } catch (eParseInner) {
+                    return false;
+                }
+            }
+            parsed = inner;
+        }
+        if (!parsed || typeof parsed !== 'object') {
+            return false;
+        }
+        var wroteAnything = false;
+        if (parsed.storage && typeof parsed.storage === 'object' && !Array.isArray(parsed.storage)) {
+            var keys = Object.keys(parsed.storage);
+            for (var i = 0; i < keys.length; i++) {
+                var rawVal = parsed.storage[keys[i]];
+                if (rawVal !== undefined && rawVal !== null) {
+                    safeSetStorage(keys[i], typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal));
+                    wroteAnything = true;
+                }
+            }
+        }
+        if (Array.isArray(parsed.profiles) && parsed.profiles.length > 0) {
+            if (!parsed.storage || !parsed.storage.cfg_profiles) {
+                safeSetStorage('cfg_profiles', JSON.stringify(parsed.profiles));
+            }
+            wroteAnything = true;
+        }
+        if (parsed.activeProfileId && (!parsed.storage || !parsed.storage.cfg_active_profile)) {
+            safeSetStorage('cfg_active_profile', String(parsed.activeProfileId));
+            wroteAnything = true;
+        }
+        if (parsed.theme && (!parsed.storage || !parsed.storage.cfg_theme)) {
+            safeSetStorage('cfg_theme', String(parsed.theme));
+            wroteAnything = true;
+        }
+        if (!wroteAnything) {
+            return false;
+        }
+        showToast('📦 Backup restored! Rebooting...');
+        if (!skipReload) {
             setTimeout(function() {
                 window.location.reload();
             }, 600);
-            return true;
         }
-        return false;
+        return true;
     }
 
     function importBackupJson() {
@@ -7314,6 +8748,9 @@
         clearNextEpisodePrompt();
         clearBufferingWatchdog();
         stopShakaStallWatchdog();
+        stopExternalSubtitleTicker();
+        stopPlaybackSubtitlePoll();
+        currentExternalSubActive = false;
         clearSubtitleBox();
         if (seekDebounceTimer) {
             clearTimeout(seekDebounceTimer);
@@ -7752,6 +9189,85 @@
         return false;
     }
 
+    function isDashPlaylistItem(item) {
+        if (!item || typeof item !== 'object') {
+            return false;
+        }
+        var mType = item.manifestType ? String(item.manifestType).toLowerCase() : '';
+        var mime = item.mimeType ? String(item.mimeType).toLowerCase() : '';
+        if (mType === 'mpd' || mime === 'application/dash+xml') {
+            return true;
+        }
+        var rawUrl = '';
+        if (item.cmd) {
+            rawUrl = String(item.cmd);
+        } else if (item.url) {
+            rawUrl = String(item.url);
+        } else if (Array.isArray(item.cmds) && item.cmds.length > 0 && item.cmds[0]) {
+            rawUrl = String(item.cmds[0]);
+        }
+        var cleanUrl = rawUrl.split('|')[0].replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim().toLowerCase();
+        var isHlsOrTs = /\.m3u8(?:$|[?#])/i.test(cleanUrl) || /\.ts(?:$|[?#])/i.test(cleanUrl) || mType === 'hls' || mime === 'application/vnd.apple.mpegurl';
+        if (/\.mpd(?:$|[?#])/i.test(cleanUrl)) {
+            return true;
+        }
+        if (/\/manifest(?:\.mpd)?(?:$|[?#])/i.test(cleanUrl) && !isHlsOrTs) {
+            return true;
+        }
+        var drmType = item.drmType ? String(item.drmType).toLowerCase() : '';
+        var hasClearKeys = Boolean((item.clearKeys && Object.keys(item.clearKeys).length > 0) || item.clearKeyPair || item.clearKeyJwk);
+        if ((drmType === 'clearkey' || drmType === 'widevine' || drmType === 'playready' || hasClearKeys) && !isHlsOrTs) {
+            return true;
+        }
+        return false;
+    }
+
+    function shouldShowDashQualityToolButton() {
+        var selItem = currentItems[itemIdx] || null;
+        if (selItem && isDashPlaylistItem(selItem)) {
+            return true;
+        }
+        if (activePlaybackBackend === 'shaka' && currentPlayingItem && isDashPlaylistItem(currentPlayingItem)) {
+            return true;
+        }
+        return false;
+    }
+
+    function pickBestShakaVariantForHeight(vars, targetHeight) {
+        if (!Array.isArray(vars) || vars.length === 0 || !targetHeight || targetHeight <= 0) {
+            return null;
+        }
+        var exactMatch = null;
+        var highestUnder = null;
+        var lowestOver = null;
+        for (var i = 0; i < vars.length; i++) {
+            var v = vars[i];
+            if (!v) {
+                continue;
+            }
+            var vh = Number(v.height) || 0;
+            var vbw = Number(v.bandwidth) || 0;
+            if (vh === targetHeight) {
+                if (!exactMatch || vbw > (Number(exactMatch.bandwidth) || 0)) {
+                    exactMatch = v;
+                }
+            } else if (vh > 0 && vh < targetHeight) {
+                var underH = highestUnder ? (Number(highestUnder.height) || 0) : 0;
+                var underBw = highestUnder ? (Number(highestUnder.bandwidth) || 0) : 0;
+                if (!highestUnder || vh > underH || (vh === underH && vbw > underBw)) {
+                    highestUnder = v;
+                }
+            } else if (vh > targetHeight) {
+                var overH = lowestOver ? (Number(lowestOver.height) || 0) : 0;
+                var overBw = lowestOver ? (Number(lowestOver.bandwidth) || 0) : 0;
+                if (!lowestOver || vh < overH || (vh === overH && vbw > overBw)) {
+                    lowestOver = v;
+                }
+            }
+        }
+        return exactMatch || highestUnder || lowestOver || null;
+    }
+
     function needsProxyForHeaders(headersObj) {
         if (!headersObj || typeof headersObj !== 'object') {
             return false;
@@ -7837,8 +9353,10 @@
         var hNum = Number(targetHeight) || 0;
         shakaManualHeightPref = hNum > 0 ? hNum : 0;
         safeSetStorage('cfg_shaka_max_height', String(shakaManualHeightPref));
+        lastQuickActionSig = '';
+        syncQuickActionVisibility();
         if (!shakaInstance) {
-            showToast('📺 Video Quality: ' + (shakaManualHeightPref > 0 ? (shakaManualHeightPref + 'p') : 'Auto ABR'));
+            showToast('Video Quality: ' + (shakaManualHeightPref > 0 ? (shakaManualHeightPref + 'p Target') : 'Auto ABR'));
             return;
         }
         try {
@@ -7854,29 +9372,23 @@
                 });
                 updateOsdStreamTelemetry();
                 showOSD(formatOsdTitle(currentPlayingItem), 'Quality: Auto ABR');
-                showToast('📺 Quality: Auto (Adaptive Bitrate)');
+                showToast('Quality: Auto (Adaptive Bitrate)');
             } else {
+                var vars = shakaInstance.getVariantTracks ? shakaInstance.getVariantTracks() : [];
+                var bestMatch = pickBestShakaVariantForHeight(vars, shakaManualHeightPref);
+                var lockCapHeight = (bestMatch && Number(bestMatch.height) > shakaManualHeightPref) ? Number(bestMatch.height) : shakaManualHeightPref;
                 shakaInstance.configure({
                     abr: {
                         enabled: false,
-                        restrictions: { maxHeight: shakaManualHeightPref }
+                        restrictions: { maxHeight: lockCapHeight }
                     }
                 });
-                var vars = shakaInstance.getVariantTracks ? shakaInstance.getVariantTracks() : [];
-                var bestMatch = null;
-                for (var i = 0; i < vars.length; i++) {
-                    if (vars[i] && Number(vars[i].height) === shakaManualHeightPref) {
-                        if (!bestMatch || Number(vars[i].bandwidth || 0) > Number(bestMatch.bandwidth || 0)) {
-                            bestMatch = vars[i];
-                        }
-                    }
-                }
                 if (bestMatch && typeof shakaInstance.selectVariantTrack === 'function') {
                     shakaInstance.selectVariantTrack(bestMatch, true);
                 }
                 updateOsdStreamTelemetry();
                 showOSD(formatOsdTitle(currentPlayingItem), 'Quality: ' + shakaManualHeightPref + 'p');
-                showToast('📺 Quality Locked: ' + shakaManualHeightPref + 'p');
+                showToast('Quality Locked: ' + shakaManualHeightPref + 'p');
             }
         } catch (eQual) {}
     }
@@ -7906,9 +9418,17 @@
         }
         var cleanUri = unwrapDashProxyUrl(targetUri);
         var proxied = api.proxyUrl + '/dash-proxy?url=' + encodeURIComponent(cleanUri);
-        if (headersObj && typeof headersObj === 'object' && Object.keys(headersObj).length > 0) {
+        var merged = headersObj && typeof headersObj === 'object' ? extendObj(headersObj, null) : {};
+        var effHdrs = resolveEffectivePortalHeaders(getActiveProfile(), null);
+        if (effHdrs.userAgent && !merged['User-Agent'] && !merged['user-agent']) {
+            merged['User-Agent'] = effHdrs.userAgent;
+        }
+        if (effHdrs.httpReferer && !merged.Referer && !merged.referer) {
+            merged.Referer = effHdrs.httpReferer;
+        }
+        if (Object.keys(merged).length > 0) {
             try {
-                proxied += '&hdrs=' + encodeURIComponent(JSON.stringify(headersObj));
+                proxied += '&hdrs=' + encodeURIComponent(JSON.stringify(merged));
             } catch (eHdrSer) {}
         }
         return proxied;
@@ -8403,6 +9923,7 @@
                                     request.uris[0] = buildDashProxyTargetUrl(request.uris[0], (item && (item.drmHeaders || item.streamHeaders)) || null);
                                 }
                             } else {
+                                var effShakaHdrs = resolveEffectivePortalHeaders(getActiveProfile(), item);
                                 if (item && item.streamHeaders) {
                                     var sKeys = Object.keys(item.streamHeaders);
                                     for (var sk = 0; sk < sKeys.length; sk++) {
@@ -8413,11 +9934,21 @@
                                         }
                                     }
                                 }
+                                if (effShakaHdrs.httpReferer && !hasReqHeaderCI(request.headers, 'referer') && useDashProxy) {
+                                    setReqHeaderCI(request.headers, 'Referer', effShakaHdrs.httpReferer);
+                                }
                                 if (authQuery && request.uris && request.uris[0]) {
                                     request.uris[0] = withAuthQuery(request.uris[0], authQuery);
                                 }
                                 if (useDashProxy && request.uris && request.uris[0]) {
-                                    request.uris[0] = buildDashProxyTargetUrl(request.uris[0], (item && item.streamHeaders) || null);
+                                    var dashSegHdrs = (item && item.streamHeaders) ? extendObj(item.streamHeaders, null) : {};
+                                    if (effShakaHdrs.userAgent && !dashSegHdrs['User-Agent'] && !dashSegHdrs['user-agent']) {
+                                        dashSegHdrs['User-Agent'] = effShakaHdrs.userAgent;
+                                    }
+                                    if (effShakaHdrs.httpReferer && !dashSegHdrs.Referer && !dashSegHdrs.referer) {
+                                        dashSegHdrs.Referer = effShakaHdrs.httpReferer;
+                                    }
+                                    request.uris[0] = buildDashProxyTargetUrl(request.uris[0], dashSegHdrs);
                                 }
                             }
                         });
@@ -8796,14 +10327,7 @@
                         if (shakaManualHeightPref > 0 && shakaInstance && typeof shakaInstance.getVariantTracks === 'function') {
                             try {
                                 var initVars = shakaInstance.getVariantTracks() || [];
-                                var chosenManual = null;
-                                for (var mv = 0; mv < initVars.length; mv++) {
-                                    if (initVars[mv] && Number(initVars[mv].height) === shakaManualHeightPref) {
-                                        if (!chosenManual || Number(initVars[mv].bandwidth || 0) > Number(chosenManual.bandwidth || 0)) {
-                                            chosenManual = initVars[mv];
-                                        }
-                                    }
-                                }
+                                var chosenManual = pickBestShakaVariantForHeight(initVars, shakaManualHeightPref);
                                 if (chosenManual && typeof shakaInstance.selectVariantTrack === 'function') {
                                     shakaInstance.selectVariantTrack(chosenManual, false);
                                 }
@@ -8914,6 +10438,7 @@
             showOSD(formatOsdTitle(item), 'Invalid Stream URL');
             return;
         }
+        startPlaybackSubtitlePoll();
         var activeSession = sessionToken || playSessionId;
         var hasSyncedTracksOnBuffer = false;
         if (isPlayingVod || isPlayingCatchup) {
@@ -8940,6 +10465,8 @@
                 if (isPlaybackHealthy) {
                     document.body.classList.add('playing-live');
                 }
+                refreshTrackLists();
+                applySavedTrackPrefsForCurrentItem();
                 if (isPlayingVod || isPlayingCatchup) {
                     var simPct = 25;
                     vodLoadingSimTimer = setInterval(function() {
@@ -8957,7 +10484,8 @@
             avplaySessionOpened = true;
             webapis.avplay.open(streamUrl);
             try {
-                var customUa = (item && item.userAgent) || (item && item.streamHeaders && (item.streamHeaders['User-Agent'] || item.streamHeaders['user-agent'])) || '';
+                var effAvHdrs = resolveEffectivePortalHeaders(getActiveProfile(), item);
+                var customUa = effAvHdrs.userAgent;
                 var streamUserAgent = customUa || ((isPlayingVod || api.getProviderType() !== 'stalker') ?
                     'VLC/3.0.20 LibVLC/3.0.20' :
                     'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3');
@@ -9170,7 +10698,7 @@
                     }
                 },
                 onsubtitlechange: function(duration, text) {
-                    if (activeSession !== playSessionId) { return; }
+                    if (activeSession !== playSessionId || currentExternalSubActive) { return; }
                     renderSubtitleCue(text, duration);
                 },
                 onstreamcompleted: function() {
@@ -9337,18 +10865,20 @@
                     if (activeSession !== playSessionId) {
                         return;
                     }
+                    var effRetryHdrs = resolveEffectivePortalHeaders(getActiveProfile(), item);
                     var cleanCandidate = String(newUrl || failedUrl || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim();
                     if (!isDashOrShakaDrmStream(cleanCandidate, item) && shouldProxyOnRetry(cleanCandidate)) {
-                        cleanCandidate = api.proxyUrl + '/stream?url=' + encodeURIComponent(cleanCandidate);
+                        cleanCandidate = appendProxyHeaderQuery(api.proxyUrl + '/stream?url=' + encodeURIComponent(cleanCandidate), effRetryHdrs);
                     }
                     playUrl(cleanCandidate, item, activeSession);
                 }).catch(function() {
                     if (activeSession !== playSessionId) {
                         return;
                     }
+                    var effRetryHdrs2 = resolveEffectivePortalHeaders(getActiveProfile(), item);
                     var fallbackCandidate = String(failedUrl || '').replace(/^(?:ffmpeg|ffrt\d*|auto|solution)\s+/i, '').trim();
                     if (!isDashOrShakaDrmStream(fallbackCandidate, item) && shouldProxyOnRetry(fallbackCandidate)) {
-                        fallbackCandidate = api.proxyUrl + '/stream?url=' + encodeURIComponent(fallbackCandidate);
+                        fallbackCandidate = appendProxyHeaderQuery(api.proxyUrl + '/stream?url=' + encodeURIComponent(fallbackCandidate), effRetryHdrs2);
                     }
                     playUrl(fallbackCandidate, item, activeSession);
                 });
@@ -9390,8 +10920,9 @@
         }, 1800);
         try {
             var q = api.proxyUrl + '/vod-resolve?url=' + encodeURIComponent(clean);
-            var ua = (item && item.userAgent) || (item && item.streamHeaders && (item.streamHeaders['User-Agent'] || item.streamHeaders['user-agent'])) || '';
-            var ref = (item && item.httpReferer) || (item && item.streamHeaders && (item.streamHeaders.Referer || item.streamHeaders.referer)) || '';
+            var effVodHdrs = resolveEffectivePortalHeaders(getActiveProfile(), item);
+            var ua = effVodHdrs.userAgent;
+            var ref = effVodHdrs.httpReferer;
             var ck = (item && item.streamHeaders && (item.streamHeaders.Cookie || item.streamHeaders.cookie)) || '';
             if (ua) q += '&ua=' + encodeURIComponent(ua);
             if (ref) q += '&referer=' + encodeURIComponent(ref);
@@ -9449,6 +10980,9 @@
             previewEpgTimeout = null;
         }
         api.abortShortEpg();
+        pendingZapIdx = -1;
+        pendingZapListRef = null;
+        pendingZapTargetId = '';
         stopPlayback();
         currentPlayingItem = item;
         syncPlayingRowIndicators();
@@ -9478,7 +11012,12 @@
         } else {
             currentAspect = localStorage.getItem('cfg_default_aspect') || 'PLAYER_DISPLAY_MODE_LETTER_BOX';
         }
-        subtitlesEnabled = (savedMediaPref && savedMediaPref.subOn === false) ? false : true;
+        var effectiveSubDefault = (typeof prefSubLang === 'string') ? prefSubLang : (localStorage.getItem('cfg_pref_sub_lang') || '');
+        if (savedMediaPref && savedMediaPref.subOn !== undefined) {
+            subtitlesEnabled = (savedMediaPref.subOn === false) ? false : true;
+        } else {
+            subtitlesEnabled = (effectiveSubDefault === 'off') ? false : true;
+        }
         if (item.isEpisode) {
             if (currentItems.length > 0 && currentItems[0] && currentItems[0].isEpisode) {
                 playingEpisodeList = currentItems.slice();
@@ -9492,10 +11031,20 @@
         clearNextEpisodePrompt();
 
         var cachedEpg = !isPlayingVod ? shortEpgCache[String(item.id)] : null;
+        var initialEpgList = (cachedEpg && Array.isArray(cachedEpg.list) && cachedEpg.list.length > 0) ? cachedEpg.list : null;
+        if (!initialEpgList && !isPlayingVod && api && typeof api.getLoadedXmltvCatalogSync === 'function') {
+            var loadedXmlForOsd = api.getLoadedXmltvCatalogSync();
+            if (loadedXmlForOsd) {
+                var xmlOsdList = lookupXmltvChannelPrograms(loadedXmlForOsd, item);
+                if (xmlOsdList && xmlOsdList.length > 0) {
+                    initialEpgList = xmlOsdList;
+                }
+            }
+        }
         var initialNow = item.isVod ? (item.desc || 'Movie / Series') : 'Loading EPG...';
         var initialNext = '';
-        if (cachedEpg && Array.isArray(cachedEpg.list)) {
-            var parsedCached = parseShortEpgNowNext(cachedEpg.list);
+        if (initialEpgList) {
+            var parsedCached = parseShortEpgNowNext(initialEpgList);
             initialNow = parsedCached.now;
             initialNext = parsedCached.next;
         }
@@ -9589,7 +11138,12 @@
         } else {
             currentAspect = localStorage.getItem('cfg_default_aspect') || 'PLAYER_DISPLAY_MODE_LETTER_BOX';
         }
-        subtitlesEnabled = (catchupPref && catchupPref.subOn === false) ? false : true;
+        var catchupSubDef = (typeof prefSubLang === 'string') ? prefSubLang : (localStorage.getItem('cfg_pref_sub_lang') || '');
+        if (catchupPref && catchupPref.subOn !== undefined) {
+            subtitlesEnabled = (catchupPref.subOn === false) ? false : true;
+        } else {
+            subtitlesEnabled = (catchupSubDef === 'off') ? false : true;
+        }
         vodDurationMs = Math.max(0, (Number(epgProg.stop_timestamp) - Number(epgProg.start_timestamp)) * 1000);
         vodCurrentMs = 0;
         showOSD(catchupItem.name, 'CATCH-UP', 'Archive: ' + epgProg.timeLabel, epgProg.descr || '');
@@ -9612,6 +11166,9 @@
     }
 
     function parseTrackLabel(trackObj, fallbackNum) {
+        if (trackObj && trackObj._isExternal && trackObj._extLabel) {
+            return String(trackObj._extLabel);
+        }
         if (!trackObj || !trackObj.extra_info) {
             return 'Track #' + fallbackNum;
         }
@@ -9752,38 +11309,61 @@
                         });
                     }
                 }
-                if (foundShakaText.length > 0) {
-                    textTracks = foundShakaText;
+                textTracks = foundShakaText;
+                if (externalSubtitleData && Array.isArray(externalSubtitleData.cues) && externalSubtitleData.cues.length > 0) {
+                    textTracks.push({
+                        index: -999,
+                        type: 'TEXT',
+                        language: externalSubtitleData.format || 'srt',
+                        _isExternal: true,
+                        _active: Boolean(subtitlesEnabled && currentExternalSubActive),
+                        _extLabel: 'External LAN: ' + externalSubtitleData.name + ' (' + String(externalSubtitleData.format || 'srt').toUpperCase() + ' • ' + externalSubtitleData.cues.length + ' cues)',
+                        extra_info: JSON.stringify({
+                            language: String(externalSubtitleData.format || 'srt').toUpperCase(),
+                            name: externalSubtitleData.name
+                        })
+                    });
                 }
             } catch (eShTracks) {}
             return;
         }
+        var foundText = [];
         try {
-            if (typeof webapis === 'undefined' || !webapis.avplay || !webapis.avplay.getTotalTrackInfo) {
-                return;
-            }
-            var tracks = webapis.avplay.getTotalTrackInfo() || [];
-            var foundAudio = [];
-            var foundText = [];
-            for (var i = 0; i < tracks.length; i++) {
-                var t = tracks[i];
-                if (!t) {
-                    continue;
+            if (typeof webapis !== 'undefined' && webapis.avplay && webapis.avplay.getTotalTrackInfo) {
+                var tracks = webapis.avplay.getTotalTrackInfo() || [];
+                var foundAudio = [];
+                for (var i = 0; i < tracks.length; i++) {
+                    var t = tracks[i];
+                    if (!t) {
+                        continue;
+                    }
+                    var tType = String(t.type || '').toUpperCase();
+                    if (tType === 'AUDIO' || tType === 'SOUND') {
+                        foundAudio.push(t);
+                    } else if (tType === 'TEXT' || tType === 'SUBTITLE') {
+                        foundText.push(t);
+                    }
                 }
-                var tType = String(t.type || '').toUpperCase();
-                if (tType === 'AUDIO' || tType === 'SOUND') {
-                    foundAudio.push(t);
-                } else if (tType === 'TEXT' || tType === 'SUBTITLE') {
-                    foundText.push(t);
+                if (foundAudio.length > 0) {
+                    audioTracks = foundAudio;
                 }
-            }
-            if (foundAudio.length > 0) {
-                audioTracks = foundAudio;
-            }
-            if (foundText.length > 0) {
-                textTracks = foundText;
             }
         } catch (ex) {}
+        textTracks = foundText;
+        if (externalSubtitleData && Array.isArray(externalSubtitleData.cues) && externalSubtitleData.cues.length > 0) {
+            textTracks.push({
+                index: -999,
+                type: 'TEXT',
+                language: externalSubtitleData.format || 'srt',
+                _isExternal: true,
+                _active: Boolean(subtitlesEnabled && currentExternalSubActive),
+                _extLabel: 'External LAN: ' + externalSubtitleData.name + ' (' + String(externalSubtitleData.format || 'srt').toUpperCase() + ' • ' + externalSubtitleData.cues.length + ' cues)',
+                extra_info: JSON.stringify({
+                    language: String(externalSubtitleData.format || 'srt').toUpperCase(),
+                    name: externalSubtitleData.name
+                })
+            });
+        }
     }
 
     function syncInitialActiveTracks() {
@@ -9970,26 +11550,84 @@
         }
         return '';
     }
+    function matchTrackIndexByLanguage(tracks, prefCode, extractFn) {
+        if (!Array.isArray(tracks) || tracks.length === 0 || !prefCode) {
+            return -1;
+        }
+        var target = String(prefCode).trim().toLowerCase();
+        if (!target || target === 'off' || target === 'und') {
+            return -1;
+        }
+        var LANG_SYNONYMS = {
+            eng: ['eng', 'en', 'english'],
+            ara: ['ara', 'ar', 'arb', 'arabic', 'عربي', 'عربية', 'العربية'],
+            spa: ['spa', 'es', 'esp', 'spanish', 'espanol', 'español'],
+            fre: ['fre', 'fra', 'fr', 'french', 'francais', 'français'],
+            ger: ['ger', 'deu', 'de', 'german', 'deutsch'],
+            tur: ['tur', 'tr', 'turkish', 'turkce', 'türkçe'],
+            por: ['por', 'pt', 'portuguese', 'portugues', 'português'],
+            ita: ['ita', 'it', 'italian', 'italiano'],
+            rus: ['rus', 'ru', 'russian', 'русский'],
+            hin: ['hin', 'hi', 'hindi', 'हिन्दी']
+        };
+        var candidates = [target];
+        var canonKeys = Object.keys(LANG_SYNONYMS);
+        for (var c = 0; c < canonKeys.length; c++) {
+            var syns = LANG_SYNONYMS[canonKeys[c]];
+            if (syns.indexOf(target) !== -1) {
+                candidates = syns;
+                break;
+            }
+        }
+        var fn = typeof extractFn === 'function' ? extractFn : function(tr) {
+            return String((tr && (tr.language || tr.lang)) || '').trim().toLowerCase();
+        };
+        for (var pass = 0; pass < 2; pass++) {
+            for (var i = 0; i < tracks.length; i++) {
+                var raw = String(fn(tracks[i]) || '').trim().toLowerCase();
+                if (!raw || raw === 'und') {
+                    continue;
+                }
+                var primaryToken = raw.split(/[-_\s,;/()]+/)[0];
+                if (pass === 0) {
+                    if (candidates.indexOf(raw) !== -1 || candidates.indexOf(primaryToken) !== -1) {
+                        return i;
+                    }
+                } else {
+                    for (var s = 0; s < candidates.length; s++) {
+                        if (candidates[s].length >= 3 && raw.indexOf(candidates[s]) !== -1) {
+                            return i;
+                        }
+                    }
+                }
+            }
+        }
+        return -1;
+    }
+
     function applySavedTrackPrefsForCurrentItem() {
         if (hasAppliedSavedTrackPrefs || !currentPlayingItem) {
             return;
         }
-        var pref = getItemMediaPrefs(currentPlayingItem);
-        if (!pref) {
-            return;
+        if (externalSubtitleAutoSelectPending && externalSubtitleData && Array.isArray(externalSubtitleData.cues) && externalSubtitleData.cues.length > 0) {
+            var extSubIdx = findExternalSubtitleTrackIndex();
+            if (extSubIdx !== -1) {
+                externalSubtitleAutoSelectPending = false;
+                selectSubtitleTrackByArrayIndex(extSubIdx, true);
+                showToast('💬 External Subtitle Active: ' + externalSubtitleData.name);
+            }
         }
+        var pref = getItemMediaPrefs(currentPlayingItem) || {};
+        var globalAudioPref = (typeof prefAudioLang === 'string' && prefAudioLang) ? prefAudioLang : (localStorage.getItem('cfg_pref_audio_lang') || '');
+        var globalSubPref = (typeof prefSubLang === 'string') ? prefSubLang : (localStorage.getItem('cfg_pref_sub_lang') || '');
+        var effectiveAudLang = pref.audLang || globalAudioPref;
         var appliedAny = false;
-        if (audioTracks.length > 0 && (pref.audLang || (pref.audIdx !== undefined && pref.audIdx >= 0))) {
+        if (audioTracks.length > 0 && (effectiveAudLang || (pref.audIdx !== undefined && pref.audIdx >= 0))) {
             var isFallbackOnly = Boolean(audioTracks.length === 1 && audioTracks[0]._isMseFallback);
             if (!isFallbackOnly) {
                 var targetA = -1;
-                if (pref.audLang) {
-                    for (var a = 0; a < audioTracks.length; a++) {
-                        if (extractTrackLangCode(audioTracks[a]) === pref.audLang) {
-                            targetA = a;
-                            break;
-                        }
-                    }
+                if (effectiveAudLang) {
+                    targetA = matchTrackIndexByLanguage(audioTracks, effectiveAudLang, extractTrackLangCode);
                 }
                 if (targetA === -1 && pref.audIdx !== undefined && pref.audIdx >= 0 && pref.audIdx < audioTracks.length) {
                     targetA = pref.audIdx;
@@ -10000,20 +11638,20 @@
                 appliedAny = true;
             }
         }
-        if (pref.subOn === false) {
+        var wantSubOff = (pref.subOn === false) || (pref.subOn === undefined && globalSubPref === 'off');
+        var effectiveSubLang = pref.subLang || (globalSubPref && globalSubPref !== 'off' ? globalSubPref : '');
+        var wantSubOn = (pref.subOn === true) || (pref.subOn === undefined && Boolean(effectiveSubLang));
+        if (currentExternalSubActive) {
+            appliedAny = true;
+        } else if (wantSubOff) {
             if (subtitlesEnabled || textIdx !== -1) {
                 selectSubtitleTrackByArrayIndex(-1, true);
             }
             appliedAny = true;
-        } else if (pref.subOn === true && textTracks.length > 0) {
+        } else if (wantSubOn && textTracks.length > 0) {
             var targetS = -1;
-            if (pref.subLang) {
-                for (var s = 0; s < textTracks.length; s++) {
-                    if (extractTrackLangCode(textTracks[s]) === pref.subLang) {
-                        targetS = s;
-                        break;
-                    }
-                }
+            if (effectiveSubLang) {
+                targetS = matchTrackIndexByLanguage(textTracks, effectiveSubLang, extractTrackLangCode);
             }
             if (targetS === -1 && pref.subIdx !== undefined && pref.subIdx >= 0 && pref.subIdx < textTracks.length) {
                 targetS = pref.subIdx;
@@ -10023,7 +11661,7 @@
             }
             appliedAny = true;
         }
-        if (appliedAny && (audioTracks.length > 1 || textTracks.length > 0 || pref.subOn === false)) {
+        if (appliedAny && (audioTracks.length > 1 || textTracks.length > 0 || wantSubOff)) {
             hasAppliedSavedTrackPrefs = true;
         }
     }
@@ -10099,6 +11737,8 @@
         if (targetSubIdx < 0 || targetSubIdx >= textTracks.length) {
             textIdx = -1;
             subtitlesEnabled = false;
+            currentExternalSubActive = false;
+            stopExternalSubtitleTicker();
             clearSubtitleBox();
             try {
                 if (activePlaybackBackend === 'shaka' && shakaInstance) {
@@ -10132,6 +11772,37 @@
         }
         textIdx = targetSubIdx;
         var chosen = textTracks[textIdx];
+        if (chosen && chosen._isExternal) {
+            subtitlesEnabled = true;
+            currentExternalSubActive = true;
+            clearSubtitleBox();
+            try {
+                if (activePlaybackBackend === 'shaka' && shakaInstance) {
+                    if (typeof shakaInstance.setTextTrackVisibility === 'function') {
+                        shakaInstance.setTextTrackVisibility(false);
+                    }
+                    if (typeof shakaInstance.selectTextTrack === 'function') {
+                        try { shakaInstance.selectTextTrack(null); } catch (eSelExtNull) {}
+                    }
+                    if (shakaActiveTextDisplayer && typeof shakaActiveTextDisplayer.setTextVisibility === 'function') {
+                        shakaActiveTextDisplayer.setTextVisibility(false);
+                    } else {
+                        unbindShakaCueListener();
+                    }
+                } else if (typeof webapis !== 'undefined' && webapis.avplay && webapis.avplay.setSilentSubtitle) {
+                    webapis.avplay.setSilentSubtitle(true);
+                }
+            } catch (eExtSilence) {}
+            startExternalSubtitleTicker();
+            if (!isAutoRestore) {
+                var extTitle = (externalSubtitleData && externalSubtitleData.name) ? externalSubtitleData.name : 'External Subtitle';
+                showOSD(formatOsdTitle(currentPlayingItem), 'Subtitle: ' + extTitle);
+                showToast('💬 Subtitle: ' + extTitle);
+            }
+            return;
+        }
+        currentExternalSubActive = false;
+        stopExternalSubtitleTicker();
         var subIndexNum = parseInt(chosen.index, 10);
         var subDesc = parseTrackLabel(chosen, textIdx + 1) + ' (' + (textIdx + 1) + '/' + textTracks.length + ')';
         subtitlesEnabled = true;
@@ -10186,6 +11857,84 @@
             showToast('Play a channel, movie, or episode first');
             return;
         }
+        var modalMode = preferredSection === 'quality' ? 'quality' : (preferredSection === 'sub' ? 'sub' : 'audio');
+        var tracksModalHintEl = document.getElementById('tracks-modal-hint');
+        if (modalMode === 'quality') {
+            if (!shouldShowDashQualityToolButton() && !(activePlaybackBackend === 'shaka' && shakaVariantHeights.length > 0)) {
+                showToast('Quality & Resolution is available for MPEG-DASH playlists');
+                return;
+            }
+            refreshTrackLists();
+            var qualItems = [];
+            var isAutoAbr = shakaManualHeightPref <= 0;
+            qualItems.push({
+                id: 'qual_auto',
+                kind: 'quality',
+                height: 0,
+                label: (isAutoAbr ? '✓ ' : '') + 'Auto (Adaptive Bitrate)' + (shakaLastActiveHeight > 0 ? (' • ' + shakaLastActiveHeight + 'p') : '') + (isAutoAbr ? ' [ACTIVE]' : '')
+            });
+            var bwByHeight = {};
+            if (activePlaybackBackend === 'shaka' && shakaInstance && typeof shakaInstance.getVariantTracks === 'function') {
+                try {
+                    var shVars = shakaInstance.getVariantTracks() || [];
+                    for (var svIdx = 0; svIdx < shVars.length; svIdx++) {
+                        var svRow = shVars[svIdx];
+                        if (svRow && svRow.height && Number(svRow.height) > 0) {
+                            var shH = Number(svRow.height);
+                            var shBw = Number(svRow.bandwidth) || 0;
+                            if (!bwByHeight[shH] || shBw > bwByHeight[shH]) {
+                                bwByHeight[shH] = shBw;
+                            }
+                        }
+                    }
+                } catch (eVarBw) {}
+            }
+            var hasLiveVariants = (activePlaybackBackend === 'shaka' && shakaVariantHeights.length > 0);
+            var heightChoices = hasLiveVariants ? shakaVariantHeights.slice() : [2160, 1080, 720, 576, 480, 360];
+            if (!isAutoAbr && heightChoices.indexOf(shakaManualHeightPref) === -1) {
+                heightChoices.push(shakaManualHeightPref);
+                heightChoices.sort(function(a, b) { return b - a; });
+            }
+            var selectedQualIdx = 0;
+            for (var qh = 0; qh < heightChoices.length; qh++) {
+                var hOpt = heightChoices[qh];
+                var isLockedH = (!isAutoAbr && shakaManualHeightPref === hOpt);
+                var qBadge = hOpt >= 2160 ? '4K UHD' : (hOpt >= 1080 ? 'FHD' : (hOpt >= 720 ? 'HD' : 'SD'));
+                var mbpsTxt = bwByHeight[hOpt] ? (' • ' + (bwByHeight[hOpt] / 1000000).toFixed(1) + ' Mbps') : '';
+                if (isLockedH) {
+                    selectedQualIdx = qualItems.length;
+                }
+                qualItems.push({
+                    id: 'qual_' + hOpt,
+                    kind: 'quality',
+                    height: hOpt,
+                    label: (isLockedH ? '✓ ' : '') + hOpt + 'p ' + qBadge + mbpsTxt + (isLockedH ? ' [LOCKED]' : '')
+                });
+            }
+            tracksModalMode = 'quality';
+            tracksModalItems = qualItems;
+            tracksModalIdx = selectedQualIdx;
+            tracksModalOpen = true;
+            if (tracksModalTitleEl) {
+                tracksModalTitleEl.textContent = 'Quality & Resolution';
+            }
+            if (tracksModalSubtitleEl) {
+                tracksModalSubtitleEl.textContent = formatOsdTitle(activeOrSelectedItem) + ' • ' + (shakaManualHeightPref > 0 ? ('Locked: ' + shakaManualHeightPref + 'p') : ('Auto ABR' + (shakaLastActiveHeight > 0 ? (' (' + shakaLastActiveHeight + 'p)') : '')));
+            }
+            if (tracksModalHintEl) {
+                tracksModalHintEl.textContent = 'UP/DOWN: Select Resolution • OK: Apply • BACK: Close';
+            }
+            if (tracksModalEl) {
+                tracksModalEl.classList.add('quality-only-mode');
+                tracksModalEl.classList.add('visible');
+            }
+            if (tracksListEl) {
+                tracksListEl._forceRebuild = true;
+            }
+            renderTracksModalList();
+            updateContextualHelpBar();
+            return;
+        }
         refreshTrackLists();
         syncInitialActiveTracks();
         applySubtitleAppearance();
@@ -10217,26 +11966,6 @@
                 trackArrIdx: t,
                 label: (isActSub ? '✓ ' : '💬 ') + 'Subtitle: ' + parseTrackLabel(textTracks[t], t + 1) + (isActSub ? ' [ACTIVE]' : '')
             });
-        }
-        if (activePlaybackBackend === 'shaka' && shakaVariantHeights.length > 0) {
-            var isAutoAbr = shakaManualHeightPref <= 0;
-            items.push({
-                id: 'qual_auto',
-                kind: 'quality',
-                height: 0,
-                label: (isAutoAbr ? '✓ ' : '📺 ') + 'Video Quality: Auto (Adaptive Bitrate)' + (shakaLastActiveHeight > 0 ? (' • ' + shakaLastActiveHeight + 'p') : '') + (isAutoAbr ? ' [ACTIVE]' : '')
-            });
-            for (var qh = 0; qh < shakaVariantHeights.length; qh++) {
-                var hOpt = shakaVariantHeights[qh];
-                var isLockedH = (!isAutoAbr && shakaManualHeightPref === hOpt);
-                var qBadge = hOpt >= 2160 ? '4K UHD' : (hOpt >= 1080 ? 'FHD' : (hOpt >= 720 ? 'HD' : 'SD'));
-                items.push({
-                    id: 'qual_' + hOpt,
-                    kind: 'quality',
-                    height: hOpt,
-                    label: (isLockedH ? '✓ ' : '📺 ') + 'Video Quality: ' + hOpt + 'p ' + qBadge + (isLockedH ? ' [LOCKED]' : '')
-                });
-            }
         }
         var aspectLabel = currentAspect === 'PLAYER_DISPLAY_MODE_FULL_SCREEN' ? '16:9 Stretch' : 'Original Letterbox';
         items.push({
@@ -10283,6 +12012,13 @@
             deltaMs: 0,
             label: '⏱ Reset Subtitle Timing Offset (0ms)'
         });
+        if (externalSubtitleData && Array.isArray(externalSubtitleData.cues) && externalSubtitleData.cues.length > 0) {
+            items.push({
+                id: 'clear_ext_sub',
+                kind: 'clear_ext_sub',
+                label: '✕ Remove External LAN Subtitle (' + externalSubtitleData.name + ')'
+            });
+        }
         var savedPrefForModal = getItemMediaPrefs(activeOrSelectedItem);
         if (savedPrefForModal) {
             items.push({
@@ -10291,9 +12027,10 @@
                 label: '✕ Reset Saved Channel Audio/Sub/Aspect Memory'
             });
         }
+        tracksModalMode = modalMode;
         tracksModalItems = items;
         tracksModalIdx = 0;
-        if (preferredSection === 'sub') {
+        if (modalMode === 'sub') {
             var foundSub = false;
             for (var s = 0; s < items.length; s++) {
                 if (items[s].kind === 'sub') {
@@ -10322,12 +12059,16 @@
         }
         tracksModalOpen = true;
         if (tracksModalTitleEl) {
-            tracksModalTitleEl.textContent = preferredSection === 'sub' ? 'Subtitles & Appearance' : 'Audio & Subtitle Tracks';
+            tracksModalTitleEl.textContent = modalMode === 'sub' ? 'Subtitles & Appearance' : 'Audio & Subtitle Tracks';
         }
         if (tracksModalSubtitleEl) {
             tracksModalSubtitleEl.textContent = formatOsdTitle(activeOrSelectedItem) + ' • ' + audioTracks.length + ' Audio / ' + textTracks.length + ' Sub' + (savedPrefForModal ? ' • 💾 Memory Active' : '');
         }
+        if (tracksModalHintEl) {
+            tracksModalHintEl.textContent = 'UP/DOWN: Select • OK: Activate Track / Action • LEFT/RIGHT: Style / Sync • BACK: Close';
+        }
         if (tracksModalEl) {
+            tracksModalEl.classList.remove('quality-only-mode');
             tracksModalEl.classList.add('visible');
         }
         if (tracksListEl) {
@@ -10339,7 +12080,9 @@
 
     function closeTracksModal() {
         tracksModalOpen = false;
+        tracksModalMode = 'audio';
         if (tracksModalEl) {
+            tracksModalEl.classList.remove('quality-only-mode');
             tracksModalEl.classList.remove('visible');
         }
         updateContextualHelpBar();
@@ -10347,6 +12090,11 @@
 
     window._openTizenTracksModal = function(preferredSection) {
         if (tracksModalOpen) {
+            var nextMode = preferredSection === 'quality' ? 'quality' : (preferredSection === 'sub' ? 'sub' : (preferredSection === 'audio' ? 'audio' : ''));
+            if (nextMode && nextMode !== tracksModalMode) {
+                openTracksModal(nextMode);
+                return;
+            }
             closeTracksModal();
             return;
         }
@@ -10392,13 +12140,21 @@
             return;
         }
         if (entry.kind === 'aspect') {
+            var prevAspIdx = tracksModalIdx;
+            var prevAspMode = tracksModalMode === 'sub' ? 'sub' : 'audio';
             toggleAspectRatio();
-            openTracksModal();
+            openTracksModal(prevAspMode);
+            tracksModalIdx = Math.min(prevAspIdx, Math.max(0, tracksModalItems.length - 1));
+            renderTracksModalList();
             return;
         }
         if (entry.kind === 'speed') {
+            var prevSpdIdx = tracksModalIdx;
+            var prevSpdMode = tracksModalMode === 'sub' ? 'sub' : 'audio';
             cyclePlaybackSpeed();
-            openTracksModal();
+            openTracksModal(prevSpdMode);
+            tracksModalIdx = Math.min(prevSpdIdx, Math.max(0, tracksModalItems.length - 1));
+            renderTracksModalList();
             return;
         }
         if (entry.kind === 'bookmark') {
@@ -10443,6 +12199,10 @@
                     }
                 });
             }
+            return;
+        }
+        if (entry.kind === 'clear_ext_sub') {
+            clearReceivedExternalSubtitle(false);
             return;
         }
         if (entry.kind === 'clear_ch_prefs') {
@@ -10502,7 +12262,10 @@
             ev.stopPropagation();
             cyclePlaybackSpeed();
             if (tracksModalOpen) {
-                openTracksModal();
+                var keepIdx = tracksModalIdx;
+                openTracksModal(tracksModalMode === 'sub' ? 'sub' : 'audio');
+                tracksModalIdx = Math.min(keepIdx, Math.max(0, tracksModalItems.length - 1));
+                renderTracksModalList();
             }
         };
     }
@@ -10531,7 +12294,24 @@
         return out || list;
     }
 
-    function getLiveZapList() {
+    function getLiveZapList(options) {
+        var useFavOnly = Boolean(options && options.favOnly) || (miniZapOpen && miniZapFavOnly && !(options && options.ignoreFavOnly));
+        if (useFavOnly) {
+            var favRawList = getFavList('live');
+            var resolvedFavChs = [];
+            for (var fi = 0; fi < favRawList.length; fi++) {
+                var favEntry = favRawList[fi];
+                if (favEntry && typeof favEntry === 'object' && favEntry.id !== undefined) {
+                    resolvedFavChs.push(channelByIdMap[String(favEntry.id)] || favEntry);
+                } else if (favEntry !== undefined && favEntry !== null) {
+                    var resolvedById = channelByIdMap[String(favEntry)];
+                    if (resolvedById) {
+                        resolvedFavChs.push(resolvedById);
+                    }
+                }
+            }
+            return filterAllowedLiveChannels(resolvedFavChs);
+        }
         var isLiveModeActive = modes[modeIdx] && modes[modeIdx].id === 'live' &&
             currentItems.length > 0 && currentItems[0] && !currentItems[0].isVod && !currentItems[0].isSeries && !currentItems[0].isSeason;
         if (isLiveModeActive) {
@@ -10545,12 +12325,21 @@
     }
 
     function stepFullscreenLiveChannel(delta) {
-        var zapList = getLiveZapList();
+        var zapList = getLiveZapList({ ignoreFavOnly: true });
         if (!zapList || zapList.length === 0) {
             return;
         }
         var baseIdx = (zapList === currentItems) ? itemIdx : 0;
-        if (currentPlayingItem) {
+        if (zapTimeout && pendingZapListRef === zapList && pendingZapIdx >= 0 && pendingZapIdx < zapList.length) {
+            baseIdx = pendingZapIdx;
+        } else if (zapTimeout && pendingZapTargetId) {
+            for (var pzi = 0; pzi < zapList.length; pzi++) {
+                if (String(zapList[pzi].id) === pendingZapTargetId) {
+                    baseIdx = pzi;
+                    break;
+                }
+            }
+        } else if (currentPlayingItem) {
             for (var i = 0; i < zapList.length; i++) {
                 if (String(zapList[i].id) === String(currentPlayingItem.id)) {
                     baseIdx = i;
@@ -10559,6 +12348,8 @@
             }
         }
         var nextZapIdx = (baseIdx + delta + zapList.length) % zapList.length;
+        pendingZapIdx = nextZapIdx;
+        pendingZapListRef = zapList;
         if (zapList === currentItems) {
             itemIdx = nextZapIdx;
             renderItems();
@@ -10567,44 +12358,137 @@
         if (!targetCh) {
             return;
         }
-        showOSD(formatOsdTitle(targetCh), 'ZAPPING...');
+        pendingZapTargetId = String(targetCh.id);
+        var zapNowTxt = '';
+        var zapNextTxt = '';
+        var cachedZapEpg = shortEpgCache[String(targetCh.id)];
+        var zapEpgList = (cachedZapEpg && Array.isArray(cachedZapEpg.list) && cachedZapEpg.list.length > 0) ? cachedZapEpg.list : null;
+        if (!zapEpgList && api && typeof api.getLoadedXmltvCatalogSync === 'function') {
+            var loadedXmlZap = api.getLoadedXmltvCatalogSync();
+            if (loadedXmlZap) {
+                var xmlZapList = lookupXmltvChannelPrograms(loadedXmlZap, targetCh);
+                if (xmlZapList && xmlZapList.length > 0) {
+                    zapEpgList = xmlZapList;
+                }
+            }
+        }
+        if (zapEpgList) {
+            var parsedZap = parseShortEpgNowNext(zapEpgList);
+            zapNowTxt = parsedZap.now;
+            zapNextTxt = parsedZap.next;
+        }
+        showOSD(formatOsdTitle(targetCh), 'ZAPPING...', zapNowTxt, zapNextTxt);
         if (zapTimeout) {
             clearTimeout(zapTimeout);
         }
         zapTimeout = setTimeout(function() {
+            zapTimeout = null;
+            pendingZapIdx = -1;
+            pendingZapListRef = null;
+            pendingZapTargetId = '';
             playItem(targetCh);
             syncLiveChannelCursorOnZap(targetCh);
         }, 80);
     }
 
+    function updateMiniZapHeaderUI(zapList) {
+        var list = Array.isArray(zapList) ? zapList : [];
+        var curCat = (!miniZapFavOnly && list === currentItems) ? currentCats[catIdx] : null;
+        if (miniZapTitleEl) {
+            miniZapTitleEl.textContent = miniZapFavOnly ? '★ Favorite Channels' : (curCat ? curCat.title : 'Live Channels');
+        }
+        if (miniZapSubEl) {
+            var prefix = miniZapFavOnly ? 'FAV • ' : 'LIVE • ';
+            miniZapSubEl.textContent = list.length > 0 ? (prefix + (miniZapIdx + 1) + ' / ' + list.length) : (prefix + '0 / 0');
+        }
+    }
+
+    function queueMiniZapVisibleEpg(zapList, focusIdx) {
+        if (!Array.isArray(zapList) || zapList.length === 0 || !api || typeof api.fetchShortEpg !== 'function') {
+            return;
+        }
+        var winHalf = 5;
+        var start = Math.max(0, focusIdx - winHalf);
+        var end = Math.min(zapList.length, start + 11);
+        var pending = [];
+        for (var i = start; i < end && pending.length < 5; i++) {
+            var ch = zapList[i];
+            if (!ch || !ch.id) {
+                continue;
+            }
+            var cached = shortEpgCache[String(ch.id)];
+            if (cached && (Date.now() - cached.ts) < 300000) {
+                continue;
+            }
+            if (typeof getCachedOrXmltvShortEpgSync === 'function' && getCachedOrXmltvShortEpgSync(ch)) {
+                continue;
+            }
+            pending.push(api.fetchShortEpg(ch.id, true).catch(function() { return []; }));
+        }
+        if (pending.length > 0) {
+            Promise.all(pending).then(function() {
+                if (miniZapOpen && miniZapListEl) {
+                    miniZapListEl._forceRebuild = true;
+                    renderMiniZapList();
+                }
+            });
+        }
+    }
+
     function openMiniZapDrawer() {
         var zapList = getLiveZapList();
+        if ((!zapList || zapList.length === 0) && miniZapFavOnly) {
+            miniZapFavOnly = false;
+            zapList = getLiveZapList();
+        }
         if (!miniZapDrawerEl || !zapList || zapList.length === 0) {
             setOverlayVisible(true);
             return;
         }
         miniZapOpen = true;
-        miniZapIdx = (zapList === currentItems) ? itemIdx : 0;
+        miniZapIdx = (!miniZapFavOnly && zapList === currentItems) ? itemIdx : 0;
         if (currentPlayingItem) {
             for (var i = 0; i < zapList.length; i++) {
                 if (String(zapList[i].id) === String(currentPlayingItem.id)) {
                     miniZapIdx = i;
-                    if (zapList === currentItems) {
+                    if (!miniZapFavOnly && zapList === currentItems) {
                         itemIdx = i;
                     }
                     break;
                 }
             }
         }
-        var curCat = (zapList === currentItems) ? currentCats[catIdx] : null;
-        if (miniZapTitleEl) {
-            miniZapTitleEl.textContent = curCat ? curCat.title : 'Live Channels';
+        if (miniZapListEl) {
+            miniZapListEl._forceRebuild = true;
         }
-        if (miniZapSubEl) {
-            miniZapSubEl.textContent = (miniZapIdx + 1) + ' / ' + zapList.length;
-        }
+        updateMiniZapHeaderUI(zapList);
         miniZapDrawerEl.classList.add('visible');
         renderMiniZapList();
+        queueMiniZapVisibleEpg(zapList, miniZapIdx);
+        updateContextualHelpBar();
+    }
+
+    function toggleMiniZapFavOnlyMode() {
+        if (!miniZapOpen) {
+            return;
+        }
+        miniZapFavOnly = !miniZapFavOnly;
+        var zapList = getLiveZapList();
+        miniZapIdx = 0;
+        if (currentPlayingItem && zapList.length > 0) {
+            for (var i = 0; i < zapList.length; i++) {
+                if (String(zapList[i].id) === String(currentPlayingItem.id)) {
+                    miniZapIdx = i;
+                    break;
+                }
+            }
+        }
+        if (miniZapListEl) {
+            miniZapListEl._forceRebuild = true;
+        }
+        renderMiniZapList();
+        queueMiniZapVisibleEpg(zapList, miniZapIdx);
+        showToast(miniZapFavOnly ? '★ Mini-Zap: Favorites Only' : '📺 Mini-Zap: Channel List');
     }
 
     function closeMiniZapDrawer() {
@@ -10612,6 +12496,7 @@
         if (miniZapDrawerEl) {
             miniZapDrawerEl.classList.remove('visible');
         }
+        updateContextualHelpBar();
     }
 
     function renderMiniZapList() {
@@ -10619,12 +12504,13 @@
             return;
         }
         var zapList = getLiveZapList();
-        if (miniZapSubEl) {
-            miniZapSubEl.textContent = (miniZapIdx + 1) + ' / ' + zapList.length;
+        if (miniZapIdx >= zapList.length) {
+            miniZapIdx = Math.max(0, zapList.length - 1);
         }
+        updateMiniZapHeaderUI(zapList);
         renderList(miniZapListEl, zapList, miniZapIdx, function(ch) {
-            return (ch.num ? (ch.num + '. ') : '') + ch.name;
-        }, 11);
+            return ch.name;
+        }, 8);
         syncContainerPlayingIndicators(miniZapListEl);
     }
 
@@ -10738,12 +12624,23 @@
         if (list.length === 0) {
             return { now: 'No EPG Available', next: 'No EPG Available', desc: '', progressPct: 0, remMin: 0 };
         }
-        var nowIdx = 0;
+        var nowIdx = -1;
         for (var i = 0; i < list.length; i++) {
             if (list[i].isNow) {
                 nowIdx = i;
                 break;
             }
+        }
+        if (nowIdx === -1) {
+            for (var j = 0; j < list.length; j++) {
+                if (list[j].stop_timestamp > nowSec || list[j].start_timestamp > nowSec) {
+                    nowIdx = j;
+                    break;
+                }
+            }
+        }
+        if (nowIdx === -1) {
+            nowIdx = list.length - 1;
         }
         var nowProg = list[nowIdx];
         var nextProg = list[nowIdx + 1] || null;
@@ -10838,9 +12735,17 @@
         if (epgGridSlotIdx < 0) {
             epgGridSlotIdx = 0;
         }
+        var totalWindowDur = winObj.windowEndSec - winObj.windowStartSec;
+        var nowEpoch = Math.floor(Date.now() / 1000);
+        var showNowLine = (totalWindowDur > 0 && nowEpoch >= winObj.windowStartSec && nowEpoch <= winObj.windowEndSec);
+        var nowPct = showNowLine ? Math.max(0, Math.min(100, ((nowEpoch - winObj.windowStartSec) / totalWindowDur) * 100)) : -1;
         var tlHtml = '<div class="epg-grid-ch-col-hdr">Channel</div><div class="epg-grid-slots-hdr">';
         for (var s = 0; s < slots.length; s++) {
             tlHtml += '<div class="epg-grid-slot-lbl">' + slots[s].label + '</div>';
+        }
+        if (showNowLine) {
+            var clampedBadgePct = Math.max(2.5, Math.min(97.5, nowPct));
+            tlHtml += '<div class="epg-grid-now-badge" style="left:' + clampedBadgePct.toFixed(2) + '%;">NOW</div>';
         }
         tlHtml += '</div>';
         epgGridTimelineEl.innerHTML = tlHtml;
@@ -10863,7 +12768,6 @@
         epgGridRowsEl.innerHTML = '';
         var frag = document.createDocumentFragment();
         var activeSlot = slots[epgGridSlotIdx] || slots[0];
-        var totalWindowDur = winObj.windowEndSec - winObj.windowStartSec;
 
         function bindGridChannelOrEmptyClick(el, rowIdx, chRef) {
             el.onclick = function(ev) {
@@ -10962,12 +12866,13 @@
                     var widthPct = Math.max(4, ((clampEnd - clampStart) / totalWindowDur) * 100);
                     var isBlkFocused = isRowSelected && selectedProgForRow && selectedProgForRow.id === blk.id;
                     var hasRemind = !blk.isNow && !blk.isPast && isProgramReminderScheduled(ch.id, blk.start_timestamp);
+                    var hasSchedRec = !blk.isPast && Boolean(findScheduledDvrJob(ch.id, blk.start_timestamp));
                     var blkEl = document.createElement('div');
-                    blkEl.className = 'epg-grid-cell' + (blk.isNow ? ' live-now' : '') + (hasRemind ? ' remind-scheduled' : '') + (isBlkFocused ? ' focused' : '');
+                    blkEl.className = 'epg-grid-cell' + (blk.isNow ? ' live-now' : '') + (hasRemind ? ' remind-scheduled' : '') + (hasSchedRec ? ' dvr-scheduled' : '') + (isBlkFocused ? ' focused' : '');
                     blkEl.style.width = widthPct.toFixed(2) + '%';
                     var titleDiv = document.createElement('div');
                     titleDiv.className = 'epg-grid-cell-title';
-                    titleDiv.textContent = (blk.isNow ? '● ' : (hasRemind ? '⏰ ' : '')) + blk.name;
+                    titleDiv.textContent = (hasSchedRec ? '🔴 ' : '') + (blk.isNow ? '● ' : (hasRemind ? '⏰ ' : '')) + blk.name;
                     var timeDiv = document.createElement('div');
                     timeDiv.className = 'epg-grid-cell-time';
                     timeDiv.textContent = blk.timeLabel || '';
@@ -10988,6 +12893,12 @@
                     }
                 }
             }
+            if (showNowLine) {
+                var nowLineEl = document.createElement('div');
+                nowLineEl.className = 'epg-grid-now-line';
+                nowLineEl.style.left = nowPct.toFixed(2) + '%';
+                trackEl.appendChild(nowLineEl);
+            }
             rowEl.appendChild(trackEl);
             frag.appendChild(rowEl);
         }
@@ -10995,13 +12906,15 @@
 
         var curCh = epgGridChannels[epgGridChIdx];
         var curProg = curCh ? getProgramForChannelAtSlot(curCh.id, activeSlot.startSec, activeSlot.endSec) : null;
+        syncEpgRecButtonState(curCh, curProg);
         if (curCh && curProg) {
             var isCurRemind = !curProg.isNow && !curProg.isPast && isProgramReminderScheduled(curCh.id, curProg.start_timestamp);
+            var isCurSchedRec = !curProg.isPast && Boolean(findScheduledDvrJob(curCh.id, curProg.start_timestamp));
             if (epgGridSelTitleEl) {
-                epgGridSelTitleEl.textContent = curCh.name + ' • ' + curProg.timeLabel + ' — ' + (isCurRemind ? '⏰ ' : '') + curProg.name;
+                epgGridSelTitleEl.textContent = curCh.name + ' • ' + curProg.timeLabel + ' — ' + (isCurSchedRec ? '🔴 [REC SCHED] ' : '') + (isCurRemind ? '⏰ ' : '') + curProg.name;
             }
             if (epgGridSelDescEl) {
-                var actionHint = curProg.isNow ? ' [OK: Watch Live]' : (curProg.isPast ? (curCh.archive ? ' [OK: Play Catch-Up]' : '') : (isCurRemind ? ' [OK: Cancel Reminder]' : ' [OK: Set Auto-Tune Reminder]'));
+                var actionHint = curProg.isNow ? ' [OK: Watch Live • RED: Record]' : (curProg.isPast ? (curCh.archive ? ' [OK: Play Catch-Up]' : '') : (isCurRemind ? ' [OK: Cancel Reminder]' : ' [OK: Set Reminder]') + (isCurSchedRec ? ' [RED: Cancel Rec]' : ' [RED: Schedule Rec]'));
                 epgGridSelDescEl.textContent = (curProg.descr || 'Press OK to interact.') + actionHint;
             }
         } else if (curCh) {
@@ -11098,6 +13011,27 @@
             }
         }
     }
+    function triggerScheduleRecOnSelectedEpgProgram() {
+        if (!epgModalOpen) {
+            return;
+        }
+        if (epgViewMode === 'grid') {
+            var gCh = epgGridChannels[epgGridChIdx];
+            var winObj = buildEpgGridWindowSlots(epgGridWindowStartSec || Math.floor(Date.now() / 1000));
+            var slot = winObj.slots[epgGridSlotIdx] || winObj.slots[0];
+            var gProg = gCh ? getProgramForChannelAtSlot(gCh.id, slot.startSec, slot.endSec) : null;
+            toggleScheduledDvrForEpgProgram(gCh, gProg);
+            return;
+        }
+        var lProg = epgModalItems[epgModalIdx];
+        toggleScheduledDvrForEpgProgram(epgModalChannel, lProg);
+    }
+    if (btnEpgRecEl) {
+        btnEpgRecEl.onclick = function(ev) {
+            ev.stopPropagation();
+            triggerScheduleRecOnSelectedEpgProgram();
+        };
+    }
     if (btnEpgViewToggleEl) {
         btnEpgViewToggleEl.onclick = function(ev) {
             ev.stopPropagation();
@@ -11111,7 +13045,7 @@
         };
     }
 
-    function openEpgModal(channel) {
+    function openEpgModal(channel, preselectStartTs) {
         var baseCh = channel || (getActiveContentModeId() === 'live' ? currentItems[itemIdx] : currentPlayingItem);
         if (baseCh && baseCh.isCatchup && baseCh.channelRef) {
             baseCh = baseCh.channelRef;
@@ -11126,6 +13060,8 @@
         epgModalItems = [];
         epgModalIdx = 0;
         syncEpgModalViewModeUI();
+        syncEpgRecButtonState(baseCh, null);
+        syncScheduledDvrList();
         if (epgModalTitle) {
             epgModalTitle.textContent = 'EPG Guide — ' + baseCh.name + (baseCh.archive ? ' (Catch-Up Enabled)' : '');
         }
@@ -11181,10 +13117,20 @@
                 return;
             }
             epgModalIdx = 0;
-            for (var i = 0; i < epgModalItems.length; i++) {
-                if (epgModalItems[i].isNow) {
-                    epgModalIdx = i;
-                    break;
+            var targetStart = Number(preselectStartTs || 0);
+            if (targetStart > 0) {
+                for (var pt = 0; pt < epgModalItems.length; pt++) {
+                    if (Number(epgModalItems[pt].start_timestamp) === targetStart) {
+                        epgModalIdx = pt;
+                        break;
+                    }
+                }
+            } else {
+                for (var i = 0; i < epgModalItems.length; i++) {
+                    if (epgModalItems[i].isNow) {
+                        epgModalIdx = i;
+                        break;
+                    }
                 }
             }
             if (epgModalList) {
@@ -11285,29 +13231,39 @@
         }
         renderList(epgModalList, epgModalItems, epgModalIdx, function(p) {
             var prefix = '';
+            var isRecSched = epgModalChannel && !p.isPast && Boolean(findScheduledDvrJob(epgModalChannel.id, p.start_timestamp));
+            if (isRecSched) {
+                prefix += '🔴 [REC SCHED] ';
+            }
             if (p.isNow) {
-                prefix = '● [LIVE] ';
+                prefix += '● [LIVE] ';
             } else if (p.isPast) {
-                prefix = (epgModalChannel && epgModalChannel.archive) ? '⏱ [CATCH-UP] ' : '[PAST] ';
+                prefix += (epgModalChannel && epgModalChannel.archive) ? '⏱ [CATCH-UP] ' : '[PAST] ';
             } else if (epgModalChannel && isProgramReminderScheduled(epgModalChannel.id, p.start_timestamp)) {
-                prefix = '⏰ [REMIND] ';
+                prefix += '⏰ [REMIND] ';
             }
             return prefix + p.timeLabel + ' — ' + p.name;
         }, 10);
         var sel = epgModalItems[epgModalIdx];
+        syncEpgRecButtonState(epgModalChannel, sel);
         if (sel) {
             if (epgModalProgTitle) {
                 epgModalProgTitle.textContent = sel.name;
             }
             if (epgModalProgTime) {
                 var statusTag = '';
+                var selRecSched = epgModalChannel && !sel.isPast && Boolean(findScheduledDvrJob(epgModalChannel.id, sel.start_timestamp));
                 if (sel.isNow) {
-                    statusTag = ' • ON AIR NOW (PRESS OK TO WATCH)';
+                    statusTag = ' • ON AIR NOW (PRESS OK TO WATCH • RED TO SCHEDULE REC)';
                 } else if (sel.isPast && epgModalChannel && epgModalChannel.archive) {
                     statusTag = ' • PRESS OK TO PLAY ARCHIVE';
                 } else if (!sel.isPast && !sel.isNow) {
                     var isRem = epgModalChannel && isProgramReminderScheduled(epgModalChannel.id, sel.start_timestamp);
-                    statusTag = isRem ? ' • ⏰ REMINDER SCHEDULED (PRESS OK TO CANCEL)' : ' • PRESS OK TO SET AUTO-TUNE REMINDER';
+                    statusTag = isRem ? ' • ⏰ REMINDER SCHEDULED (OK: CANCEL)' : ' • OK: SET REMINDER';
+                    statusTag += selRecSched ? ' • 🔴 DVR SCHEDULED (RED: CANCEL)' : ' • RED: SCHEDULE REC';
+                }
+                if (sel.isNow && selRecSched) {
+                    statusTag = ' • ON AIR NOW • 🔴 DVR SCHEDULED (RED: CANCEL)';
                 }
                 epgModalProgTime.textContent = sel.timeLabel + statusTag;
             }
@@ -11564,15 +13520,22 @@
             row.appendChild(playBadge);
             row._playBadge = playBadge;
         }
-        if (container === itemsListEl && entry && !entry.isVod && entry.num) {
+        if ((container === itemsListEl || container === miniZapListEl) && entry && !entry.isVod && entry.num) {
             var numPill = document.createElement('span');
             numPill.className = 'item-num-pill';
             numPill.textContent = entry.num;
             row.appendChild(numPill);
         }
-        if (container === itemsListEl && entry && !entry.isVod && !entry.isSeries && !entry.isSeason) {
-            var logoSrc = entry.logo ? resolveLogoUrl(entry.logo) : '';
-            var monogram = entry._monogram || (entry._monogram = getChannelStationMonogram(entry.name));
+        var isSearchLogoItem = (container === searchResultsContainer && entry &&
+            !entry.isCategoryResult && !entry.isRecentSearchResult && !entry.isClearRecentResult);
+        var isLiveChannelRow = ((container === itemsListEl || container === miniZapListEl) && entry && !entry.isVod && !entry.isSeries && !entry.isSeason);
+        if (isLiveChannelRow || isSearchLogoItem) {
+            var rawThumb = isSearchLogoItem
+                ? ((entry.channelRef && entry.channelRef.logo) || entry.logo || entry.poster || '')
+                : (entry.logo || '');
+            var logoSrc = rawThumb ? resolveLogoUrl(rawThumb) : '';
+            var thumbTitle = (entry.channelRef && entry.channelRef.name) || entry.name || 'TV';
+            var monogram = entry._monogram || (entry._monogram = getChannelStationMonogram(thumbTitle));
             if (logoSrc) {
                 var img = document.createElement('img');
                 img.className = 'item-logo';
@@ -11609,10 +13572,76 @@
         textStack.appendChild(span);
         row._textStack = textStack;
 
+        if (container === miniZapListEl && entry) {
+            var mzEpgList = (typeof getCachedOrXmltvShortEpgSync === 'function') ? getCachedOrXmltvShortEpgSync(entry) : null;
+            var mzSubParts = [];
+            if (mzEpgList && mzEpgList.length > 0) {
+                var parsedMzEpg = parseShortEpgNowNext(mzEpgList);
+                if (parsedMzEpg.now && parsedMzEpg.now !== 'No EPG Available') {
+                    mzSubParts.push('NOW: ' + parsedMzEpg.now + (parsedMzEpg.remMin > 0 ? (' (-' + parsedMzEpg.remMin + 'm)') : ''));
+                }
+            }
+            if (entry.archive) {
+                mzSubParts.push('Catch-Up');
+            }
+            if (mzSubParts.length > 0) {
+                var mzSubEl = document.createElement('span');
+                mzSubEl.className = 'item-epg-sub';
+                mzSubEl.textContent = mzSubParts.join('  •  ');
+                textStack.appendChild(mzSubEl);
+            }
+        }
+
+        if (container === searchResultsContainer && entry) {
+            var sSubText = entry.searchSubtitle || '';
+            if (!sSubText && !entry.isVod && !entry.isSeries && !entry.isCategoryResult && !entry.isEpgProgramResult && !entry.isRecentSearchResult && !entry.isClearRecentResult) {
+                var liveSearchEpg = getCachedOrXmltvShortEpgSync(entry);
+                var sParts = [];
+                if (liveSearchEpg) {
+                    var parsedSEpg = parseShortEpgNowNext(liveSearchEpg);
+                    if (parsedSEpg.now && parsedSEpg.now !== 'No EPG Available') {
+                        sParts.push('NOW: ' + parsedSEpg.now + (parsedSEpg.remMin > 0 ? (' (-' + parsedSEpg.remMin + 'm)') : ''));
+                    }
+                }
+                if (entry.archive) {
+                    sParts.push('Catch-Up');
+                }
+                sSubText = sParts.length > 0 ? sParts.join('  •  ') : 'Live TV Channel — Press OK to Watch';
+            } else if (!sSubText && (entry.isVod || entry.isSeries)) {
+                var mParts = [];
+                if (entry.year) {
+                    mParts.push(entry.year);
+                }
+                if (entry.rating && String(entry.rating) !== '0') {
+                    mParts.push('★ ' + entry.rating);
+                }
+                if (entry.genre) {
+                    mParts.push(entry.genre);
+                }
+                sSubText = mParts.length > 0 ? mParts.join('  •  ') : (entry.isSeries ? 'TV Series — Press OK to Browse Seasons' : 'Movie — Press OK to Play');
+            }
+            if (sSubText) {
+                var sSubEl = document.createElement('span');
+                sSubEl.className = 'item-epg-sub';
+                sSubEl.textContent = sSubText;
+                textStack.appendChild(sSubEl);
+            }
+        }
+
         if (container === itemsListEl && entry && !entry.isVod && !entry.isSeries) {
             var cachedChEpg = shortEpgCache[String(entry.id)];
-            if (cachedChEpg && Array.isArray(cachedChEpg.list) && cachedChEpg.list.length > 0) {
-                var parsedInline = parseShortEpgNowNext(cachedChEpg.list);
+            var inlineEpgList = (cachedChEpg && Array.isArray(cachedChEpg.list) && cachedChEpg.list.length > 0) ? cachedChEpg.list : null;
+            if (!inlineEpgList && api && typeof api.getLoadedXmltvCatalogSync === 'function') {
+                var loadedXmlCat = api.getLoadedXmltvCatalogSync();
+                if (loadedXmlCat) {
+                    var xmlMatched = lookupXmltvChannelPrograms(loadedXmlCat, entry);
+                    if (xmlMatched && xmlMatched.length > 0) {
+                        inlineEpgList = xmlMatched;
+                    }
+                }
+            }
+            if (inlineEpgList && inlineEpgList.length > 0) {
+                var parsedInline = parseShortEpgNowNext(inlineEpgList);
                 if (parsedInline.now && parsedInline.now !== 'No EPG Available') {
                     var epgSub = document.createElement('span');
                     epgSub.className = 'item-epg-sub';
@@ -11634,6 +13663,12 @@
             }
         }
         row.appendChild(textStack);
+        if (container === miniZapListEl && entry && isFavItem(entry)) {
+            var mzFavBadge = document.createElement('span');
+            mzFavBadge.className = 'mini-zap-fav-badge';
+            mzFavBadge.textContent = '★';
+            row.appendChild(mzFavBadge);
+        }
 
         if (container === catsListEl && entry) {
             var curModeId = curModeIdForRow;
@@ -11760,30 +13795,7 @@
                 renderSearchResults();
                 var chosen = searchResults[searchIdx];
                 if (chosen) {
-                    closeSearch();
-                    if (chosen.isCategoryResult) {
-                        jumpToCategoryFromSearch(chosen);
-                    } else if (chosen.isEpgProgramResult) {
-                        if (chosen.epgProg && !chosen.epgProg.isNow && !chosen.epgProg.isPast) {
-                            toggleProgramReminder(chosen.channelRef, chosen.epgProg);
-                        } else if (chosen.channelRef) {
-                            if (window._parentalUnlocked || !isAdultContentItem(chosen.channelRef)) {
-                                setOverlayVisible(false);
-                            }
-                            playItem(chosen.channelRef);
-                            syncLiveChannelCursorOnZap(chosen.channelRef);
-                        }
-                    } else if (chosen.isSeries) {
-                        jumpToSeriesFromSearch(chosen);
-                    } else {
-                        if (window._parentalUnlocked || !isAdultContentItem(chosen)) {
-                            setOverlayVisible(false);
-                        }
-                        playItem(chosen);
-                        if (!chosen.isVod && !chosen.isSeries) {
-                            syncLiveChannelCursorOnZap(chosen);
-                        }
-                    }
+                    activateSearchResultItem(chosen);
                 }
             } else if (container === tracksListEl) {
                 tracksModalIdx = rIdx;
@@ -11873,7 +13885,18 @@
             updateVirtualScrollIndicator(container, 0, 0, 0);
             var emptyMsg = 'No items found';
             var canRetryEmpty = false;
-            if (container === itemsListEl) {
+            if (container === miniZapListEl) {
+                emptyMsg = miniZapFavOnly ? 'No favorite Live TV channels — Press YELLOW to view all' : 'No Live TV channels available';
+            } else if (container === searchResultsContainer) {
+                var sq = searchInput ? String(searchInput.value || '').trim() : '';
+                if (!sq) {
+                    emptyMsg = 'Type a channel, EPG show, movie, actor, or series above';
+                } else if (searchAsyncPending) {
+                    emptyMsg = 'Searching Movies & Series for "' + sq + '"...';
+                } else {
+                    emptyMsg = 'No matches found for "' + sq + '" — Try another keyword or switch scope';
+                }
+            } else if (container === itemsListEl) {
                 var curCatObj = currentCats[catIdx];
                 var curCatId = curCatObj ? String(curCatObj.id) : '*';
                 if (itemFilterText) {
@@ -12038,13 +14061,7 @@
                 }
             }
             var orderedRawCats = builtInCats.concat(pinnedCats).concat(regularCats);
-            if (cFilter) {
-                currentCats = orderedRawCats.filter(function(c) {
-                    return getCatLowerTitle(c).indexOf(cFilter) !== -1;
-                });
-            } else {
-                currentCats = orderedRawCats;
-            }
+            currentCats = filterColumnEntries(orderedRawCats, cFilter, 'added', true);
             catsFilterMemo = {
                 rawRef: rawCats,
                 rawLen: rawCats.length,
@@ -12094,20 +14111,18 @@
                     baseItems.push(itemCandidate);
                 }
             }
-            if (iFilter) {
-                currentItems = baseItems.filter(function(it) {
-                    return getItemLowerName(it).indexOf(iFilter) !== -1;
-                });
-            } else if (currentSort !== 'added') {
-                currentItems = baseItems.slice();
-            } else {
-                currentItems = baseItems;
-            }
-            if (currentSort === 'title_asc') {
-                currentItems.sort(compareItemsByNameAsc);
-            } else if (currentSort === 'title_desc') {
-                currentItems.sort(compareItemsByNameDesc);
-            }
+            var lookupItemEpgTitle = function(chEntry) {
+                if (!chEntry || typeof getCachedOrXmltvShortEpgSync !== 'function') {
+                    return '';
+                }
+                var epgArr = getCachedOrXmltvShortEpgSync(chEntry);
+                if (epgArr && epgArr.length > 0) {
+                    var parsedItemEpg = parseShortEpgNowNext(epgArr);
+                    return (parsedItemEpg.now && parsedItemEpg.now !== 'No EPG Available') ? parsedItemEpg.now : '';
+                }
+                return '';
+            };
+            currentItems = filterColumnEntries(baseItems, iFilter, currentSort, false, lookupItemEpgTitle);
             itemsFilterMemo = {
                 rawRef: rawItems,
                 rawLen: rawItems.length,
@@ -12139,7 +14154,7 @@
                 activeFilters.push('Item: ' + itemFilterText);
             }
             if (currentSort !== 'added') {
-                activeFilters.push('Sort: ' + currentSort.replace('title_', '').toUpperCase());
+                activeFilters.push('Sort: ' + formatSortModeLabel(currentSort));
             }
             if (showHiddenEntries) {
                 activeFilters.push('Showing Hidden');
@@ -12557,16 +14572,16 @@
         layoutEnforced = true;
         document.body.classList.remove('compact-nav');
         if (modesColEl && modesColEl.style) {
-            modesColEl.style.flex = '0 0 200px';
-            modesColEl.style.width = '200px';
-            modesColEl.style.minWidth = '200px';
-            modesColEl.style.maxWidth = '200px';
+            modesColEl.style.flex = '0 0 212px';
+            modesColEl.style.width = '212px';
+            modesColEl.style.minWidth = '212px';
+            modesColEl.style.maxWidth = '212px';
         }
         if (catsColEl && catsColEl.style) {
-            catsColEl.style.flex = '0 0 500px';
-            catsColEl.style.width = '500px';
-            catsColEl.style.minWidth = '500px';
-            catsColEl.style.maxWidth = '500px';
+            catsColEl.style.flex = '0 0 488px';
+            catsColEl.style.width = '488px';
+            catsColEl.style.minWidth = '488px';
+            catsColEl.style.maxWidth = '488px';
         }
         if (itemsColEl && itemsColEl.style) {
             itemsColEl.style.flex = '0 0 760px';
@@ -12593,12 +14608,13 @@
             hints.push({ key: 'BACK', desc: 'Close' });
         } else if (epgModalOpen) {
             hints.push({ key: '▲▼◀▶', desc: 'Navigate' });
-            hints.push({ key: 'OK', desc: 'Watch / Catch-Up / Remind' });
+            hints.push({ key: 'OK', desc: 'Watch / Remind' });
+            hints.push({ key: 'RED', desc: 'Schedule Rec' });
             hints.push({ key: 'GREEN', desc: 'Grid / List' });
             hints.push({ key: 'YELLOW', desc: 'EPG Offset' });
             hints.push({ key: 'BACK', desc: 'Close' });
         } else if (searchOpen) {
-            hints.push({ key: '▲▼◀▶', desc: 'Navigate' });
+            hints.push({ key: '▲▼◀▶', desc: 'Scope & Results' });
             hints.push({ key: 'OK', desc: 'Select' });
             hints.push({ key: 'BACK', desc: 'Exit' });
         } else if (settingsOpen) {
@@ -12606,12 +14622,18 @@
             hints.push({ key: 'OK', desc: 'Select / Toggle' });
             hints.push({ key: 'BACK', desc: 'Close' });
         } else if (typeof tracksModalOpen !== 'undefined' && tracksModalOpen) {
-            hints.push({ key: '▲▼', desc: 'Tracks' });
+            hints.push({ key: '▲▼', desc: tracksModalMode === 'quality' ? 'Quality' : 'Tracks' });
             hints.push({ key: 'OK', desc: 'Apply' });
             hints.push({ key: 'BACK', desc: 'Close' });
         } else if (filterOpen) {
             hints.push({ key: '▲▼◀▶', desc: 'Options' });
-            hints.push({ key: 'OK', desc: 'Apply' });
+            hints.push({ key: 'YELLOW', desc: 'Clear' });
+            hints.push({ key: 'OK', desc: 'Done' });
+            hints.push({ key: 'BACK', desc: 'Cancel' });
+        } else if (miniZapOpen) {
+            hints.push({ key: '▲▼', desc: 'Channel' });
+            hints.push({ key: 'YELLOW', desc: miniZapFavOnly ? 'All Channels' : 'Favorites' });
+            hints.push({ key: 'OK', desc: 'Watch' });
             hints.push({ key: 'BACK', desc: 'Close' });
         } else if (activeCol === 'modes') {
             hints.push({ key: '▲▼', desc: 'Modes' });
@@ -12723,18 +14745,21 @@
     function bindQuickActionPill(bar, act) {
         var pill = document.createElement('span');
         pill.className = 'quick-action-pill' + (act.group === 'toggle_more' ? ' toggle-more-pill' : '');
+        var labelNode = document.createTextNode(act.label);
         if (act.iconHtml) {
             var iconWrap = document.createElement('span');
             iconWrap.innerHTML = act.iconHtml;
             if (iconWrap.firstChild) {
                 pill.appendChild(iconWrap.firstChild);
             }
-            pill.appendChild(document.createTextNode(act.label));
+            pill.appendChild(labelNode);
         } else {
-            pill.textContent = act.label;
+            pill.appendChild(labelNode);
         }
         var entryObj = {
+            id: act.id || '',
             el: pill,
+            labelNode: labelNode,
             fn: act.fn,
             group: act.group || 'primary',
             label: act.label
@@ -12769,7 +14794,9 @@
         var isLiveMode = (curModeId === 'live') && !selIsVodOrSer;
         var isVodOrSeries = (curModeId === 'vod' || curModeId === 'series') || selIsVodOrSer;
         var hasMultiPortals = Array.isArray(profiles) && profiles.length > 1;
-        var sig = curModeId + '|' + curCatId + '|' + (selIsVodOrSer ? 'V' : 'L') + '|' + (moreToolsExpanded ? '1' : '0') + '|' + (hasMultiPortals ? 'M' : 'S');
+        var isDashContext = shouldShowDashQualityToolButton();
+        var qualPrefTag = shakaManualHeightPref > 0 ? (shakaManualHeightPref + 'p') : 'auto';
+        var sig = curModeId + '|' + curCatId + '|' + (selIsVodOrSer ? 'V' : 'L') + '|' + (moreToolsExpanded ? '1' : '0') + '|' + (hasMultiPortals ? 'M' : 'S') + '|' + (isDashContext ? 'D' : 'N') + '|' + qualPrefTag;
         if (sig === lastQuickActionSig && quickActionButtons.length > 0) {
             return;
         }
@@ -12781,6 +14808,11 @@
             var show = false;
             if (g === 'primary') {
                 show = true;
+            } else if (g === 'dash_only') {
+                show = isDashContext;
+                if (p.labelNode) {
+                    p.labelNode.nodeValue = shakaManualHeightPref > 0 ? ('Quality: ' + shakaManualHeightPref + 'p') : 'Quality & Res';
+                }
             } else if (g === 'portal_switch') {
                 show = hasMultiPortals || moreToolsExpanded;
             } else if (g === 'live_primary') {
@@ -12879,8 +14911,9 @@
             { label: '⬆ Fav Up', group: 'fav_context', fn: function() { moveFavoriteItem(-1); } },
             { label: '⬇ Fav Down', group: 'fav_context', fn: function() { moveFavoriteItem(1); } },
             { label: '📅 EPG Guide', group: 'live_primary', fn: function() { openEpgModal(currentItems[itemIdx]); } },
-            { label: '⏰ Remind Next', group: 'live_primary', fn: function() { scheduleNextProgramReminderForSelectedChannel(); } },
-            { label: '🔊 Audio / Subs', group: 'primary', fn: function() { openTracksModal('audio'); } },
+            { label: '⏰ Remind Next', group: 'more', fn: function() { scheduleNextProgramReminderForSelectedChannel(); } },
+            { label: '🔊 Audio / Subs', group: 'more', fn: function() { openTracksModal('audio'); } },
+            { id: 'dash_quality', label: 'Quality & Res', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="18" x2="12" y2="21"/></svg>', group: 'dash_only', fn: function() { openTracksModal('quality'); } },
             { label: '▦ Grid / List View', group: 'vod_primary', fn: function() {
                 vodViewMode = (vodViewMode === 'grid') ? 'list' : 'grid';
                 safeSetStorage('cfg_vod_view', vodViewMode);
@@ -12896,11 +14929,11 @@
                 renderItems();
                 updatePreviewPanel();
             } },
-            { label: '⏩ Speed', group: 'vod_primary', fn: function() { cyclePlaybackSpeed(); } },
-            { label: '🔖 Bookmark', group: 'vod_primary', fn: function() { saveOrJumpVodBookmark(); } },
+            { label: '⏩ Speed', group: 'more', fn: function() { cyclePlaybackSpeed(); } },
+            { label: '🔖 Bookmark', group: 'more', fn: function() { saveOrJumpVodBookmark(); } },
             { label: '● Record Clip', group: 'live_primary', fn: function() { toggleStreamRecording(); } },
-            { label: '📼 DVR Clips', group: 'primary', fn: function() { openDvrModal(); } },
-            { label: 'Test Stream', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2 12 6 12 9 4 15 20 18 12 22 12"/></svg>', group: 'primary', fn: function() { runStreamHealthProbe(); } },
+            { label: '📼 DVR Clips', group: 'more', fn: function() { openDvrModal(); } },
+            { label: 'Test Stream', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2 12 6 12 9 4 15 20 18 12 22 12"/></svg>', group: 'more', fn: function() { runStreamHealthProbe(); } },
             { label: '📋 Export Fav M3U', group: 'fav_context', fn: function() { exportFavoritesM3u(); } },
             { label: '🚫 Hide / Unhide Item', group: 'more', fn: function() {
                 if (currentItems[itemIdx]) {
@@ -12915,13 +14948,7 @@
             { label: 'Show Hidden Toggle', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>', group: 'more', fn: function() { toggleShowHiddenMode(); } },
             { label: '📐 Aspect Ratio', group: 'more', fn: function() { toggleAspectRatio(); } },
             { label: '⏱ Sleep Timer', group: 'more', fn: function() { cycleSleepTimer(); } },
-            { label: '⇅ Sort', group: 'more', fn: function() {
-                var sorts = ['added', 'title_asc', 'title_desc'];
-                currentSort = sorts[(sorts.indexOf(currentSort) + 1) % sorts.length];
-                showToast('⇅ Sort: ' + currentSort.replace('title_', '').toUpperCase());
-                applyColumnFilters();
-                renderUI();
-            } },
+            { label: '⇅ Sort', group: 'more', fn: function() { cycleCurrentSortMode(); } },
             { label: 'Filter', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>', group: 'more', fn: function() { openFilterModal('items'); } },
             { label: '🔄 Refresh', group: 'more', fn: function() { forceRefreshCurrentCatalog(); } },
             { label: 'Clear History', iconHtml: '<svg class="qa-pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>', group: 'history_context', fn: function() { clearCurrentHistory(); } },
@@ -13707,11 +15734,21 @@
         renderPreviewMetaPills(livePills, 0);
         schedulePreviewPosterLoad(item.poster || '', item.id);
         var cachedEpg = shortEpgCache[String(item.id)];
-        if (cachedEpg && (Date.now() - cachedEpg.ts) < 300000) {
-            if (Array.isArray(cachedEpg.list) && cachedEpg.list.length > 0) {
-                var parsedCached = parseShortEpgNowNext(cachedEpg.list);
+        var syncPreviewList = (cachedEpg && (Date.now() - cachedEpg.ts) < 300000) ? cachedEpg.list : null;
+        if (!syncPreviewList && api && typeof api.getLoadedXmltvCatalogSync === 'function') {
+            var loadedXmlPrev = api.getLoadedXmltvCatalogSync();
+            if (loadedXmlPrev) {
+                var xmlPrevList = lookupXmltvChannelPrograms(loadedXmlPrev, item);
+                if (xmlPrevList && xmlPrevList.length > 0) {
+                    syncPreviewList = xmlPrevList;
+                }
+            }
+        }
+        if (Array.isArray(syncPreviewList)) {
+            if (syncPreviewList.length > 0) {
+                var parsedCached = parseShortEpgNowNext(syncPreviewList);
                 setPreviewEpgProgress(parsedCached.progressPct, true);
-                renderPreviewUpNextCard(cachedEpg.list, item);
+                renderPreviewUpNextCard(syncPreviewList, item);
                 if (previewDescEl) {
                     previewDescEl.textContent = (parsedCached.desc || 'No program synopsis available.');
                 }
@@ -13849,6 +15886,34 @@
         return false;
     }
 
+    function prefetchActiveXmltvAndRefreshUI(reqProfId) {
+        if (!api || typeof api.getEffectiveXmltvUrls !== 'function' || typeof api.ensureXmltvLoaded !== 'function') {
+            return;
+        }
+        if (api.getEffectiveXmltvUrls().length === 0) {
+            return;
+        }
+        api.ensureXmltvLoaded().then(function(xmlCat) {
+            if (!xmlCat || activeProfileId !== reqProfId) {
+                return;
+            }
+            if (itemsListEl) {
+                itemsListEl._forceRebuild = true;
+            }
+            if (getActiveContentModeId() === 'live') {
+                renderItems();
+                updatePreviewPanel();
+            }
+            if (epgModalOpen && epgModalChannel) {
+                if (epgViewMode === 'grid') {
+                    renderEpgGridView();
+                } else {
+                    openEpgModal(epgModalChannel);
+                }
+            }
+        }).catch(function() {});
+    }
+
     function scheduleWarmPreloadVodAndSeries() {
         // Disabled background preloading of VOD & Series categories while watching Live TV
         // to eliminate background memory spikes and data leakage on 10k+ category portals.
@@ -13906,6 +15971,9 @@
         seriesLoading = false;
         catFilterText = '';
         itemFilterText = '';
+        if (mode.id !== 'vod' && mode.id !== 'series' && (currentSort === 'rating' || currentSort === 'year')) {
+            currentSort = 'added';
+        }
         catIdx = 0;
         itemIdx = 0;
         vodPage = 1;
@@ -13990,6 +16058,7 @@
                         }
                     }
                 }
+                prefetchActiveXmltvAndRefreshUI(reqProfId);
                 scheduleWarmPreloadVodAndSeries();
             }).catch(function(err) {
                 if (activeProfileId !== reqProfId) {
@@ -14026,6 +16095,7 @@
                                 renderCats();
                                 selectCategory(catIdx, true);
                             }
+                            prefetchActiveXmltvAndRefreshUI(reqProfId);
                         }).catch(function() {
                             if (activeProfileId === reqProfId) {
                                 liveCatalogLoading = false;
@@ -14801,6 +16871,12 @@
         if (inpEpgUrlEl && typeof inpEpgUrlEl.value === 'string') {
             p.epgUrl = inpEpgUrlEl.value.trim();
         }
+        if (inpProfileUaEl && typeof inpProfileUaEl.value === 'string') {
+            p.userAgent = sanitizeHeaderString(inpProfileUaEl.value);
+        }
+        if (inpProfileRefererEl && typeof inpProfileRefererEl.value === 'string') {
+            p.httpReferer = sanitizeHeaderString(inpProfileRefererEl.value);
+        }
         if (selEpgOffsetEl) {
             p.epgOffsetHours = Number(selEpgOffsetEl.value) || 0;
         }
@@ -14884,6 +16960,15 @@
         }
         if (inpEpgUrlEl) {
             inpEpgUrlEl.value = p.epgUrl || '';
+        }
+        if (inpProfileUaEl) {
+            inpProfileUaEl.value = sanitizeHeaderString(p.userAgent);
+        }
+        if (selUaPresetEl) {
+            selUaPresetEl.value = detectUaPresetKey(p.userAgent);
+        }
+        if (inpProfileRefererEl) {
+            inpProfileRefererEl.value = sanitizeHeaderString(p.httpReferer);
         }
         if (selEpgOffsetEl) {
             selEpgOffsetEl.value = String(Number(p.epgOffsetHours) || 0);
@@ -15131,6 +17216,36 @@
             safeSetStorage('cfg_osd_timeout', String(osdTimeoutDurationMs));
         };
     }
+    if (selUaPresetEl) {
+        selUaPresetEl.onchange = function() {
+            var pk = selUaPresetEl.value || 'default';
+            if (pk !== 'custom' && inpProfileUaEl) {
+                inpProfileUaEl.value = UA_PRESET_VALUES[pk] || '';
+            }
+            if (profiles[editingProfileIndex] && pk !== 'custom') {
+                profiles[editingProfileIndex].userAgent = sanitizeHeaderString(UA_PRESET_VALUES[pk] || '');
+            }
+        };
+    }
+    if (inpProfileUaEl) {
+        inpProfileUaEl.oninput = function() {
+            if (selUaPresetEl) {
+                selUaPresetEl.value = detectUaPresetKey(inpProfileUaEl.value);
+            }
+        };
+    }
+    if (selPrefAudioLangEl) {
+        selPrefAudioLangEl.onchange = function() {
+            prefAudioLang = selPrefAudioLangEl.value || '';
+            safeSetStorage('cfg_pref_audio_lang', prefAudioLang);
+        };
+    }
+    if (selPrefSubLangEl) {
+        selPrefSubLangEl.onchange = function() {
+            prefSubLang = selPrefSubLangEl.value || '';
+            safeSetStorage('cfg_pref_sub_lang', prefSubLang);
+        };
+    }
     function setSettingsConnStatus(text, stateClass) {
         if (!settingsConnStatusEl) {
             return;
@@ -15191,7 +17306,15 @@
                 return;
             }
             var xTarget = xBase + '/player_api.php?username=' + encodeURIComponent(xUser) + '&password=' + encodeURIComponent(xPass);
-            fetchWithConnTimeout(api.proxyUrl + '/xtream?url=' + encodeURIComponent(xTarget), { method: 'GET' }, 10000).then(function(r) {
+            var effXtHdrs = resolveEffectivePortalHeaders(prof, null);
+            var xtTestUrl = appendProxyHeaderQuery(api.proxyUrl + '/xtream?url=' + encodeURIComponent(xTarget), effXtHdrs);
+            var xtTestOpts = { method: 'GET' };
+            if (effXtHdrs.userAgent || effXtHdrs.httpReferer) {
+                xtTestOpts.headers = {};
+                if (effXtHdrs.userAgent) { xtTestOpts.headers['x-proxy-ua'] = effXtHdrs.userAgent; }
+                if (effXtHdrs.httpReferer) { xtTestOpts.headers['x-proxy-referer'] = effXtHdrs.httpReferer; }
+            }
+            fetchWithConnTimeout(xtTestUrl, xtTestOpts, 10000).then(function(r) {
                 if (!r.ok) {
                     throw new Error('HTTP ' + r.status);
                 }
@@ -15265,7 +17388,15 @@
                 showToast('⚠ Enter an http(s):// M3U URL or load a local .M3U file');
                 return;
             }
-            fetchWithConnTimeout(api.proxyUrl + '/m3u?url=' + encodeURIComponent(mUrl), { method: 'GET' }, 10000).then(function(r) {
+            var effM3uTestHdrs = resolveEffectivePortalHeaders(prof, null);
+            var m3uTestUrl = appendProxyHeaderQuery(api.proxyUrl + '/m3u?url=' + encodeURIComponent(mUrl), effM3uTestHdrs);
+            var m3uTestOpts = { method: 'GET' };
+            if (effM3uTestHdrs.userAgent || effM3uTestHdrs.httpReferer) {
+                m3uTestOpts.headers = {};
+                if (effM3uTestHdrs.userAgent) { m3uTestOpts.headers['x-proxy-ua'] = effM3uTestHdrs.userAgent; }
+                if (effM3uTestHdrs.httpReferer) { m3uTestOpts.headers['x-proxy-referer'] = effM3uTestHdrs.httpReferer; }
+            }
+            fetchWithConnTimeout(m3uTestUrl, m3uTestOpts, 10000).then(function(r) {
                 if (!r.ok) {
                     throw new Error('HTTP ' + r.status);
                 }
@@ -15306,14 +17437,18 @@
             return;
         }
         var hsQuery = '?type=stb&action=handshake&token=&prehash=0&JsHttpRequest=1-xml';
+        var effStTestHdrs = resolveEffectivePortalHeaders(prof, null);
+        var stTestHeaders = {
+            'x-stalker-portal': encodeURIComponent(sPortal),
+            'x-stalker-mac': encodeURIComponent(sMac),
+            'x-stalker-tz': encodeURIComponent(getDeviceTimezone()),
+            'x-stalker-search': hsQuery
+        };
+        if (effStTestHdrs.userAgent) { stTestHeaders['x-proxy-ua'] = effStTestHdrs.userAgent; }
+        if (effStTestHdrs.httpReferer) { stTestHeaders['x-proxy-referer'] = effStTestHdrs.httpReferer; }
         fetchWithConnTimeout(api.proxyUrl + '/' + hsQuery, {
             method: 'GET',
-            headers: {
-                'x-stalker-portal': encodeURIComponent(sPortal),
-                'x-stalker-mac': encodeURIComponent(sMac),
-                'x-stalker-tz': encodeURIComponent(getDeviceTimezone()),
-                'x-stalker-search': hsQuery
-            }
+            headers: stTestHeaders
         }, 10000).then(function(r) {
             if (!r.ok) {
                 throw new Error('HTTP ' + r.status);
@@ -16060,20 +18195,11 @@
                         pinBadgeEl.textContent = '🔑 PIN: ' + lanSetupPin;
                     }
                 }
+                if (data && data.pendingSubtitle) {
+                    applyReceivedExternalSubtitle(data.pendingSubtitle, false);
+                }
                 if (data && data.pendingRestore && typeof data.pendingRestore === 'object') {
-                    var restoreMap = data.pendingRestore.data || data.pendingRestore.storage || data.pendingRestore;
-                    if (restoreMap && typeof restoreMap === 'object') {
-                        var keys = Object.keys(restoreMap);
-                        for (var k = 0; k < keys.length; k++) {
-                            var keyName = keys[k];
-                            var val = restoreMap[keyName];
-                            safeSetStorage(keyName, typeof val === 'string' ? val : JSON.stringify(val));
-                        }
-                        loadProfiles();
-                        renderProfileSelectOptions(true);
-                        loadProfileIntoSettingsInputs(editingProfileIndex, true);
-                        showToast('📦 Restored TV Backup from Phone over LAN!');
-                        saveSettingsAndBoot();
+                    if (applyRestoredBackupData(data.pendingRestore)) {
                         return;
                     }
                 }
@@ -16136,6 +18262,12 @@
                 if (pushed.epgOffsetHours !== undefined) {
                     targetProf.epgOffsetHours = Number(pushed.epgOffsetHours) || 0;
                 }
+                if (pushed.userAgent !== undefined) {
+                    targetProf.userAgent = sanitizeHeaderString(pushed.userAgent);
+                }
+                if (pushed.httpReferer !== undefined) {
+                    targetProf.httpReferer = sanitizeHeaderString(pushed.httpReferer);
+                }
                 loadProfileIntoSettingsInputs(editingProfileIndex, true);
                 showToast(data && data.uploadedM3uText ? ('📂 Received uploaded M3U: ' + (targetProf.m3uFileName || 'playlist')) : '📱 Received Remote Setup from Phone/PC!');
                 saveSettingsAndBoot();
@@ -16195,6 +18327,13 @@
         }
         if (selOsdTimeoutEl) {
             selOsdTimeoutEl.value = String(osdTimeoutDurationMs || Number(localStorage.getItem('cfg_osd_timeout')) || 5000);
+        }
+        if (selPrefAudioLangEl) {
+            selPrefAudioLangEl.value = prefAudioLang || localStorage.getItem('cfg_pref_audio_lang') || '';
+        }
+        if (selPrefSubLangEl) {
+            var storedSubLang = localStorage.getItem('cfg_pref_sub_lang');
+            selPrefSubLangEl.value = (storedSubLang !== null) ? storedSubLang : (prefSubLang || '');
         }
         if (inpPinEl) {
             inpPinEl.value = localStorage.getItem('cfg_pin') || api.parentalPin || '0000';
@@ -16497,6 +18636,8 @@
         prof.xtreamPass = (inpXtreamPassEl && inpXtreamPassEl.value.trim()) || '';
         prof.m3uUrl = (inpM3uUrlEl && inpM3uUrlEl.value.trim()) || '';
         prof.epgUrl = (inpEpgUrlEl && inpEpgUrlEl.value.trim()) || '';
+        prof.userAgent = (inpProfileUaEl && sanitizeHeaderString(inpProfileUaEl.value)) || '';
+        prof.httpReferer = (inpProfileRefererEl && sanitizeHeaderString(inpProfileRefererEl.value)) || '';
         prof.epgOffsetHours = selEpgOffsetEl ? (Number(selEpgOffsetEl.value) || 0) : (Number(prof.epgOffsetHours) || 0);
         cachedEpgOffsetSec = Math.round(prof.epgOffsetHours * 3600);
 
@@ -16515,6 +18656,14 @@
         if (selOsdTimeoutEl && selOsdTimeoutEl.value) {
             osdTimeoutDurationMs = Number(selOsdTimeoutEl.value) || 5000;
             safeSetStorage('cfg_osd_timeout', String(osdTimeoutDurationMs));
+        }
+        if (selPrefAudioLangEl) {
+            prefAudioLang = selPrefAudioLangEl.value || '';
+            safeSetStorage('cfg_pref_audio_lang', prefAudioLang);
+        }
+        if (selPrefSubLangEl) {
+            prefSubLang = selPrefSubLangEl.value || '';
+            safeSetStorage('cfg_pref_sub_lang', prefSubLang);
         }
 
         if (pType === 'xtream') {
@@ -16562,6 +18711,7 @@
         }
         closeSettings(true);
         activateProfileAndConnect(prof);
+        scheduleBackupSyncToProxy();
     }
     function createNewProfileInSettings() {
         saveCurrentInputsToEditingProfile();
@@ -16579,7 +18729,9 @@
             m3uUrl: '',
             m3uFileName: '',
             epgUrl: '',
-            epgOffsetHours: 0
+            epgOffsetHours: 0,
+            userAgent: '',
+            httpReferer: ''
         });
         renderProfileSelectOptions(true);
         loadProfileIntoSettingsInputs(profiles.length - 1, true);
@@ -16648,7 +18800,183 @@
         renderProfileSelectOptions(true);
         loadProfileIntoSettingsInputs(editingProfileIndex, true);
         switchMode(lastContentModeIdx);
+        scheduleBackupSyncToProxy();
         showToast('✕ Profile & cached data deleted');
+    }
+
+    function getRecentSearches() {
+        var list = safeGetJson('cfg_recent_searches', []);
+        return Array.isArray(list) ? list : [];
+    }
+    function saveRecentSearch(rawQuery) {
+        var q = String(rawQuery || '').trim();
+        if (q.length < 2) {
+            return;
+        }
+        var lowerQ = q.toLowerCase();
+        var prev = getRecentSearches();
+        var next = [q];
+        for (var i = 0; i < prev.length && next.length < 8; i++) {
+            var itemStr = String(prev[i] || '').trim();
+            if (itemStr && itemStr.toLowerCase() !== lowerQ) {
+                next.push(itemStr);
+            }
+        }
+        safeSetStorage('cfg_recent_searches', JSON.stringify(next));
+    }
+    function clearRecentSearches() {
+        safeSetStorage('cfg_recent_searches', '[]');
+    }
+    function getCachedOrXmltvShortEpgSync(ch) {
+        if (!ch) {
+            return null;
+        }
+        var cached = shortEpgCache[String(ch.id)];
+        if (cached && Array.isArray(cached.list) && cached.list.length > 0) {
+            return cached.list;
+        }
+        if (api && typeof api.getLoadedXmltvCatalogSync === 'function') {
+            var activeXml = api.getLoadedXmltvCatalogSync();
+            if (activeXml) {
+                var xmlList = lookupXmltvChannelPrograms(activeXml, ch);
+                if (Array.isArray(xmlList) && xmlList.length > 0) {
+                    return xmlList;
+                }
+            }
+        }
+        return null;
+    }
+    function buildRecentSearchResultItems() {
+        var recents = getRecentSearches();
+        var out = [];
+        for (var i = 0; i < recents.length; i++) {
+            var rq = String(recents[i] || '').trim();
+            if (!rq) {
+                continue;
+            }
+            out.push({
+                id: 'recent_q_' + i + '_' + rq.toLowerCase(),
+                isRecentSearchResult: true,
+                queryText: rq,
+                name: rq,
+                display: '🕒 ' + rq,
+                searchSubtitle: 'Recent search • Press OK to search again'
+            });
+        }
+        if (out.length > 0) {
+            out.push({
+                id: 'recent_clear_all',
+                isClearRecentResult: true,
+                name: 'Clear Recent Searches',
+                display: '✕ Clear Recent Searches',
+                searchSubtitle: 'Remove saved search history'
+            });
+        }
+        return out;
+    }
+    function updateSearchClearAndStatusUI() {
+        var q = searchInput ? String(searchInput.value || '').trim() : '';
+        if (btnSearchClearEl) {
+            btnSearchClearEl.classList.toggle('is-empty', !q);
+            btnSearchClearEl.classList.toggle('focused', searchFocusArea === 'clear');
+        }
+        if (!searchStatusBarEl) {
+            return;
+        }
+        if (!q) {
+            searchStatusBarEl.classList.remove('is-loading');
+            var recCount = getRecentSearches().length;
+            searchStatusBarEl.textContent = recCount > 0
+                ? ('Recent Searches (' + recCount + ') • Press OK to run or type a new keyword')
+                : 'Type to search Live TV, EPG programs, Movies, Series, actors, or years';
+            return;
+        }
+        if (searchAsyncPending) {
+            searchStatusBarEl.classList.add('is-loading');
+            var soFar = searchResults.length;
+            searchStatusBarEl.textContent = 'Searching "' + q + '" (fetching Movies & Series)...' + (soFar > 0 ? (' • ' + soFar + ' found so far') : '');
+            return;
+        }
+        searchStatusBarEl.classList.remove('is-loading');
+        if (searchResults.length === 0) {
+            searchStatusBarEl.textContent = '0 matches for "' + q + '"';
+            return;
+        }
+        var cs = searchCountsSummary || {};
+        var parts = [];
+        if (cs.cats) { parts.push(cs.cats + ' Cat'); }
+        if (cs.epg) { parts.push(cs.epg + ' EPG'); }
+        if (cs.live) { parts.push(cs.live + ' Live'); }
+        if (cs.vod) { parts.push(cs.vod + ' Movies'); }
+        if (cs.series) { parts.push(cs.series + ' Series'); }
+        searchStatusBarEl.textContent = searchResults.length + ' matches for "' + q + '"' + (parts.length > 0 ? ('  •  ' + parts.join('  •  ')) : '');
+    }
+    function updateSearchScopeTabsUI() {
+        for (var i = 0; i < searchScopeTabs.length; i++) {
+            var tab = searchScopeTabs[i];
+            var tScope = tab.getAttribute('data-scope') || 'all';
+            tab.classList.toggle('active', tScope === searchScopeFilter);
+            tab.classList.toggle('focused', searchFocusArea === 'tabs' && i === searchScopeIdx);
+        }
+        if (searchInput) {
+            searchInput.classList.toggle('focused', searchFocusArea === 'input');
+        }
+        if (searchResultsContainer) {
+            searchResultsContainer.classList.toggle('focused', searchFocusArea === 'results');
+        }
+        updateSearchClearAndStatusUI();
+    }
+    function cycleSearchScopeTab(stepDelta) {
+        if (!searchScopeTabs || searchScopeTabs.length === 0) {
+            return;
+        }
+        var d = typeof stepDelta === 'number' ? stepDelta : 1;
+        searchScopeIdx = (searchScopeIdx + d + searchScopeTabs.length) % searchScopeTabs.length;
+        searchScopeFilter = searchScopeTabs[searchScopeIdx].getAttribute('data-scope') || 'all';
+        updateSearchScopeTabsUI();
+        performSearch(searchInput ? searchInput.value : '');
+    }
+    function clearSearchInputAndRefresh() {
+        if (searchDebounce) {
+            clearTimeout(searchDebounce);
+            searchDebounce = null;
+        }
+        searchAsyncPending = false;
+        searchCountsSummary = null;
+        if (searchInput) {
+            searchInput.value = '';
+        }
+        searchFocusArea = 'input';
+        updateSearchScopeTabsUI();
+        performSearch('');
+        if (searchInput && typeof searchInput.focus === 'function') {
+            searchInput.focus();
+        }
+    }
+    if (searchScopeTabs.length > 0) {
+        (function() {
+            for (var t = 0; t < searchScopeTabs.length; t++) {
+                (function(tabIdx, tabEl) {
+                    tabEl.onclick = function(ev) {
+                        ev.stopPropagation();
+                        searchScopeIdx = tabIdx;
+                        searchScopeFilter = tabEl.getAttribute('data-scope') || 'all';
+                        searchFocusArea = 'input';
+                        updateSearchScopeTabsUI();
+                        if (searchInput && typeof searchInput.focus === 'function') {
+                            searchInput.focus();
+                        }
+                        performSearch(searchInput ? searchInput.value : '');
+                    };
+                })(t, searchScopeTabs[t]);
+            }
+        })();
+    }
+    if (btnSearchClearEl) {
+        btnSearchClearEl.onclick = function(ev) {
+            ev.stopPropagation();
+            clearSearchInputAndRefresh();
+        };
     }
 
     function openSearch() {
@@ -16657,19 +18985,20 @@
         }
         searchOpen = true;
         searchFocusArea = 'input';
+        searchScopeFilter = 'all';
+        searchScopeIdx = 0;
         searchIdx = 0;
-        searchResults = [];
+        searchAsyncPending = false;
+        searchCountsSummary = null;
+        searchResults = buildRecentSearchResultItems();
         if (searchInput) {
             searchInput.value = '';
-            searchInput.classList.add('focused');
         }
-        if (searchResultsContainer) {
-            searchResultsContainer._lastItemsRef = null;
-            searchResultsContainer.innerHTML = '';
-        }
+        updateSearchScopeTabsUI();
         if (searchModal) {
             searchModal.classList.add('visible');
         }
+        renderSearchResults();
         updateContextualHelpBar();
         if (searchInput && typeof searchInput.focus === 'function') {
             setTimeout(function() {
@@ -16696,6 +19025,7 @@
     }
     function closeSearch() {
         searchOpen = false;
+        searchAsyncPending = false;
         if (searchInput) {
             searchInput.blur();
         }
@@ -16710,7 +19040,7 @@
     }
     function matchCategoryList(categoryArray, q, labelPrefix, targetModeIdx) {
         var list = Array.isArray(categoryArray) ? categoryArray : [];
-        var matches = [];
+        var scored = [];
         var modeId = targetModeIdx === 2 ? 'series' : (targetModeIdx === 1 ? 'vod' : 'live');
         for (var i = 0; i < list.length; i++) {
             var c = list[i];
@@ -16724,101 +19054,338 @@
             if (!showHiddenEntries && isHiddenCategory(modeId, c.id)) {
                 continue;
             }
-            if (getCatLowerTitle(c).indexOf(q) !== -1) {
-                matches.push({
-                    id: 'cat_' + targetModeIdx + '_' + c.id,
-                    isCategoryResult: true,
-                    targetModeIdx: targetModeIdx,
-                    catId: String(c.id),
-                    name: title,
-                    censored: Boolean(c.censored),
-                    display: '📂 [' + labelPrefix + ' Category] ' + title
+            var catScore = scoreSearchTextMatch(q, title, '');
+            if (catScore > 0) {
+                scored.push({
+                    score: catScore,
+                    idx: i,
+                    entry: {
+                        id: 'cat_' + targetModeIdx + '_' + c.id,
+                        isCategoryResult: true,
+                        targetModeIdx: targetModeIdx,
+                        catId: String(c.id),
+                        name: title,
+                        modeLabel: labelPrefix,
+                        censored: Boolean(c.censored),
+                        display: '📂 [' + labelPrefix + ' Category] ' + title,
+                        searchSubtitle: 'Jump to ' + labelPrefix + ' category'
+                    }
                 });
-                if (matches.length >= 15) {
+            }
+        }
+        scored.sort(function(a, b) {
+            if (b.score !== a.score) {
+                return b.score - a.score;
+            }
+            return a.idx - b.idx;
+        });
+        var matches = [];
+        for (var m = 0; m < scored.length && m < 15; m++) {
+            matches.push(scored[m].entry);
+        }
+        return matches;
+    }
+    function searchEpgCatalog(query, channels, epgLookupFn, options) {
+        var q = String(query || '').trim().toLowerCase();
+        if (!q || !Array.isArray(channels) || typeof epgLookupFn !== 'function') {
+            return [];
+        }
+        var maxResults = (options && options.maxResults) ? Number(options.maxResults) : 35;
+        var seen = {};
+        var nowHits = [];
+        var laterHits = [];
+        for (var i = 0; i < channels.length; i++) {
+            var ch = channels[i];
+            if (!ch) {
+                continue;
+            }
+            if (options && typeof options.filterChannelFn === 'function' && !options.filterChannelFn(ch)) {
+                continue;
+            }
+            var progs = epgLookupFn(ch) || [];
+            for (var ep = 0; ep < progs.length; ep++) {
+                var pr = progs[ep];
+                if (!pr || pr.isPast) {
+                    continue;
+                }
+                var progTitle = String(pr.name || pr.title || '');
+                var progDesc = String(pr.descr || pr.description || pr.desc || '');
+                var epgScore = scoreSearchTextMatch(q, progTitle, progDesc);
+                if (epgScore <= 0) {
+                    continue;
+                }
+                var startTs = Number(pr.start_timestamp || pr.startSec || 0);
+                var dedupeKey = String(ch.id) + '|' + String(startTs || ep) + '|' + progTitle;
+                if (seen[dedupeKey]) {
+                    continue;
+                }
+                seen[dedupeKey] = true;
+                var rawRange = String(pr.timeLabel || pr.timeRange || '');
+                var startClock = rawRange ? rawRange.split(' - ')[0] : '';
+                var entry = {
+                    id: 'epg_' + ch.id + '_' + (startTs || ep),
+                    isEpgProgramResult: true,
+                    channelRef: ch,
+                    epgProg: pr,
+                    isNow: Boolean(pr.isNow),
+                    startTs: startTs,
+                    _matchScore: epgScore,
+                    name: progTitle,
+                    display: '📅 [' + (pr.isNow ? 'ON NOW' : (startClock || 'SOON')) + ' • ' + ch.name + '] ' + progTitle,
+                    searchSubtitle: (pr.isNow ? 'ON NOW' : (rawRange || startClock || 'Upcoming')) + '  •  ' + ch.name + (progDesc ? (' — ' + progDesc) : '')
+                };
+                if (pr.isNow) {
+                    nowHits.push(entry);
+                } else {
+                    laterHits.push(entry);
+                }
+            }
+        }
+        nowHits.sort(function(a, b) {
+            if ((b._matchScore || 0) !== (a._matchScore || 0)) {
+                return (b._matchScore || 0) - (a._matchScore || 0);
+            }
+            return (a.startTs || 0) - (b.startTs || 0);
+        });
+        laterHits.sort(function(a, b) {
+            if ((b._matchScore || 0) !== (a._matchScore || 0)) {
+                return (b._matchScore || 0) - (a._matchScore || 0);
+            }
+            return (a.startTs || 0) - (b.startTs || 0);
+        });
+        return nowHits.concat(laterHits).slice(0, maxResults);
+    }
+
+    function getCachedEpgForSearchChannel(ch, activeXmlCat, fullEpgMap) {
+        if (!ch) {
+            return [];
+        }
+        var chKey = String(ch.id);
+        var cachedShort = shortEpgCache[chKey];
+        if (cachedShort && Array.isArray(cachedShort.list) && cachedShort.list.length > 0) {
+            return normalizeEpgEntries(cachedShort.list);
+        }
+        if (Array.isArray(epgGridProgramsByCh[chKey]) && epgGridProgramsByCh[chKey].length > 0) {
+            return epgGridProgramsByCh[chKey];
+        }
+        if (fullEpgMap && Array.isArray(fullEpgMap[chKey]) && fullEpgMap[chKey].length > 0) {
+            return normalizeEpgEntries(fullEpgMap[chKey]);
+        }
+        if (activeXmlCat) {
+            var xmlRaw = lookupXmltvChannelPrograms(activeXmlCat, ch);
+            if (Array.isArray(xmlRaw) && xmlRaw.length > 0) {
+                return normalizeEpgEntries(xmlRaw);
+            }
+        }
+        return [];
+    }
+
+    function activateSearchResultItem(chosen) {
+        if (!chosen) {
+            return;
+        }
+        if (chosen.isRecentSearchResult) {
+            if (searchInput) {
+                searchInput.value = chosen.queryText || chosen.name || '';
+            }
+            searchFocusArea = 'input';
+            updateSearchScopeTabsUI();
+            performSearch(searchInput ? searchInput.value : '');
+            if (searchResults.length > 0) {
+                searchFocusArea = 'results';
+                updateSearchScopeTabsUI();
+                renderSearchResults();
+            }
+            return;
+        }
+        if (chosen.isClearRecentResult) {
+            clearRecentSearches();
+            searchResults = [];
+            searchIdx = 0;
+            searchFocusArea = 'input';
+            updateSearchScopeTabsUI();
+            renderSearchResults();
+            if (searchInput && typeof searchInput.focus === 'function') {
+                searchInput.focus();
+            }
+            showToast('Recent searches cleared');
+            return;
+        }
+        if (searchInput && searchInput.value.trim()) {
+            saveRecentSearch(searchInput.value);
+        }
+        closeSearch();
+        if (chosen.isCategoryResult) {
+            jumpToCategoryFromSearch(chosen);
+        } else if (chosen.isEpgProgramResult) {
+            if (chosen.epgProg && !chosen.epgProg.isNow && !chosen.epgProg.isPast && chosen.channelRef) {
+                openEpgModal(chosen.channelRef, chosen.epgProg.start_timestamp || chosen.startTs || 0);
+            } else if (chosen.channelRef) {
+                if (window._parentalUnlocked || !isAdultContentItem(chosen.channelRef)) {
+                    setOverlayVisible(false);
+                }
+                playItem(chosen.channelRef);
+                syncLiveChannelCursorOnZap(chosen.channelRef);
+            }
+        } else if (chosen.isSeries) {
+            jumpToSeriesFromSearch(chosen);
+        } else {
+            if (window._parentalUnlocked || !isAdultContentItem(chosen)) {
+                setOverlayVisible(false);
+            }
+            playItem(chosen);
+            if (!chosen.isVod && !chosen.isSeries) {
+                syncLiveChannelCursorOnZap(chosen);
+            }
+        }
+    }
+
+    function applySearchResultsPreservingSelection(nextList) {
+        var prevId = (searchResults && searchResults[searchIdx] && searchResults[searchIdx].id !== undefined)
+            ? String(searchResults[searchIdx].id)
+            : '';
+        searchResults = Array.isArray(nextList) ? nextList : [];
+        var restoredIdx = -1;
+        if (prevId && searchFocusArea === 'results') {
+            for (var r = 0; r < searchResults.length; r++) {
+                if (searchResults[r] && String(searchResults[r].id) === prevId) {
+                    restoredIdx = r;
                     break;
                 }
             }
         }
-        return matches;
+        searchIdx = restoredIdx >= 0 ? restoredIdx : 0;
     }
+
     function performSearch(query) {
         var q = (query || '').trim().toLowerCase();
         var mySeq = ++searchSeq;
         if (!q) {
-            searchResults = [];
-            if (searchResultsContainer) {
-                searchResultsContainer._lastItemsRef = null;
-                searchResultsContainer.innerHTML = '';
-            }
+            searchAsyncPending = false;
+            searchCountsSummary = null;
+            searchResults = buildRecentSearchResultItems();
+            searchIdx = 0;
+            renderSearchResults();
+            updateSearchClearAndStatusUI();
             return;
         }
-        var liveCatMatches = matchCategoryList(liveGenres, q, 'Live', 0);
-        var vodCatMatches = matchCategoryList(vodCats, q, 'Movie', 1);
-        var seriesCatMatches = matchCategoryList(seriesCats, q, 'Series', 2);
+        var scope = searchScopeFilter || 'all';
+        var includeLive = (scope === 'all' || scope === 'live');
+        var includeEpg = (scope === 'all' || scope === 'epg');
+        var includeVod = (scope === 'all' || scope === 'vod');
+        var includeSeries = (scope === 'all' || scope === 'series');
+
+        var liveCatMatches = includeLive ? matchCategoryList(liveGenres, q, 'Live', 0) : [];
+        var vodCatMatches = includeVod ? matchCategoryList(vodCats, q, 'Movie', 1) : [];
+        var seriesCatMatches = includeSeries ? matchCategoryList(seriesCats, q, 'Series', 2) : [];
         var allCatMatches = liveCatMatches.concat(vodCatMatches).concat(seriesCatMatches);
+
+        var profScope = activeProfileId || 'prof_default';
+        var fullEpgMap = (fullEpgCache[profScope] && fullEpgCache[profScope].map) ? fullEpgCache[profScope].map : null;
+        var xmlUrls = (typeof api.getEffectiveXmltvUrls === 'function') ? api.getEffectiveXmltvUrls() : [];
+        var activeXmlCat = (typeof api.getLoadedXmltvCatalogSync === 'function') ? api.getLoadedXmltvCatalogSync() : null;
+
         var liveMatches = [];
-        var epgProgMatches = [];
-        var hasAnyCachedEpg = shortEpgKeys.length > 0 || Object.keys(epgGridProgramsByCh).length > 0;
-        for (var i = 0; i < allChannels.length; i++) {
-            if (liveMatches.length >= 30 && (!hasAnyCachedEpg || epgProgMatches.length >= 15)) {
-                break;
-            }
-            var ch = allChannels[i];
-            if (!ch) {
-                continue;
-            }
-            if (!window._parentalUnlocked && isAdultContentItem(ch)) {
-                continue;
-            }
-            if (!showHiddenEntries && (isHiddenItem('live', ch.id) || (ch.genreId && isHiddenCategory('live', ch.genreId)))) {
-                continue;
-            }
-            if (liveMatches.length < 30 && (getItemLowerName(ch).indexOf(q) !== -1 || String(ch.num || '') === q)) {
-                liveMatches.push(ch);
-            }
-            if (hasAnyCachedEpg && epgProgMatches.length < 15) {
-                var chKey = String(ch.id);
-                var cachedShort = shortEpgCache[chKey];
-                var normProgs = (cachedShort && Array.isArray(cachedShort.list) && cachedShort.list.length > 0) ?
-                    normalizeEpgEntries(cachedShort.list) :
-                    (Array.isArray(epgGridProgramsByCh[chKey]) ? epgGridProgramsByCh[chKey] : []);
-                for (var ep = 0; ep < normProgs.length; ep++) {
-                    var pr = normProgs[ep];
-                    if (!pr || pr.isPast) {
-                        continue;
+        if (includeLive) {
+            var liveScored = [];
+            for (var i = 0; i < allChannels.length; i++) {
+                var ch = allChannels[i];
+                if (!ch) {
+                    continue;
+                }
+                if (!window._parentalUnlocked && isAdultContentItem(ch)) {
+                    continue;
+                }
+                if (!showHiddenEntries && (isHiddenItem('live', ch.id) || (ch.genreId && isHiddenCategory('live', ch.genreId)))) {
+                    continue;
+                }
+                var chScore = (ch.num !== undefined && String(ch.num) === q) ? 1050 : 0;
+                if (chScore === 0) {
+                    var chEpgNowTxt = '';
+                    var chEpgArr = getCachedOrXmltvShortEpgSync(ch);
+                    if (chEpgArr) {
+                        var chParsedNow = parseShortEpgNowNext(chEpgArr);
+                        if (chParsedNow.now && chParsedNow.now !== 'No EPG Available') {
+                            chEpgNowTxt = chParsedNow.now;
+                        }
                     }
-                    var progTitle = pr ? String(pr.name || pr.title || '') : '';
-                    var progLower = pr._nameLower || (pr._nameLower = progTitle.toLowerCase());
-                    if (progLower && progLower.indexOf(q) !== -1) {
-                        var rawRange = String(pr.timeLabel || pr.timeRange || '');
-                        var startClock = rawRange ? rawRange.split(' - ')[0] : '';
-                        epgProgMatches.push({
-                            id: 'epg_' + ch.id + '_' + (pr.start_timestamp || pr.startSec || ep),
-                            isEpgProgramResult: true,
-                            channelRef: ch,
-                            epgProg: pr,
-                            name: progTitle,
-                            display: '📅 [' + (pr.isNow ? 'ON NOW' : startClock) + ' • ' + ch.name + '] ' + progTitle
-                        });
-                        break;
-                    }
+                    chScore = scoreSearchTextMatch(q, ch.name || '', chEpgNowTxt);
+                }
+                if (chScore > 0) {
+                    liveScored.push({ score: chScore, idx: i, item: ch });
                 }
             }
+            liveScored.sort(function(a, b) {
+                if (b.score !== a.score) {
+                    return b.score - a.score;
+                }
+                return a.idx - b.idx;
+            });
+            var liveCap = (scope === 'live') ? 45 : 30;
+            for (var li = 0; li < liveScored.length && li < liveCap; li++) {
+                liveMatches.push(liveScored[li].item);
+            }
         }
-        searchResults = allCatMatches.concat(epgProgMatches).concat(liveMatches);
-        searchIdx = 0;
+
+        var epgProgMatches = [];
+        if (includeEpg) {
+            epgProgMatches = searchEpgCatalog(q, allChannels, function(chObj) {
+                return getCachedEpgForSearchChannel(chObj, activeXmlCat, fullEpgMap);
+            }, {
+                maxResults: scope === 'epg' ? 35 : 20,
+                filterChannelFn: function(chObj) {
+                    if (!window._parentalUnlocked && isAdultContentItem(chObj)) {
+                        return false;
+                    }
+                    if (!showHiddenEntries && (isHiddenItem('live', chObj.id) || (chObj.genreId && isHiddenCategory('live', chObj.genreId)))) {
+                        return false;
+                    }
+                    return true;
+                }
+            });
+            if (xmlUrls.length > 0 && !activeXmlCat) {
+                api.ensureXmltvLoaded().then(function(loadedXml) {
+                    if (loadedXml && searchOpen && mySeq === searchSeq && searchInput && searchInput.value.trim().toLowerCase() === q) {
+                        performSearch(searchInput.value);
+                    }
+                }).catch(function() {});
+            } else if (epgProgMatches.length === 0 && api.getProviderType() === 'stalker' && !fullEpgMap && allChannels[0]) {
+                api.fetchFullEpg(allChannels[0].id).then(function() {
+                    if (searchOpen && mySeq === searchSeq && searchInput && searchInput.value.trim().toLowerCase() === q && fullEpgCache[profScope]) {
+                        performSearch(searchInput.value);
+                    }
+                }).catch(function() {});
+            }
+        }
+
+        var syncCombined = allCatMatches.concat(epgProgMatches).concat(liveMatches);
+        searchAsyncPending = Boolean(includeVod || includeSeries);
+        searchCountsSummary = {
+            cats: allCatMatches.length,
+            epg: epgProgMatches.length,
+            live: liveMatches.length,
+            vod: 0,
+            series: 0
+        };
+        applySearchResultsPreservingSelection(syncCombined);
         renderSearchResults();
+        updateSearchClearAndStatusUI();
+        if (!includeVod && !includeSeries) {
+            return;
+        }
         Promise.all([
-            api.fetchVodPage('*', 1, q, 'added').catch(function() { return []; }),
-            api.fetchSeriesPage('*', 1, q, 'added').catch(function() { return []; })
+            includeVod ? api.fetchVodPage('*', 1, q, 'added').catch(function() { return []; }) : Promise.resolve([]),
+            includeSeries ? api.fetchSeriesPage('*', 1, q, 'added').catch(function() { return []; }) : Promise.resolve([])
         ]).then(function(res) {
             if (!searchOpen || mySeq !== searchSeq) {
                 return;
             }
+            searchAsyncPending = false;
             var rawVodRes = Array.isArray(res[0]) ? res[0] : [];
             var rawSeriesRes = Array.isArray(res[1]) ? res[1] : [];
             var vodMatches = [];
-            for (var v = 0; v < rawVodRes.length && vodMatches.length < 20; v++) {
+            var vodCap = (scope === 'vod') ? 40 : 25;
+            for (var v = 0; v < rawVodRes.length && vodMatches.length < vodCap; v++) {
                 var vItem = rawVodRes[v];
                 if (!vItem) {
                     continue;
@@ -16832,7 +19399,8 @@
                 vodMatches.push(vItem);
             }
             var seriesMatches = [];
-            for (var s = 0; s < rawSeriesRes.length && seriesMatches.length < 20; s++) {
+            var seriesCap = (scope === 'series') ? 40 : 25;
+            for (var s = 0; s < rawSeriesRes.length && seriesMatches.length < seriesCap; s++) {
                 var sItem = rawSeriesRes[s];
                 if (!sItem) {
                     continue;
@@ -16845,16 +19413,23 @@
                 }
                 seriesMatches.push(sItem);
             }
-            searchResults = allCatMatches.concat(epgProgMatches).concat(liveMatches).concat(vodMatches).concat(seriesMatches);
-            if (searchIdx >= searchResults.length) {
-                searchIdx = 0;
-            }
+            searchCountsSummary = {
+                cats: allCatMatches.length,
+                epg: epgProgMatches.length,
+                live: liveMatches.length,
+                vod: vodMatches.length,
+                series: seriesMatches.length
+            };
+            applySearchResultsPreservingSelection(
+                allCatMatches.concat(epgProgMatches).concat(liveMatches).concat(vodMatches).concat(seriesMatches)
+            );
             renderSearchResults();
+            updateSearchClearAndStatusUI();
         });
     }
     function renderSearchResults() {
         renderList(searchResultsContainer, searchResults, searchIdx, function(item) {
-            if (item.isCategoryResult || item.isEpgProgramResult) {
+            if (item.isCategoryResult || item.isEpgProgramResult || item.isRecentSearchResult || item.isClearRecentResult) {
                 return item.display;
             }
             if (item.isSeries) {
@@ -16864,7 +19439,7 @@
                 return '🎬 [Movie] ' + item.name + (item.year ? (' (' + item.year + ')') : '');
             }
             return '📺 [Live] ' + (item.num ? (item.num + '. ') : '') + item.name;
-        }, 8);
+        }, 6);
     }
     function jumpToCategoryFromSearch(catResult) {
         if (!catResult) {
@@ -16881,6 +19456,7 @@
         activeCol = 'items';
         setOverlayVisible(true);
         renderModes();
+        updateColumnFocusClasses();
         if (catsHeaderEl) {
             catsHeaderEl.textContent = 'Categories';
         }
@@ -16998,17 +19574,52 @@
         }
         stepIntoSeries(seriesItem);
     }
+    function updateFilterStatusMsg() {
+        if (!filterStatusMsgEl) {
+            return;
+        }
+        var q = inpFilterEl ? String(inpFilterEl.value || '').trim() : '';
+        var total = filterTargetCol === 'cats' ? rawCats.length : rawItems.length;
+        var matched = filterTargetCol === 'cats' ? currentCats.length : currentItems.length;
+        var noun = filterTargetCol === 'cats' ? 'categories' : 'items';
+        filterStatusMsgEl.classList.remove('is-loading');
+        if (!q) {
+            filterStatusMsgEl.textContent = 'Showing all ' + matched + ' ' + noun + ' • Type to filter live';
+        } else if (matched === 0) {
+            filterStatusMsgEl.textContent = 'No ' + noun + ' match "' + q + '" — Press YELLOW to clear';
+        } else {
+            filterStatusMsgEl.textContent = matched + ' of ' + total + ' ' + noun + ' match "' + q + '"';
+        }
+    }
+    function applyLiveFilterValue(val, shouldClose) {
+        var clean = String(val || '').trim();
+        if (filterTargetCol === 'cats') {
+            catFilterText = clean;
+            catIdx = 0;
+        } else {
+            itemFilterText = clean;
+            itemIdx = 0;
+        }
+        applyColumnFilters();
+        renderUI();
+        updateFilterStatusMsg();
+        if (shouldClose) {
+            closeFilterModal();
+        }
+    }
     function openFilterModal(targetCol) {
         filterOpen = true;
         filterRow = 0;
         filterCol = 0;
         filterTargetCol = targetCol || (activeCol === 'cats' ? 'cats' : 'items');
+        filterInitialText = filterTargetCol === 'cats' ? catFilterText : itemFilterText;
         if (filterModalTitle) {
             filterModalTitle.textContent = filterTargetCol === 'cats' ? 'Filter Categories' : 'Filter Channels / Content';
         }
         if (inpFilterEl) {
-            inpFilterEl.value = filterTargetCol === 'cats' ? catFilterText : itemFilterText;
+            inpFilterEl.value = filterInitialText;
         }
+        updateFilterStatusMsg();
         if (filterModal) {
             filterModal.classList.add('visible');
         }
@@ -17022,7 +19633,16 @@
             }, 20);
         }
     }
-    function closeFilterModal() {
+    function closeFilterModal(restoreInitial) {
+        if (restoreInitial) {
+            if (filterTargetCol === 'cats') {
+                catFilterText = filterInitialText || '';
+            } else {
+                itemFilterText = filterInitialText || '';
+            }
+            applyColumnFilters();
+            renderUI();
+        }
         filterOpen = false;
         if (inpFilterEl) {
             inpFilterEl.blur();
@@ -17035,29 +19655,25 @@
     function updateFilterFocus() {
         return applyGridFocus(filterEls, filterGrid, filterRow, filterCol);
     }
+    if (inpFilterEl) {
+        inpFilterEl.oninput = function() {
+            if (!filterOpen) {
+                return;
+            }
+            applyLiveFilterValue(inpFilterEl.value, false);
+        };
+    }
     if (btnFilterApplyEl) {
         btnFilterApplyEl.onclick = function() {
-            var val = inpFilterEl ? inpFilterEl.value.trim() : '';
-            if (filterTargetCol === 'cats') {
-                catFilterText = val;
-            } else {
-                itemFilterText = val;
-            }
-            closeFilterModal();
-            applyColumnFilters();
-            renderUI();
+            applyLiveFilterValue(inpFilterEl ? inpFilterEl.value : '', true);
         };
     }
     if (btnFilterClearEl) {
         btnFilterClearEl.onclick = function() {
-            if (filterTargetCol === 'cats') {
-                catFilterText = '';
-            } else {
-                itemFilterText = '';
+            if (inpFilterEl) {
+                inpFilterEl.value = '';
             }
-            closeFilterModal();
-            applyColumnFilters();
-            renderUI();
+            applyLiveFilterValue('', true);
         };
     }
 
@@ -17175,11 +19791,23 @@
             filterBadgeEl.title = 'Click to clear filters';
             filterBadgeEl.onclick = function(ev) {
                 ev.stopPropagation();
+                var prevSort = currentSort;
                 catFilterText = '';
                 itemFilterText = '';
                 currentSort = 'added';
-                applyColumnFilters();
-                renderUI();
+                var resetModeId = getActiveContentModeId();
+                var resetCat = currentCats[catIdx];
+                var needCatalogReload = prevSort !== 'added' &&
+                    (resetModeId === 'vod' || resetModeId === 'series') &&
+                    seriesStack.length === 0 &&
+                    resetCat && resetCat.id !== 'cont' && resetCat.id !== 'fav' && resetCat.id !== 'rec';
+                if (needCatalogReload) {
+                    applyColumnFilters();
+                    selectCategory(catIdx, true);
+                } else {
+                    applyColumnFilters();
+                    renderUI();
+                }
                 showToast('Filters cleared');
             };
         }
@@ -17292,6 +19920,16 @@
             miniZapIdx = (miniZapIdx + step + zapWheelList.length) % zapWheelList.length;
             renderMiniZapList();
         });
+        bindWheelSafe(document.getElementById('dvr-modal-list'), function(ev) {
+            ev.preventDefault();
+            if (dvrModalItems.length === 0) {
+                return;
+            }
+            dvrModalFocusArea = 'list';
+            var step = ev.deltaY > 0 ? 1 : -1;
+            dvrModalIdx = Math.max(0, Math.min(dvrModalItems.length - 1, dvrModalIdx + step));
+            renderDvrModalList();
+        });
     }
 
     function syncLiveChannelCursorOnZap(targetCh) {
@@ -17369,7 +20007,7 @@
                     'Info', 'Guide', 'ChannelGuide', 'Caption', 'ChannelUp', 'ChannelDown',
                     'PreviousChannel',
                     'MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop',
-                    'MediaFastForward', 'MediaRewind',
+                    'MediaFastForward', 'MediaRewind', 'MediaTrackNext', 'MediaTrackPrevious',
                     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'
                 ];
                 for (var i = 0; i < keysToRegister.length; i++) {
@@ -17418,6 +20056,8 @@
             var isGuide = code === 458 || key === 'Guide' || key === 'ChannelGuide' || key === 'e';
             var isChUp = code === 427 || key === 'ChannelUp' || key === 'PageUp';
             var isChDown = code === 428 || key === 'ChannelDown' || key === 'PageDown';
+            var isMediaNext = code === 10233 || key === 'MediaTrackNext';
+            var isMediaPrev = code === 10232 || key === 'MediaTrackPrevious';
             var isPreCh = code === 10190 || key === 'PreviousChannel' || key === 'p' || key === 'P';
             var isPlayPause = code === 10252 || key === 'MediaPlayPause' || key === ' ';
             var isPlay = code === 415 || key === 'MediaPlay';
@@ -17697,6 +20337,8 @@
                 e.preventDefault();
                 if (isBack || isGuide) {
                     closeEpgModal();
+                } else if (isRed) {
+                    triggerScheduleRecOnSelectedEpgProgram();
                 } else if (isGreen) {
                     toggleEpgModalViewMode();
                 } else if (isYellow) {
@@ -17737,9 +20379,9 @@
                 } else if (isDown) {
                     epgModalIdx = Math.min(epgModalItems.length - 1, epgModalIdx + 1);
                     renderEpgModalList();
-                } else if (isLeft || isChUp) {
+                } else if (isLeft || isChDown || isMediaPrev) {
                     stepEpgModalChannel(-1);
-                } else if (isRight || isChDown) {
+                } else if (isRight || isChUp || isMediaNext) {
                     stepEpgModalChannel(1);
                 } else if (isEnter) {
                     triggerSelectedEpgProgram();
@@ -17835,8 +20477,9 @@
                     imeActive = false;
                     var prevColLeft = settingsCol;
                     if (prevColLeft === 0) {
-                        if (settingsRow >= 5) {
-                            settingsRow = Math.min(4, settingsRow - 5);
+                        var rightAnchor = Math.max(1, settingsRightStartRow || 5);
+                        if (settingsRow >= rightAnchor) {
+                            settingsRow = Math.min(rightAnchor - 1, settingsRow - rightAnchor);
                             settingsCol = settingsGrid[settingsRow].length - 1;
                             if (settingsGrid[settingsRow].length > 1 && settingsGrid[settingsRow][0] !== tabProvStalkerEl) {
                                 settingsLastColRatio = 1;
@@ -17870,8 +20513,9 @@
                     var prevColRight = settingsCol;
                     var maxColInRow = settingsGrid[settingsRow].length - 1;
                     if (prevColRight === maxColInRow) {
-                        if (settingsRow <= 4 && settingsGrid.length > 5) {
-                            settingsRow = Math.min(settingsGrid.length - 1, settingsRow + 5);
+                        var rightStartR = Math.max(1, settingsRightStartRow || 5);
+                        if (settingsRow < rightStartR && settingsGrid.length > rightStartR) {
+                            settingsRow = Math.min(settingsGrid.length - 1, settingsRow + rightStartR);
                             settingsCol = 0;
                             if (settingsGrid[settingsRow].length > 1) {
                                 settingsLastColRatio = 0;
@@ -17936,7 +20580,7 @@
                             profiles[editingProfileIndex].epgOffsetHours = Number(selEpgOffsetEl.value) || 0;
                         }
                     } else if (focusedEl === selThemeEl) {
-                        var themes = ['blue', 'purple', 'cyan', 'green', 'red', 'amber'];
+                        var themes = ['blue', 'purple', 'cyan', 'green', 'red', 'amber', 'rose'];
                         var curT = themes.indexOf(selThemeEl.value);
                         var nextT = (curT + 1) % themes.length;
                         selThemeEl.value = themes[nextT];
@@ -17960,6 +20604,29 @@
                         selOsdTimeoutEl.value = osdOpts[(curOT + 1) % osdOpts.length];
                         osdTimeoutDurationMs = Number(selOsdTimeoutEl.value) || 5000;
                         safeSetStorage('cfg_osd_timeout', String(osdTimeoutDurationMs));
+                    } else if (focusedEl === selUaPresetEl) {
+                        var uaPresets = ['default', 'vlc', 'tivimate', 'chrome', 'tizen'];
+                        var curUAP = uaPresets.indexOf(String(selUaPresetEl.value));
+                        var nextUAP = uaPresets[(curUAP + 1) % uaPresets.length];
+                        selUaPresetEl.value = nextUAP;
+                        if (inpProfileUaEl) {
+                            inpProfileUaEl.value = UA_PRESET_VALUES[nextUAP] || '';
+                        }
+                        if (profiles[editingProfileIndex]) {
+                            profiles[editingProfileIndex].userAgent = sanitizeHeaderString(UA_PRESET_VALUES[nextUAP] || '');
+                        }
+                    } else if (focusedEl === selPrefAudioLangEl) {
+                        var audLangOpts = ['', 'eng', 'ara', 'spa', 'fre', 'ger', 'tur', 'por', 'ita', 'rus', 'hin'];
+                        var curAL = audLangOpts.indexOf(String(selPrefAudioLangEl.value));
+                        selPrefAudioLangEl.value = audLangOpts[(curAL + 1) % audLangOpts.length];
+                        prefAudioLang = selPrefAudioLangEl.value;
+                        safeSetStorage('cfg_pref_audio_lang', prefAudioLang);
+                    } else if (focusedEl === selPrefSubLangEl) {
+                        var subLangOpts = ['off', '', 'eng', 'ara', 'spa', 'fre', 'ger', 'tur', 'por', 'ita', 'rus', 'hin'];
+                        var curSL = subLangOpts.indexOf(String(selPrefSubLangEl.value));
+                        selPrefSubLangEl.value = subLangOpts[(curSL + 1) % subLangOpts.length];
+                        prefSubLang = selPrefSubLangEl.value;
+                        safeSetStorage('cfg_pref_sub_lang', prefSubLang);
                     } else if (focusedEl === btnSaveEl) {
                         saveSettingsAndBoot();
                     } else if (focusedEl === btnProfileNewEl) {
@@ -17991,33 +20658,92 @@
             // 3. Global Search Modal
             if (searchOpen) {
                 var isSearchBack = isHardwareOrEscBack ||
-                    (isBackspaceKey && (!isInputFocused || !searchInput || searchInput.value === ''));
+                    (isBackspaceKey && (searchFocusArea !== 'input' || !isInputFocused || !searchInput || searchInput.value === ''));
                 if (isSearchBack) {
                     e.preventDefault();
                     closeSearch();
                     return;
                 }
+                var isHardwareColorRed = (code === 403 || key === 'ColorF0Red');
+                var isHardwareColorYellow = (code === 405 || key === 'ColorF2Yellow');
+                if (isHardwareColorRed || (!isInputFocused && isRed)) {
+                    e.preventDefault();
+                    cycleSearchScopeTab(1);
+                    return;
+                }
+                if (isHardwareColorYellow || (!isInputFocused && isYellow)) {
+                    e.preventDefault();
+                    clearSearchInputAndRefresh();
+                    return;
+                }
                 if (isImeDone && searchInput) {
                     e.preventDefault();
                     searchInput.blur();
+                    if (searchInput.value.trim()) {
+                        saveRecentSearch(searchInput.value);
+                    }
                     performSearch(searchInput.value);
                     if (searchResults.length > 0) {
                         searchFocusArea = 'results';
-                        searchInput.classList.remove('focused');
+                        updateSearchScopeTabsUI();
                         renderSearchResults();
                     }
                     return;
                 }
-                if (searchFocusArea === 'input' && !isDown && !isEnter) {
+                if (searchFocusArea === 'input' && !isUp && !isDown && !isEnter) {
+                    if ((isRight || isLeft) && (!searchInput || !searchInput.value || document.activeElement !== searchInput)) {
+                        if (isRight && btnSearchClearEl) {
+                            e.preventDefault();
+                            if (searchInput) {
+                                searchInput.blur();
+                            }
+                            searchFocusArea = 'clear';
+                            updateSearchScopeTabsUI();
+                            return;
+                        }
+                    }
                     if (searchDebounce) {
                         clearTimeout(searchDebounce);
                     }
                     searchDebounce = setTimeout(function() {
                         performSearch(searchInput ? searchInput.value : '');
-                    }, 260);
+                    }, 220);
                     return;
                 }
                 e.preventDefault();
+                if (searchFocusArea === 'tabs') {
+                    if (isLeft && searchScopeTabs.length > 0) {
+                        cycleSearchScopeTab(-1);
+                    } else if (isRight && searchScopeTabs.length > 0) {
+                        cycleSearchScopeTab(1);
+                    } else if (isDown || isEnter) {
+                        searchFocusArea = 'input';
+                        updateSearchScopeTabsUI();
+                        if (searchInput && typeof searchInput.focus === 'function') {
+                            searchInput.focus();
+                        }
+                    }
+                    return;
+                }
+                if (searchFocusArea === 'clear') {
+                    if (isLeft) {
+                        searchFocusArea = 'input';
+                        updateSearchScopeTabsUI();
+                        if (searchInput && typeof searchInput.focus === 'function') {
+                            searchInput.focus();
+                        }
+                    } else if (isUp && searchScopeTabs.length > 0) {
+                        searchFocusArea = 'tabs';
+                        updateSearchScopeTabsUI();
+                    } else if (isDown && searchResults.length > 0) {
+                        searchFocusArea = 'results';
+                        updateSearchScopeTabsUI();
+                        renderSearchResults();
+                    } else if (isEnter) {
+                        clearSearchInputAndRefresh();
+                    }
+                    return;
+                }
                 if (isDown) {
                     if (searchFocusArea === 'input') {
                         if (searchInput) {
@@ -18025,9 +20751,7 @@
                         }
                         if (searchResults.length > 0) {
                             searchFocusArea = 'results';
-                            if (searchInput) {
-                                searchInput.classList.remove('focused');
-                            }
+                            updateSearchScopeTabsUI();
                             renderSearchResults();
                         }
                     } else if (searchFocusArea === 'results') {
@@ -18041,19 +20765,26 @@
                             renderSearchResults();
                         } else {
                             searchFocusArea = 'input';
-                            if (searchInput) {
-                                searchInput.classList.add('focused');
-                            }
+                            updateSearchScopeTabsUI();
                         }
+                    } else if (searchFocusArea === 'input' && searchScopeTabs.length > 0) {
+                        if (searchInput) {
+                            searchInput.blur();
+                        }
+                        searchFocusArea = 'tabs';
+                        updateSearchScopeTabsUI();
                     }
                 } else if (isEnter) {
                     if (searchFocusArea === 'input' && searchInput) {
                         if (document.activeElement === searchInput) {
                             searchInput.blur();
+                            if (searchInput.value.trim()) {
+                                saveRecentSearch(searchInput.value);
+                            }
                             performSearch(searchInput.value);
                             if (searchResults.length > 0) {
                                 searchFocusArea = 'results';
-                                searchInput.classList.remove('focused');
+                                updateSearchScopeTabsUI();
                                 renderSearchResults();
                             }
                         } else {
@@ -18061,31 +20792,7 @@
                             performSearch(searchInput.value);
                         }
                     } else if (searchFocusArea === 'results' && searchResults[searchIdx]) {
-                        var chosen = searchResults[searchIdx];
-                        closeSearch();
-                        if (chosen.isCategoryResult) {
-                            jumpToCategoryFromSearch(chosen);
-                        } else if (chosen.isEpgProgramResult) {
-                            if (chosen.epgProg && !chosen.epgProg.isNow && !chosen.epgProg.isPast) {
-                                toggleProgramReminder(chosen.channelRef, chosen.epgProg);
-                            } else if (chosen.channelRef) {
-                                if (window._parentalUnlocked || !isAdultContentItem(chosen.channelRef)) {
-                                    setOverlayVisible(false);
-                                }
-                                playItem(chosen.channelRef);
-                                syncLiveChannelCursorOnZap(chosen.channelRef);
-                            }
-                        } else if (chosen.isSeries) {
-                            jumpToSeriesFromSearch(chosen);
-                        } else {
-                            if (window._parentalUnlocked || !isAdultContentItem(chosen)) {
-                                setOverlayVisible(false);
-                            }
-                            playItem(chosen);
-                            if (!chosen.isVod && !chosen.isSeries) {
-                                syncLiveChannelCursorOnZap(chosen);
-                            }
-                        }
+                        activateSearchResultItem(searchResults[searchIdx]);
                     }
                 }
                 return;
@@ -18093,21 +20800,28 @@
             // 4. Filter Modal
             if (filterOpen) {
                 var filterTargetEl = getFocusedModalElement(filterGrid, filterRow, filterCol);
+                var isHardwareFilterYellow = (code === 405 || key === 'ColorF2Yellow');
                 if (isImeDone) {
                     e.preventDefault();
                     if (inpFilterEl) {
                         inpFilterEl.blur();
                     }
                     imeActive = false;
-                    var imeFilterVal = inpFilterEl ? inpFilterEl.value.trim() : '';
-                    if (filterTargetCol === 'cats') {
-                        catFilterText = imeFilterVal;
-                    } else {
-                        itemFilterText = imeFilterVal;
+                    applyLiveFilterValue(inpFilterEl ? inpFilterEl.value : '', true);
+                    return;
+                }
+                if (isHardwareFilterYellow || (!isInputFocused && isYellow)) {
+                    e.preventDefault();
+                    if (inpFilterEl) {
+                        inpFilterEl.value = '';
                     }
-                    closeFilterModal();
-                    applyColumnFilters();
-                    renderUI();
+                    applyLiveFilterValue('', false);
+                    filterRow = 0;
+                    filterCol = 0;
+                    updateFilterFocus();
+                    if (inpFilterEl && typeof inpFilterEl.focus === 'function') {
+                        inpFilterEl.focus();
+                    }
                     return;
                 }
                 if (filterRow === 0 && !isDown && !isUp && !isEnter && !isBack) {
@@ -18115,7 +20829,7 @@
                 }
                 e.preventDefault();
                 if (isBack) {
-                    closeFilterModal();
+                    closeFilterModal(true);
                 } else if (isUp) {
                     if (inpFilterEl) {
                         inpFilterEl.blur();
@@ -18140,24 +20854,12 @@
                     if (filterTargetEl === inpFilterEl && document.activeElement !== inpFilterEl) {
                         inpFilterEl.focus();
                     } else if (filterTargetEl === inpFilterEl || filterTargetEl === btnFilterApplyEl) {
-                        var val = inpFilterEl ? inpFilterEl.value.trim() : '';
-                        if (filterTargetCol === 'cats') {
-                            catFilterText = val;
-                        } else {
-                            itemFilterText = val;
-                        }
-                        closeFilterModal();
-                        applyColumnFilters();
-                        renderUI();
+                        applyLiveFilterValue(inpFilterEl ? inpFilterEl.value : '', true);
                     } else if (filterTargetEl === btnFilterClearEl) {
-                        if (filterTargetCol === 'cats') {
-                            catFilterText = '';
-                        } else {
-                            itemFilterText = '';
+                        if (inpFilterEl) {
+                            inpFilterEl.value = '';
                         }
-                        closeFilterModal();
-                        applyColumnFilters();
-                        renderUI();
+                        applyLiveFilterValue('', true);
                     }
                 }
                 return;
@@ -18175,14 +20877,14 @@
                 } else if (isDown && tracksModalItems.length > 0) {
                     tracksModalIdx = (tracksModalIdx + 1) % tracksModalItems.length;
                     renderTracksModalList();
-                } else if (isLeft) {
+                } else if (isLeft && tracksModalMode !== 'quality') {
                     if (curTrackRow && (curTrackRow.kind === 'delay' || curTrackRow.kind === 'delay_reset')) {
                         adjustSubtitleDelay(-250);
                         refreshTracksDelayLabels();
                     } else {
                         cycleSubtitleColor();
                     }
-                } else if (isRight) {
+                } else if (isRight && tracksModalMode !== 'quality') {
                     if (curTrackRow && (curTrackRow.kind === 'delay' || curTrackRow.kind === 'delay_reset')) {
                         adjustSubtitleDelay(250);
                         refreshTracksDelayLabels();
@@ -18201,18 +20903,22 @@
                 var activeZapList = getLiveZapList();
                 if (isBack) {
                     closeMiniZapDrawer();
+                } else if (isYellow) {
+                    toggleMiniZapFavOnlyMode();
                 } else if (isGuide || isLeft || isRight) {
                     closeMiniZapDrawer();
                     setOverlayVisible(true);
                 } else if ((isUp || isChUp) && activeZapList.length > 0) {
                     miniZapIdx = (miniZapIdx - 1 + activeZapList.length) % activeZapList.length;
                     renderMiniZapList();
+                    queueMiniZapVisibleEpg(activeZapList, miniZapIdx);
                 } else if ((isDown || isChDown) && activeZapList.length > 0) {
                     miniZapIdx = (miniZapIdx + 1) % activeZapList.length;
                     renderMiniZapList();
+                    queueMiniZapVisibleEpg(activeZapList, miniZapIdx);
                 } else if (isEnter && activeZapList[miniZapIdx]) {
                     var selectedZapCh = activeZapList[miniZapIdx];
-                    if (activeZapList === currentItems) {
+                    if (!miniZapFavOnly && activeZapList === currentItems) {
                         itemIdx = miniZapIdx;
                         renderItems();
                     }
@@ -18306,10 +21012,10 @@
                     scrubVodByOffset(600000);
                 } else if (isChDown && (isPlayingVod || isPlayingCatchup)) {
                     scrubVodByOffset(-600000);
-                } else if ((isUp || isChUp) && !isPlayingVod && !isPlayingCatchup) {
-                    stepFullscreenLiveChannel(-1);
-                } else if ((isDown || isChDown) && !isPlayingVod && !isPlayingCatchup) {
+                } else if ((isUp || isChUp || isMediaNext) && !isPlayingVod && !isPlayingCatchup) {
                     stepFullscreenLiveChannel(1);
+                } else if ((isDown || isChDown || isMediaPrev) && !isPlayingVod && !isPlayingCatchup) {
+                    stepFullscreenLiveChannel(-1);
                 } else if (isRed) {
                     cycleAudioTrack();
                 } else if (isGreen) {
@@ -18346,11 +21052,7 @@
                 return;
             }
             if (isRed) {
-                var sorts = ['added', 'title_asc', 'title_desc'];
-                currentSort = sorts[(sorts.indexOf(currentSort) + 1) % sorts.length];
-                showToast('⇅ Sort: ' + currentSort.replace('title_', '').toUpperCase());
-                applyColumnFilters();
-                renderUI();
+                cycleCurrentSortMode();
                 return;
             }
             if (isGreen) {
@@ -18590,6 +21292,9 @@
                         }
                     } else {
                         wakeLocalService().then(function() {
+                            if (api && typeof api.refreshStaleXmltvIfNeeded === 'function') {
+                                api.refreshStaleXmltvIfNeeded(false);
+                            }
                             if (!currentPlayingItem || activePlaybackBackend !== 'shaka' || !shakaVideoEl) {
                                 return;
                             }
@@ -18602,6 +21307,11 @@
                     return;
                 }
                 if (typeof webapis === 'undefined' || !webapis.avplay) {
+                    if (!document.hidden && api && typeof api.refreshStaleXmltvIfNeeded === 'function') {
+                        wakeLocalService().then(function() {
+                            api.refreshStaleXmltvIfNeeded(false);
+                        });
+                    }
                     return;
                 }
                 if (document.hidden) {
@@ -18618,6 +21328,9 @@
                     }
                 } else {
                     wakeLocalService().then(function() {
+                        if (api && typeof api.refreshStaleXmltvIfNeeded === 'function') {
+                            api.refreshStaleXmltvIfNeeded(false);
+                        }
                         if (!currentPlayingItem) {
                             return;
                         }
@@ -18635,6 +21348,64 @@
             } catch (ex) {}
         });
     }
+    function cycleCurrentSortMode() {
+        var curModeId = getActiveContentModeId();
+        var sorts = getAvailableSortModesForMode(curModeId);
+        var curPos = sorts.indexOf(currentSort);
+        currentSort = sorts[(curPos + 1) % sorts.length];
+        showToast('⇅ Sort: ' + formatSortModeLabel(currentSort));
+        var curCat = currentCats[catIdx];
+        var shouldReloadCatalog = (curModeId === 'vod' || curModeId === 'series') &&
+            seriesStack.length === 0 &&
+            curCat && curCat.id !== 'cont' && curCat.id !== 'fav' && curCat.id !== 'rec';
+        if (shouldReloadCatalog) {
+            applyColumnFilters();
+            selectCategory(catIdx, true);
+        } else {
+            applyColumnFilters();
+            renderUI();
+        }
+    }
+    function refreshUiAfterXmltvUpdate() {
+        if (currentPlayingItem && !isPlayingVod && !isPlayingCatchup) {
+            var curEpg = (typeof getCachedOrXmltvShortEpgSync === 'function') ? getCachedOrXmltvShortEpgSync(currentPlayingItem) : null;
+            if (curEpg && curEpg.length > 0) {
+                var parsedCur = parseShortEpgNowNext(curEpg);
+                if (epgNow && parsedCur.now && parsedCur.now !== 'No EPG Available') {
+                    epgNow.textContent = parsedCur.now;
+                }
+                if (epgNext && parsedCur.next) {
+                    epgNext.textContent = parsedCur.next;
+                }
+                updateOsdEpgProgressBar();
+            }
+        }
+        if (uiVisible && getActiveContentModeId() === 'live') {
+            if (itemsListEl) {
+                itemsListEl._forceRebuild = true;
+            }
+            renderItems();
+            updatePreviewPanel();
+        }
+        if (miniZapOpen && miniZapListEl) {
+            miniZapListEl._forceRebuild = true;
+            renderMiniZapList();
+        }
+        if (searchOpen && searchInput && searchInput.value.trim()) {
+            performSearch(searchInput.value);
+        }
+    }
+    function startXmltvAutoRefreshLoop() {
+        if (xmltvAutoRefreshTimer) {
+            clearInterval(xmltvAutoRefreshTimer);
+            xmltvAutoRefreshTimer = null;
+        }
+        xmltvAutoRefreshTimer = setInterval(function() {
+            if (api && typeof api.refreshStaleXmltvIfNeeded === 'function') {
+                api.refreshStaleXmltvIfNeeded(false);
+            }
+        }, XMLTV_CHECK_INTERVAL_MS);
+    }
     function updateClock() {
         if (!clockDisplayEl) {
             return;
@@ -18647,6 +21418,7 @@
     function initApp() {
         discoverHardwareTvLanIp();
         loadProfiles();
+        restoreSavedExternalSubtitle();
         applyTheme(localStorage.getItem('cfg_theme') || 'blue');
         updateClock();
         setInterval(updateClock, 15000);
@@ -18655,6 +21427,7 @@
             clearInterval(reminderCheckTimer);
         }
         reminderCheckTimer = setInterval(checkScheduledReminders, 15000);
+        startXmltvAutoRefreshLoop();
         setupKeyListeners();
         setupMouseListeners();
         registerLifecycleHandlers();
@@ -18671,7 +21444,21 @@
             unwrapDashProxyUrl: unwrapDashProxyUrl,
             isTransientShakaBlip: isTransientShakaBlip,
             computeSafeAbrCeiling: computeSafeAbrCeiling,
-            selectShakaVideoQuality: selectShakaVideoQuality
+            isDashPlaylistItem: isDashPlaylistItem,
+            pickBestShakaVariantForHeight: pickBestShakaVariantForHeight,
+            selectShakaVideoQuality: selectShakaVideoQuality,
+            parseExternalSubtitleCues: parseExternalSubtitleCues,
+            matchTrackIndexByLanguage: matchTrackIndexByLanguage,
+            resolveEffectivePortalHeaders: resolveEffectivePortalHeaders,
+            searchEpgCatalog: searchEpgCatalog,
+            scoreSearchTextMatch: scoreSearchTextMatch,
+            filterAndPaginateLocalList: filterAndPaginateLocalList,
+            compareItemsByRating: compareItemsByRating,
+            compareItemsByYear: compareItemsByYear,
+            getAvailableSortModesForMode: getAvailableSortModesForMode,
+            formatSortModeLabel: formatSortModeLabel,
+            filterColumnEntries: filterColumnEntries,
+            applyRestoredBackupData: applyRestoredBackupData
         };
         window.__tizenIptvApp = {
             version: '2.2.0',
@@ -18681,10 +21468,36 @@
             closeTrailerModal: closeTrailerModal,
             openSettings: openSettings,
             closeSettings: closeSettings,
+            openSearch: openSearch,
+            closeSearch: closeSearch,
+            performSearch: performSearch,
+            openFilterModal: openFilterModal,
+            closeFilterModal: closeFilterModal,
+            openMiniZapDrawer: openMiniZapDrawer,
+            closeMiniZapDrawer: closeMiniZapDrawer,
+            toggleMiniZapFavOnlyMode: toggleMiniZapFavOnlyMode,
             cycleActivePortalProfile: cycleActivePortalProfile,
             discoverHardwareTvLanIp: discoverHardwareTvLanIp,
             generateQrSvgVersion2: generateQrSvgVersion2,
             renderProfileAvatarSvg: renderProfileAvatarSvg,
+            parseM3uPlaylistCatalog: parseM3uPlaylistCatalog,
+            splitXmltvUrlList: splitXmltvUrlList,
+            parseXmltvDateSec: parseXmltvDateSec,
+            normalizeXmltvLookupKey: normalizeXmltvLookupKey,
+            parseXmltvDocument: parseXmltvDocument,
+            lookupXmltvChannelPrograms: lookupXmltvChannelPrograms,
+            parseShortEpgNowNext: parseShortEpgNowNext,
+            stepFullscreenLiveChannel: stepFullscreenLiveChannel,
+            getPlaybackDebugState: function() {
+                return {
+                    uiVisible: uiVisible,
+                    itemIdx: itemIdx,
+                    pendingZapIdx: pendingZapIdx,
+                    currentPlayingId: currentPlayingItem ? String(currentPlayingItem.id) : '',
+                    currentPlayingName: currentPlayingItem ? String(currentPlayingItem.name) : '',
+                    currentPlayingNum: currentPlayingItem ? currentPlayingItem.num : null
+                };
+            },
             triggerSimulatedRebufferBurst: function() {
                 if (typeof webapis !== 'undefined' && webapis.avplay && webapis.avplay._listener && webapis.avplay._listener.onbufferingstart) {
                     webapis.avplay._listener.onbufferingstart();
@@ -18704,7 +21517,10 @@
         var activeProf = getActiveProfile();
         if (!isProfileConfigured(activeProf)) {
             openSettings();
-            wakeLocalService();
+            wakeLocalService().then(function() {
+                syncBackupToProxyNow();
+                syncScheduledDvrList();
+            });
             return;
         }
         startupModePref = getEffectiveStartupMode();
@@ -18713,11 +21529,16 @@
             // Do NOT load channels on the Profile Picker screen!
             // Channels will load once when the user selects a profile.
             openProfilePickerModal();
-            wakeLocalService();
+            wakeLocalService().then(function() {
+                syncBackupToProxyNow();
+                syncScheduledDvrList();
+            });
             return;
         }
         switchMode(0);
         wakeLocalService().then(function() {
+            syncBackupToProxyNow();
+            syncScheduledDvrList();
             return api.boot();
         }).then(function() {
             var isLiveView = (modes[modeIdx] && modes[modeIdx].id === 'live') ||
