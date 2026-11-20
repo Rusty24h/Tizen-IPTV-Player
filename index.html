@@ -156,9 +156,30 @@
                             </div>
 
                             <div class="settings-card">
-                                <div class="settings-section-title">EXTERNAL XMLTV GUIDE</div>
+                                <div class="settings-section-title">EXTERNAL XMLTV &amp; STREAM HEADERS</div>
                                 <label for="inp-epg-url" style="margin-top:0;">Custom XMLTV EPG URL (Optional — Auto-Detected by Default)</label>
                                 <input id="inp-epg-url" type="text" placeholder="http://example.com/epg.xml or .xml.gz" />
+                                <div class="modal-row modal-row-compact" style="margin-top:6px;">
+                                    <div style="flex:0.85;">
+                                        <label for="sel-ua-preset">User-Agent Preset</label>
+                                        <select id="sel-ua-preset">
+                                            <option value="default">Default (Auto)</option>
+                                            <option value="vlc">VLC/3.0.20</option>
+                                            <option value="tivimate">TiviMate/4.7.0</option>
+                                            <option value="chrome">Chrome Desktop</option>
+                                            <option value="tizen">Samsung Tizen TV</option>
+                                            <option value="custom">Custom...</option>
+                                        </select>
+                                    </div>
+                                    <div style="flex:1.15;">
+                                        <label for="inp-profile-ua">Custom User-Agent</label>
+                                        <input id="inp-profile-ua" type="text" placeholder="Auto (VLC / MAG STB)" />
+                                    </div>
+                                    <div style="flex:1;">
+                                        <label for="inp-profile-referer">HTTP Referer</label>
+                                        <input id="inp-profile-referer" type="text" placeholder="https://portal.example/" />
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -176,6 +197,7 @@
                                             <option value="green">Emerald Green</option>
                                             <option value="red">Crimson Red</option>
                                             <option value="amber">Gold Amber</option>
+                                            <option value="rose">Rose Quartz</option>
                                         </select>
                                     </div>
                                     <div>
@@ -229,6 +251,41 @@
                                         </select>
                                     </div>
                                 </div>
+                                <div class="modal-row modal-row-compact" style="margin-top:6px;">
+                                    <div>
+                                        <label for="sel-pref-audio-lang">Preferred Audio Language</label>
+                                        <select id="sel-pref-audio-lang">
+                                            <option value="">Default (Stream Order)</option>
+                                            <option value="eng">English (EN)</option>
+                                            <option value="ara">Arabic (AR)</option>
+                                            <option value="spa">Spanish (ES)</option>
+                                            <option value="fre">French (FR)</option>
+                                            <option value="ger">German (DE)</option>
+                                            <option value="tur">Turkish (TR)</option>
+                                            <option value="por">Portuguese (PT)</option>
+                                            <option value="ita">Italian (IT)</option>
+                                            <option value="rus">Russian (RU)</option>
+                                            <option value="hin">Hindi (HI)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label for="sel-pref-sub-lang">Preferred Subtitle Language</label>
+                                        <select id="sel-pref-sub-lang">
+                                            <option value="off">Subtitles Off by Default</option>
+                                            <option value="">Stream Default</option>
+                                            <option value="eng">English (EN)</option>
+                                            <option value="ara">Arabic (AR)</option>
+                                            <option value="spa">Spanish (ES)</option>
+                                            <option value="fre">French (FR)</option>
+                                            <option value="ger">German (DE)</option>
+                                            <option value="tur">Turkish (TR)</option>
+                                            <option value="por">Portuguese (PT)</option>
+                                            <option value="ita">Italian (IT)</option>
+                                            <option value="rus">Russian (RU)</option>
+                                            <option value="hin">Hindi (HI)</option>
+                                        </select>
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="settings-card settings-actions-card">
@@ -261,7 +318,7 @@
                                 <span class="lan-setup-step-tag">Instant Push &amp; Backup</span>
                             </div>
                             <div class="lan-setup-copy">
-                                <span>Open the Setup URL below on any phone or PC on your Wi-Fi — or scan the QR code — to push Portal URLs, M3U playlists, or full backups directly to your TV.</span>
+                                <span>Open the Setup URL below on any phone or PC on your Wi-Fi — or scan the QR code — to push Portal URLs, M3U playlists, .SRT/.VTT subtitles, or full backups directly to your TV.</span>
                             </div>
                             <div class="lan-url-box">
                                 <span class="lan-url-label">SETUP URL</span>
@@ -310,7 +367,7 @@
             <span id="mini-zap-sub">LIVE</span>
         </div>
         <div id="mini-zap-list" class="col-list"></div>
-        <div id="mini-zap-footer">UP/DOWN: Select &bull; OK: Switch Channel &bull; GUIDE: Full 4-Col Guide &bull; BACK: Close</div>
+        <div id="mini-zap-footer">UP/DOWN: Select &bull; OK: Switch &bull; YELLOW: Favs &bull; GUIDE: Guide &bull; BACK: Close</div>
     </div>
 
     <!-- Interactive Audio & Subtitle Track Picker Modal -->
@@ -364,24 +421,38 @@
 
     <!-- Global Search Modal -->
     <div id="search-modal" class="modal">
-        <div class="modal-box">
+        <div class="modal-box search-modal-box">
             <h2>Global Search (Live, EPG Programs, Movies &amp; Series)</h2>
+            <div id="search-scope-bar" class="search-scope-bar">
+                <div class="search-scope-tab active" data-scope="all">All</div>
+                <div class="search-scope-tab" data-scope="epg">📅 EPG Programs</div>
+                <div class="search-scope-tab" data-scope="live">📺 Live TV</div>
+                <div class="search-scope-tab" data-scope="vod">🎬 Movies</div>
+                <div class="search-scope-tab" data-scope="series">📁 Series</div>
+            </div>
             <label for="inp-search">Search Keyword</label>
-            <input id="inp-search" type="text" placeholder="Type channel, EPG show, movie or series title..." />
+            <div class="search-input-row">
+                <input id="inp-search" type="text" placeholder="Type channel, EPG show, actor, year, movie or series..." />
+                <div id="btn-search-clear" class="btn search-clear-btn" title="Clear Search (YELLOW)">✕ Clear</div>
+            </div>
+            <div id="search-status-bar" class="search-status-bar">Recent Searches &bull; Type to search Live, EPG, Movies &amp; Series</div>
             <div id="search-results" class="col-list"></div>
+            <div id="search-modal-hint" class="search-modal-hint">UP/DOWN: Tabs / Input / Results &bull; RED: Switch Scope &bull; YELLOW: Clear &bull; OK: Open / Play &bull; BACK: Close</div>
         </div>
     </div>
 
     <!-- Column Filter Modal -->
     <div id="filter-modal" class="modal">
-        <div class="modal-box">
+        <div class="modal-box filter-modal-box">
             <h2 id="filter-modal-title">Filter List</h2>
-            <label for="inp-filter">Filter Keyword</label>
-            <input id="inp-filter" type="text" placeholder="Type keyword to filter current column..." />
+            <label for="inp-filter">Filter Keyword (Live Multi-Word Match)</label>
+            <input id="inp-filter" type="text" placeholder="Type keyword(s) to filter current column..." />
+            <div id="filter-status-msg" class="search-status-bar">Type to filter live &bull; Supports multi-word matching</div>
             <div class="btn-row">
-                <div id="btn-filter-apply" class="btn">Apply Filter</div>
-                <div id="btn-filter-clear" class="btn">Clear Filter</div>
+                <div id="btn-filter-apply" class="btn">✓ Done / Keep</div>
+                <div id="btn-filter-clear" class="btn">✕ Clear [YELLOW]</div>
             </div>
+            <div id="filter-modal-hint" class="search-modal-hint">Type: Live Filter &bull; UP/DOWN: Actions &bull; YELLOW: Clear &bull; OK: Confirm &bull; BACK: Cancel</div>
         </div>
     </div>
 
@@ -391,6 +462,7 @@
             <div class="epg-modal-header-row">
                 <h2 id="epg-modal-title" style="margin-bottom:0;">Channel EPG Guide</h2>
                 <div class="epg-header-actions">
+                    <div id="btn-epg-rec" class="epg-view-toggle-btn epg-rec-btn" style="margin-right:10px;">● Schedule Rec [RED]</div>
                     <div id="btn-epg-offset" class="epg-view-toggle-btn" style="margin-right:10px;">🕒 Offset: 0h [YELLOW]</div>
                     <div id="btn-epg-view-toggle" class="epg-view-toggle-btn">📅 Switch to 2D Multi-Channel Grid [GREEN]</div>
                 </div>
@@ -400,8 +472,8 @@
                 <div id="epg-modal-info">
                     <div id="epg-modal-prog-title">Select a program</div>
                     <div id="epg-modal-prog-time"></div>
-                    <div id="epg-modal-desc">Program details, Catch-Up archive, and Scheduled Reminders appear here.</div>
-                    <div id="epg-modal-hint">UP/DOWN: Select &bull; OK: Watch / Catch-Up / ⏰ Remind &bull; YELLOW: EPG Offset &bull; GREEN: 2D Grid &bull; BACK: Close</div>
+                    <div id="epg-modal-desc">Program details, Catch-Up archive, Scheduled Recordings, and Reminders appear here.</div>
+                    <div id="epg-modal-hint">UP/DOWN: Select &bull; OK: Watch / Catch-Up / ⏰ Remind &bull; RED: Schedule Rec &bull; YELLOW: Offset &bull; GREEN: 2D Grid &bull; BACK: Close</div>
                 </div>
             </div>
             <div id="epg-grid-container" class="epg-grid-container">
@@ -409,7 +481,7 @@
                 <div id="epg-grid-rows" class="epg-grid-rows"></div>
                 <div id="epg-grid-footer" class="epg-grid-footer">
                     <div id="epg-grid-sel-title" class="epg-grid-sel-title">Select a channel &amp; time slot</div>
-                    <div id="epg-grid-sel-desc" class="epg-grid-sel-desc">UP/DOWN: Channel &bull; LEFT/RIGHT: Time Slot &bull; OK: Watch / Catch-Up / ⏰ Remind &bull; YELLOW: EPG Offset &bull; GREEN: List View</div>
+                    <div id="epg-grid-sel-desc" class="epg-grid-sel-desc">UP/DOWN: Channel &bull; LEFT/RIGHT: Time Slot &bull; OK: Watch / Catch-Up / ⏰ Remind &bull; RED: Schedule Rec &bull; YELLOW: Offset &bull; GREEN: List View</div>
                 </div>
             </div>
         </div>
